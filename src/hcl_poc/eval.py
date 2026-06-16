@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
+import mani_skill  # noqa: F401
 import numpy as np
 import torch
 from rich.console import Console
@@ -33,7 +34,10 @@ def _flatten_obs(obs: Any) -> dict[str, np.ndarray]:
                 visit(f"{prefix}/{key}" if prefix else str(key), value)
         else:
             try:
-                out[prefix] = np.asarray(node)
+                if isinstance(node, torch.Tensor):
+                    out[prefix] = node.detach().cpu().numpy()
+                else:
+                    out[prefix] = np.asarray(node)
             except Exception:
                 pass
 
@@ -85,7 +89,7 @@ def encode_obs(
 
 def _load_encoder(config: Config, n_traj: int, seed: int, device: torch.device) -> tuple[ObservationEncoder, Standardizer]:
     ckpt_path = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt"
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(device)
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
@@ -93,7 +97,7 @@ def _load_encoder(config: Config, n_traj: int, seed: int, device: torch.device) 
 
 
 def _load_flow(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     model = FlowModel(ckpt["sample_dim"], ckpt["cond_dim"], ckpt["hidden_dim"]).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -192,4 +196,3 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
     write_json(out_path, payload)
     console.print(payload)
     return out_path
-

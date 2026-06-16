@@ -9,16 +9,16 @@ paths:
   data_dir: data
   raw_demo_dir: data/raw
   prepared_path: data/prepared/pusht_dino_proprio.h5
-  artifact_dir: artifacts
-  results_dir: results
+  artifact_dir: artifacts/smoke
+  results_dir: results/smoke
 
 data:
   max_trajectories: 200
   replay_count: 240
   replay_num_envs: 8
-  train_trajectories: [50, 100, 200]
-  eval_episodes: 50
-  eval_seed: 10000
+  train_trajectories: [2]
+  eval_episodes: 1
+  eval_seed: 12000
   batch_size_features: 32
 
 dino:
@@ -26,24 +26,25 @@ dino:
   batch_size: 32
 
 representation:
-  latent_dim: 64
-  hidden_dim: 256
-  batch_size: 512
-  epochs: 30
+  latent_dim: 16
+  hidden_dim: 64
+  batch_size: 64
+  epochs: 2
   lr: 0.0003
   sigreg_weight: 0.05
-  horizons_steps: [1, 2, 5, 10, 20, 40, 80]
+  horizons_steps: [1, 2, 5]
 
 policy:
-  action_chunk_steps: 8
-  flow_steps: 12
-  hidden_dim: 512
-  batch_size: 512
-  epochs: 25
+  action_chunk_steps: 4
+  flow_steps: 2
+  hidden_dim: 64
+  batch_size: 64
+  epochs: 2
   lr: 0.0003
-  high_level_horizons_s: [0.25, 1.0, 4.0]
+  high_level_horizons_s: [0.25]
   high_level_refresh_fraction: 0.25
 
 sweep:
   profile: staged
   seeds: [0]
+

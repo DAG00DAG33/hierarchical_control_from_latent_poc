@@ -73,9 +73,13 @@ class FlowActionDataset(Dataset):
         length: int = 200_000,
         goal_horizon: int | None = None,
     ) -> None:
-        self.episodes = episodes
-        self.latents = latents
-        self.actions = [action_norm.transform(ep.actions) for ep in episodes]
+        min_future = chunk if goal_horizon is None else max(chunk, goal_horizon)
+        keep = [idx for idx, ep in enumerate(episodes) if ep.length > min_future]
+        if not keep:
+            raise ValueError(f"No episodes longer than required horizon {min_future}")
+        self.episodes = [episodes[idx] for idx in keep]
+        self.latents = [latents[idx] for idx in keep]
+        self.actions = [action_norm.transform(episodes[idx].actions) for idx in keep]
         self.chunk = chunk
         self.length = length
         self.goal_horizon = goal_horizon
@@ -105,8 +109,11 @@ class FlowLatentDataset(Dataset):
         horizon: int,
         length: int = 200_000,
     ) -> None:
-        self.episodes = episodes
-        self.latents = latents
+        keep = [idx for idx, ep in enumerate(episodes) if ep.length > horizon]
+        if not keep:
+            raise ValueError(f"No episodes longer than high-level horizon {horizon}")
+        self.episodes = [episodes[idx] for idx in keep]
+        self.latents = [latents[idx] for idx in keep]
         self.horizon = horizon
         self.length = length
 
@@ -202,7 +209,11 @@ def train_representation(config: Config, n_traj: int, seed: int) -> Path:
 @torch.inference_mode()
 def encode_latents(config: Config, n_traj: int, seed: int) -> tuple[list[Episode], list[np.ndarray], dict]:
     device = default_device()
-    ckpt = torch.load(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt", map_location=device)
+    ckpt = torch.load(
+        Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt",
+        map_location=device,
+        weights_only=False,
+    )
     encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(device)
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
@@ -242,19 +253,37 @@ def train_flow_policy(
     hidden_dim = int(config.get("policy.hidden_dim"))
 
     if kind == "flat":
-        dataset = FlowActionDataset(episodes, latents, action_norm, chunk)
+        dataset = FlowActionDataset(
+            episodes,
+            latents,
+            action_norm,
+            chunk,
+            length=max(10_000, n_traj * 1000),
+        )
         sample_dim = chunk * episodes[0].actions.shape[-1]
         cond_dim = latent_dim
     elif kind == "low":
         if horizon_steps is None:
             raise ValueError("Low-level training requires horizon_steps")
-        dataset = FlowActionDataset(episodes, latents, action_norm, chunk, goal_horizon=horizon_steps)
+        dataset = FlowActionDataset(
+            episodes,
+            latents,
+            action_norm,
+            chunk,
+            length=max(10_000, n_traj * 1000),
+            goal_horizon=horizon_steps,
+        )
         sample_dim = chunk * episodes[0].actions.shape[-1]
         cond_dim = 2 * latent_dim
     elif kind == "high":
         if horizon_steps is None:
             raise ValueError("High-level training requires horizon_steps")
-        dataset = FlowLatentDataset(episodes, latents, horizon_steps)
+        dataset = FlowLatentDataset(
+            episodes,
+            latents,
+            horizon_steps,
+            length=max(10_000, n_traj * 1000),
+        )
         sample_dim = latent_dim
         cond_dim = latent_dim
     else:
@@ -296,4 +325,3 @@ def train_flow_policy(
     )
     write_json(artifact_dir / f"{name}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
     return ckpt_path
-
