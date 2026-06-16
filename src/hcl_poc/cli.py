@@ -17,6 +17,10 @@ from hcl_poc.train import train_flow_policy, train_representation
 console = Console()
 
 
+def add_config_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", default="configs/pusht.yaml")
+
+
 def doctor(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     console.print(f"Python: {sys.version.split()[0]}")
@@ -103,15 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("doctor")
+    add_config_arg(p)
     p.set_defaults(func=doctor)
 
     p = sub.add_parser("data")
     data_sub = p.add_subparsers(dest="data_command", required=True)
     pp = data_sub.add_parser("prepare")
+    add_config_arg(pp)
     pp.add_argument("--force", action="store_true")
     pp.set_defaults(func=data_cmd)
 
     p = sub.add_parser("train")
+    add_config_arg(p)
     p.add_argument("kind", choices=["encoder", "flat", "high", "low"])
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
@@ -119,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=train_cmd)
 
     p = sub.add_parser("eval")
+    add_config_arg(p)
     p.add_argument("method", choices=["flat", "hier"])
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
@@ -126,10 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=eval_cmd)
 
     p = sub.add_parser("run-sweep")
+    add_config_arg(p)
     p.add_argument("--profile", choices=["staged", "full"], default="staged")
     p.set_defaults(func=run_sweep)
 
     p = sub.add_parser("report")
+    add_config_arg(p)
     p.set_defaults(func=report_cmd)
 
     p = sub.add_parser("commit")
@@ -146,4 +156,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -13,7 +13,9 @@ paths:
   results_dir: results
 
 data:
-  max_trajectories: 206
+  max_trajectories: 200
+  replay_count: 240
+  replay_num_envs: 8
   train_trajectories: [50, 100, 200]
   eval_episodes: 50
   eval_seed: 10000
@@ -45,4 +47,3 @@ policy:
 sweep:
   profile: staged
   seeds: [0]
-

@@ -42,11 +42,65 @@ def find_h5_candidates(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.h5") if "trajectory" in p.name.lower() or "demo" in p.name.lower())
 
 
+def _prefer_raw_source(candidates: list[Path], control_mode: str) -> Path:
+    scored: list[tuple[int, Path]] = []
+    for path in candidates:
+        name = path.name.lower()
+        score = 0
+        if ".none." in name:
+            score -= 10
+        if control_mode.lower() in name:
+            score -= 5
+        if "rgb" in name:
+            score += 20
+        scored.append((score, path))
+    return sorted(scored)[0][1]
+
+
+def _find_replayed_h5(source_h5: Path, control_mode: str, before_mtime: float) -> Path:
+    candidates = []
+    for path in source_h5.parent.glob("*.h5"):
+        name = path.name.lower()
+        if path == source_h5:
+            continue
+        if path.stat().st_mtime < before_mtime:
+            continue
+        if "rgb" in name and control_mode.lower() in name:
+            candidates.append(path)
+    if not candidates:
+        all_files = "\n".join(str(p) for p in sorted(source_h5.parent.glob("*.h5")))
+        raise FileNotFoundError(f"Replay did not produce an RGB HDF5 file. Files now present:\n{all_files}")
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _trajectory_group_count(path: Path) -> int:
+    try:
+        with h5py.File(path, "r") as h5:
+            return len([k for k in h5.keys() if k.startswith("traj_") or k.startswith("episode_")])
+    except OSError:
+        return 0
+
+
+def _prepared_episode_count(path: Path) -> int:
+    try:
+        with h5py.File(path, "r") as h5:
+            return len([k for k in h5.keys() if k.startswith("episode_")])
+    except OSError:
+        return 0
+
+
 def replay_demo(config: Config, source_h5: Path) -> Path:
-    raw_dir = ensure_dir(config.path_value("paths.raw_demo_dir"))
-    out_path = raw_dir / "pusht_rgb_state_pd_ee_delta_pos.h5"
-    if out_path.exists():
-        return out_path
+    control_mode = str(config.get("control_mode"))
+    required_count = int(config.get("data.max_trajectories", 206))
+    existing = [
+        p
+        for p in source_h5.parent.glob("*.h5")
+        if "rgb" in p.name.lower() and control_mode.lower() in p.name.lower()
+        and _trajectory_group_count(p) >= required_count
+    ]
+    if existing:
+        return max(existing, key=lambda p: p.stat().st_mtime)
+    before_mtime = max((p.stat().st_mtime for p in source_h5.parent.glob("*.h5")), default=0.0)
     cmd = [
         sys.executable,
         "-m",
@@ -57,14 +111,21 @@ def replay_demo(config: Config, source_h5: Path) -> Path:
         "--obs-mode",
         str(config.get("obs_mode")),
         "--target-control-mode",
-        str(config.get("control_mode")),
+        control_mode,
+        "--sim-backend",
+        "physx_cuda",
         "--use-env-states",
-        "--output-name",
-        str(out_path),
+        "--record-rewards",
+        "--reward-mode",
+        "normalized_dense",
+        "--count",
+        str(int(config.get("data.replay_count", config.get("data.max_trajectories", 200)))),
+        "--num-envs",
+        str(int(config.get("data.replay_num_envs", 1))),
     ]
     console.print(f"[bold]Replaying demos:[/bold] {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
-    return out_path
+    return _find_replayed_h5(source_h5, control_mode, before_mtime)
 
 
 def _pick_rgb(datasets: dict[str, h5py.Dataset]) -> h5py.Dataset:
@@ -100,9 +161,15 @@ def _extract_raw_episode(group: h5py.Group) -> tuple[np.ndarray, np.ndarray, np.
 
 def prepare_dataset(config: Config, force: bool = False) -> Path:
     out_path = config.path_value("paths.prepared_path")
-    if out_path.exists() and not force:
+    required_count = max(int(n) for n in config.get("data.train_trajectories", [200]))
+    if out_path.exists() and not force and _prepared_episode_count(out_path) >= required_count:
         console.print(f"Prepared dataset already exists: {out_path}")
         return out_path
+    if out_path.exists() and not force:
+        console.print(
+            f"Prepared dataset has {_prepared_episode_count(out_path)} episodes, "
+            f"but {required_count} are required; rebuilding."
+        )
 
     raw_dir = ensure_dir(config.path_value("paths.raw_demo_dir"))
     candidates = find_h5_candidates(raw_dir)
@@ -112,7 +179,7 @@ def prepare_dataset(config: Config, force: bool = False) -> Path:
     if not candidates:
         raise FileNotFoundError(f"No ManiSkill HDF5 demos found under {raw_dir}")
 
-    replayed = replay_demo(config, candidates[0])
+    replayed = replay_demo(config, _prefer_raw_source(candidates, str(config.get("control_mode"))))
     device = default_device()
     extractor = DinoExtractor(config.get("dino.model_name"), device)
     batch_size = int(config.get("dino.batch_size", 32))
@@ -182,4 +249,3 @@ class RandomTupleDataset(torch.utils.data.Dataset):
         ep = self.episodes[np.random.randint(0, len(self.episodes))]
         t = np.random.randint(0, ep.length - min_future)
         return ep, int(t)
-
