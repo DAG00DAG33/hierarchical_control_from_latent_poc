@@ -1,0 +1,48 @@
+seed: 0
+env_id: PushT-v1
+obs_mode: rgb+state_dict
+control_mode: pd_ee_delta_pos
+control_freq: 20
+camera_name: base_camera
+
+paths:
+  data_dir: data
+  raw_demo_dir: data/raw
+  prepared_path: data/prepared/pusht_dino_proprio.h5
+  artifact_dir: artifacts
+  results_dir: results
+
+data:
+  max_trajectories: 206
+  train_trajectories: [50, 100, 200]
+  eval_episodes: 50
+  eval_seed: 10000
+  batch_size_features: 32
+
+dino:
+  model_name: facebook/dinov2-small
+  batch_size: 32
+
+representation:
+  latent_dim: 64
+  hidden_dim: 256
+  batch_size: 512
+  epochs: 60
+  lr: 0.0003
+  sigreg_weight: 0.05
+  horizons_steps: [1, 2, 5, 10, 20, 40, 80]
+
+policy:
+  action_chunk_steps: 8
+  flow_steps: 12
+  hidden_dim: 512
+  batch_size: 512
+  epochs: 80
+  lr: 0.0003
+  high_level_horizons_s: [0.25, 1.0, 4.0]
+  high_level_refresh_fraction: 0.25
+
+sweep:
+  profile: staged
+  seeds: [0]
+
