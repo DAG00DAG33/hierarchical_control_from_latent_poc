@@ -11,4 +11,5 @@ results/**/*.csv
 results/**/*.json
 results/**/*.mp4
 results/videos/
+run_logs/
 !results/.gitkeep

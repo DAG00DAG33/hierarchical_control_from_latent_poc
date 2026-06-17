@@ -187,6 +187,7 @@ Current status on June 17, 2026:
 | flat obs | 2000 | 0.00 | 0.116 | 0.170 |
 | BC obs | 1000 | 0.00 | 0.110 | 0.176 |
 | BC obs | 2000 | 0.02 | 0.137 | 0.197 |
+| BC obs, spatial DINO | 1000 | 0.02 | 0.179 | 0.219 |
 | BC privileged state | 1000 | 0.46 | 0.582 | 0.594 |
 
 The direct-observation result suggests the learned WM latent is not the only
@@ -202,4 +203,7 @@ held-out frames it reached `1.0 cm` x MAE, `1.2 cm` y MAE, and `9.0 deg` yaw
 MAE. This means the CLS token is not blind to the T pose, but the remaining
 error may still be too coarse for contact-rich pushing. Spatial DINO features
 can be enabled with `configs/pusht_spatial.yaml`; they use CLS plus a 4x4
-pooled patch-token grid and write to separate data/artifact/result paths.
+pooled patch-token grid and write to separate data/artifact/result paths. The
+first spatial BC run improved reward but still only reached `0.02` success with
+1000 trajectories, so the current failure is not explained by the CLS token
+being completely pose-blind.
