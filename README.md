@@ -222,7 +222,10 @@ Current status on June 17, 2026:
   reconstruction weight to `1.0` improves the frozen-latent probe to `8.2 mm`
   x MAE, `9.0 mm` y MAE, and `9.2 deg` yaw MAE. This is within about 2x of the
   spatial DINO probe (`3.8 mm`, `4.3 mm`, `4.5 deg`) without adding any direct
-  pose-supervised encoder loss.
+  pose-supervised encoder loss. The matching 512D/512-width model without
+  reconstruction stays at baseline (`3.6 cm`/`4.8 cm`, `28.7 deg`), so latent
+  capacity alone is not enough; the reconstruction term is necessary for this
+  improvement.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |

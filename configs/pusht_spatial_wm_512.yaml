@@ -1,0 +1,90 @@
+seed: 0
+env_id: PushT-v1
+obs_mode: rgb+state_dict
+control_mode: pd_ee_delta_pos
+control_freq: 20
+camera_name: base_camera
+
+paths:
+  data_dir: data
+  raw_demo_dir: data/raw
+  prepared_path: data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5
+  artifact_dir: artifacts/ppo_spatial_wm_512
+  results_dir: results/ppo_spatial_wm_512
+  rl_dir: artifacts/rl_pusht_official
+
+data:
+  source: privileged_ppo
+  max_trajectories: 1000
+  replay_count: 240
+  replay_num_envs: 8
+  train_trajectories: [1000]
+  eval_episodes: 50
+  eval_seed: 10000
+  batch_size_features: 32
+
+rl:
+  sim_backend: auto
+  reconfiguration_freq:
+  eval_reconfiguration_freq: 1
+  collect_reconfiguration_freq: 1
+  total_timesteps: 50000000
+  num_envs: 1024
+  num_steps: 100
+  hidden_dim: 256
+  learning_rate: 0.0003
+  anneal_lr: false
+  gamma: 0.99
+  gae_lambda: 0.9
+  num_minibatches: 32
+  update_epochs: 8
+  clip_coef: 0.2
+  clip_vloss: false
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.1
+  partial_reset: true
+  eval_partial_reset: false
+  save_every_updates: 5
+  target_success: 0.9
+  eval_num_envs: 256
+  eval_episodes: 256
+  eval_seed: 50000
+  collect_seed: 70000
+  collect_min_success: 0.8
+  collect_eval_episodes: 256
+  collect_max_attempts: 4000
+
+dino:
+  model_name: facebook/dinov2-small
+  feature_type: spatial
+  spatial_pool: 4
+  batch_size: 32
+
+representation:
+  latent_dim: 512
+  hidden_dim: 512
+  batch_size: 512
+  epochs: 30
+  lr: 0.0003
+  sigreg_weight: 0.05
+  reconstruction_weight: 0.0
+  horizons_steps: [1, 2, 5]
+
+policy:
+  clip_actions_to_env_space: true
+  action_low: [-1.0, -1.0, -1.0]
+  action_high: [1.0, 1.0, 1.0]
+  action_chunk_steps: 8
+  flow_steps: 12
+  hidden_dim: 512
+  batch_size: 512
+  epochs: 25
+  lr: 0.0003
+  high_level_horizons_s: [0.05, 0.10, 0.25]
+  high_level_refresh_fraction: 0.25
+
+sweep:
+  profile: staged
+  seeds: [0]
