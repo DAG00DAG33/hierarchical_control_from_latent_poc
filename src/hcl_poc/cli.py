@@ -11,7 +11,7 @@ from hcl_poc.config import load_config
 from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps
 from hcl_poc.report import build_report
-from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, train_ppo
+from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.train import train_flow_policy, train_representation
 
 console = Console()
@@ -106,6 +106,8 @@ def rl_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.rl_command == "train":
         train_ppo(config, resume=not args.no_resume)
+    elif args.rl_command == "status":
+        ppo_status(config)
     elif args.rl_command == "eval":
         evaluate_ppo(config, checkpoint=args.checkpoint, episodes=args.episodes)
     elif args.rl_command == "collect":
@@ -147,6 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(rt)
     rt.add_argument("--no-resume", action="store_true")
     rt.set_defaults(func=rl_cmd)
+    rs = rl_sub.add_parser("status")
+    add_config_arg(rs)
+    rs.set_defaults(func=rl_cmd)
     re = rl_sub.add_parser("eval")
     add_config_arg(re)
     re.add_argument("--checkpoint")

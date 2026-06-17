@@ -15,7 +15,7 @@ from tqdm import trange
 
 from hcl_poc.config import Config
 from hcl_poc.features import DinoExtractor, batched
-from hcl_poc.utils import Timer, default_device, ensure_dir, set_seed, write_json
+from hcl_poc.utils import Timer, default_device, ensure_dir, read_json, set_seed, write_json
 
 console = Console()
 
@@ -87,6 +87,24 @@ def _rl_paths(config: Config) -> PPOPaths:
     )
 
 
+def ppo_status(config: Config) -> dict[str, Any]:
+    paths = _rl_paths(config)
+    metrics = read_json(paths.metrics) if paths.metrics.exists() else {}
+    status = {
+        "backend": _rl_backend(config),
+        "cuda_available": torch.cuda.is_available(),
+        "latest_checkpoint": str(paths.latest),
+        "latest_exists": paths.latest.exists(),
+        "best_checkpoint": str(paths.best),
+        "best_exists": paths.best.exists(),
+        "metrics_path": str(paths.metrics),
+        "metrics_exists": paths.metrics.exists(),
+        "metrics": metrics,
+    }
+    console.print(status)
+    return status
+
+
 def _rl_backend(config: Config) -> str:
     backend = str(config.get("rl.sim_backend", "auto"))
     if backend == "auto":
@@ -151,6 +169,12 @@ def _save_agent(
 
 def load_ppo_agent(path: str | Path, device: torch.device | None = None) -> PPOAgent:
     device = device or default_device()
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"PPO checkpoint does not exist: {path}. "
+            "Run `uv run hcl-poc rl train --config configs/pusht.yaml` first."
+        )
     ckpt = torch.load(path, map_location=device, weights_only=False)
     agent = PPOAgent(int(ckpt["obs_dim"]), int(ckpt["action_dim"]), int(ckpt["hidden_dim"])).to(device)
     agent.load_state_dict(ckpt["agent"])

@@ -20,6 +20,7 @@ hierarchical model.
 ```bash
 uv sync --python 3.11
 uv run hcl-poc doctor
+uv run hcl-poc rl status --config configs/pusht.yaml
 ```
 
 Privileged PPO training uses ManiSkill vectorized simulation and expects CUDA.
@@ -31,6 +32,7 @@ tests.
 
 ```bash
 uv run hcl-poc rl train --config configs/pusht.yaml
+uv run hcl-poc rl status --config configs/pusht.yaml
 uv run hcl-poc rl eval --config configs/pusht.yaml
 uv run hcl-poc data prepare --config configs/pusht.yaml
 ```
