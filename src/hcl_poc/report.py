@@ -20,6 +20,8 @@ def _label(row: pd.Series) -> str:
         return "BC obs 1-step"
     if row["method"] == "bc_obs_dagger":
         return "BC obs DAgger"
+    if row["method"] == "bc_pose":
+        return "BC predicted pose"
     if row["method"] == "bc_state":
         return "BC privileged state"
     return f"hier {row['horizon_s']:g}s"

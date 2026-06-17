@@ -127,6 +127,24 @@ def encode_state_direct(
     return torch.from_numpy(input_norm.transform(state)).to(device).float()
 
 
+@torch.inference_mode()
+def encode_pose_direct(
+    obs: Any,
+    dino: DinoExtractor,
+    input_norm: Standardizer,
+    pose_model: MLP,
+    pose_input_norm: Standardizer,
+    pose_label_norm: Standardizer,
+    device: torch.device,
+) -> torch.Tensor:
+    rgb, proprio = extract_runtime_rgb_proprio(obs)
+    feat = dino.encode_batch(rgb[None])[0]
+    pose_in = torch.from_numpy(pose_input_norm.transform(feat[None])).to(device).float()
+    pose = pose_label_norm.inverse(pose_model(pose_in).cpu().numpy())[0]
+    x = input_norm.transform(np.concatenate([pose, proprio], axis=0)[None])
+    return torch.from_numpy(x).to(device).float()
+
+
 def _load_encoder(
     config: Config,
     n_traj: int,
@@ -178,6 +196,9 @@ def _sample_action(
     flat: FlowModel | None,
     input_norm: Standardizer,
     bc: MLP | None = None,
+    pose_model: MLP | None = None,
+    pose_input_norm: Standardizer | None = None,
+    pose_label_norm: Standardizer | None = None,
     encoder: ObservationEncoder | None = None,
     high: FlowModel | None = None,
     high_ckpt: dict[str, Any] | None = None,
@@ -192,6 +213,11 @@ def _sample_action(
         assert bc is not None and dino is not None
         cond_obs = encode_obs_direct(obs, dino, input_norm, device)
         action_chunk = bc(cond_obs).cpu().numpy()[0]
+    elif method == "bc_pose":
+        assert bc is not None and dino is not None
+        assert pose_model is not None and pose_input_norm is not None and pose_label_norm is not None
+        cond_pose = encode_pose_direct(obs, dino, input_norm, pose_model, pose_input_norm, pose_label_norm, device)
+        action_chunk = bc(cond_pose).cpu().numpy()[0]
     elif method == "bc_state":
         assert bc is not None
         cond_state = encode_state_direct(obs, input_norm, device)
@@ -222,6 +248,9 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
     encoder = None
     input_norm = None
     bc = None
+    pose_model = None
+    pose_input_norm = None
+    pose_label_norm = None
     dino_ckpt = None
 
     if method == "flat":
@@ -241,6 +270,24 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         bc, bc_ckpt = _load_bc(artifact_dir / f"{method}.pt", device)
         action_norm = Standardizer.from_state_dict(bc_ckpt["action_norm"])
         input_norm = Standardizer.from_state_dict(bc_ckpt["input_norm"])
+        flat = None
+        low = high = None
+        steps = 0
+        dino_ckpt = bc_ckpt
+    elif method == "bc_pose":
+        bc, bc_ckpt = _load_bc(artifact_dir / "bc_pose.pt", device)
+        action_norm = Standardizer.from_state_dict(bc_ckpt["action_norm"])
+        input_norm = Standardizer.from_state_dict(bc_ckpt["input_norm"])
+        pose_model = MLP(
+            int(bc_ckpt["pose_feature_dim"]),
+            int(bc_ckpt["pose_dim"]),
+            int(bc_ckpt["pose_hidden_dim"]),
+            depth=3,
+        ).to(device)
+        pose_model.load_state_dict(bc_ckpt["pose_model"])
+        pose_model.eval()
+        pose_input_norm = Standardizer.from_state_dict(bc_ckpt["pose_input_norm"])
+        pose_label_norm = Standardizer.from_state_dict(bc_ckpt["pose_label_norm"])
         flat = None
         low = high = None
         steps = 0
@@ -311,6 +358,9 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
                 flat,
                 input_norm,
                 bc=bc,
+                pose_model=pose_model,
+                pose_input_norm=pose_input_norm,
+                pose_label_norm=pose_label_norm,
                 encoder=encoder,
                 high=high,
                 high_ckpt=high_ckpt if method == "hier" else None,

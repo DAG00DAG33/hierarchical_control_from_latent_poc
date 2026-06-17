@@ -480,6 +480,273 @@ def _structured_state_vector(obs: object) -> np.ndarray:
     return np.concatenate(parts, axis=0).astype(np.float32)
 
 
+def _obj_pose_label(obs: object) -> np.ndarray:
+    if not isinstance(obs, dict):
+        raise TypeError("Pose labels require structured state observations")
+    obj_pose = _to_numpy(obs["extra"]["obj_pose"]).reshape(-1).astype(np.float32)
+    goal_pos = _to_numpy(obs["extra"]["goal_pos"]).reshape(-1).astype(np.float32)
+    quat_w = float(obj_pose[3])
+    quat_z = float(obj_pose[6])
+    yaw = 2.0 * np.arctan2(quat_z, quat_w)
+    return np.asarray(
+        [obj_pose[0], obj_pose[1], np.sin(yaw), np.cos(yaw), goal_pos[0], goal_pos[1], goal_pos[2]],
+        dtype=np.float32,
+    )
+
+
+@torch.inference_mode()
+def _collect_pose_probe_samples(
+    config: Config,
+    seed: int,
+    samples: int,
+    out_path: Path,
+) -> tuple[np.ndarray, np.ndarray]:
+    import gymnasium as gym
+    import mani_skill  # noqa: F401
+
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    dino = dino_from_config(config, device)
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode=config.get("obs_mode"),
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+    )
+    action_low = np.asarray(env.action_space.low, dtype=np.float32)
+    action_high = np.asarray(env.action_space.high, dtype=np.float32)
+    collect_seed = int(config.get("rl.collect_seed", 70_000)) + 400_000 + seed * 10_000
+    features: list[np.ndarray] = []
+    labels: list[np.ndarray] = []
+    attempts = 0
+    pbar = tqdm(total=samples, desc=f"collect pose labels seed={seed}")
+    while len(features) < samples:
+        attempts += 1
+        obs, _info = env.reset(seed=collect_seed + attempts)
+        done = False
+        truncated = False
+        while not (done or truncated) and len(features) < samples:
+            rgb, _proprio = extract_runtime_rgb_proprio(obs)
+            state = _structured_state_vector(obs)
+            features.append(dino.encode_batch(rgb[None])[0])
+            labels.append(_obj_pose_label(obs))
+            action_t, _logprob, _entropy, _value = teacher.get_action_and_value(
+                torch.from_numpy(state[None]).to(device).float(),
+                deterministic=True,
+            )
+            action = action_t.detach().cpu().numpy()[0].astype(np.float32)
+            if bool(config.get("policy.clip_actions_to_env_space", False)):
+                action = np.clip(action, action_low, action_high).astype(np.float32)
+            obs, _reward, done, truncated, _info = env.step(action)
+            pbar.update(1)
+    pbar.close()
+    env.close()
+    feature_arr = np.stack(features, axis=0).astype(np.float32)
+    label_arr = np.stack(labels, axis=0).astype(np.float32)
+    ensure_dir(out_path.parent)
+    np.savez_compressed(out_path, features=feature_arr, labels=label_arr)
+    return feature_arr, label_arr
+
+
+def train_pose_predictor(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    force: bool = False,
+    samples: int = 4000,
+) -> Path:
+    set_seed(seed)
+    device = default_device()
+    artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
+    ckpt_path = artifact_dir / "pose_predictor.pt"
+    if ckpt_path.exists() and not force:
+        console.print(f"Pose predictor exists: {ckpt_path}")
+        return ckpt_path
+
+    labels_path = artifact_dir / "pose_predictor_labels.npz"
+    if labels_path.exists() and not force:
+        data = np.load(labels_path)
+        features = data["features"].astype(np.float32)
+        labels = data["labels"].astype(np.float32)
+        if labels.shape[-1] != 7:
+            features, labels = _collect_pose_probe_samples(config, seed, samples, labels_path)
+    else:
+        features, labels = _collect_pose_probe_samples(config, seed, samples, labels_path)
+
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(features))
+    split = int(0.8 * len(order))
+    train_idx = order[:split]
+    val_idx = order[split:]
+    input_norm = Standardizer.fit(features[train_idx])
+    label_norm = Standardizer.fit(labels[train_idx])
+    train_dataset = ArrayActionDataset(
+        input_norm.transform(features[train_idx]),
+        label_norm.transform(labels[train_idx]),
+        length=max(10_000, len(train_idx) * 50),
+    )
+    hidden_dim = int(config.get("policy.hidden_dim"))
+    model = MLP(features.shape[-1], labels.shape[-1], hidden_dim, depth=3).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(config.get("policy.lr")))
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("policy.batch_size")),
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    epochs = int(config.get("policy.epochs"))
+    timer = Timer()
+    last_loss = 0.0
+    for _epoch in tqdm(range(epochs), desc=f"train pose predictor n={n_traj} seed={seed}"):
+        for batch in loader:
+            x = batch["x"].to(device).float()
+            cond = batch["cond"].to(device).float()
+            pred = model(cond)
+            loss = torch.mean((pred - x) ** 2)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            last_loss = float(loss.detach().cpu())
+
+    model.eval()
+    with torch.inference_mode():
+        val_x = torch.from_numpy(input_norm.transform(features[val_idx])).to(device).float()
+        pred = label_norm.inverse(model(val_x).cpu().numpy())
+    target = labels[val_idx]
+    pred_yaw = np.arctan2(pred[:, 2], pred[:, 3])
+    target_yaw = np.arctan2(target[:, 2], target[:, 3])
+    yaw_err = np.arctan2(np.sin(pred_yaw - target_yaw), np.cos(pred_yaw - target_yaw))
+    metrics = {
+        "elapsed_s": timer.elapsed(),
+        "loss": last_loss,
+        "samples": int(len(features)),
+        "val_samples": int(len(val_idx)),
+        "val_pos_mae_x_m": float(np.mean(np.abs(pred[:, 0] - target[:, 0]))),
+        "val_pos_mae_y_m": float(np.mean(np.abs(pred[:, 1] - target[:, 1]))),
+        "val_yaw_mae_rad": float(np.mean(np.abs(yaw_err))),
+        "val_yaw_mae_deg": float(np.degrees(np.mean(np.abs(yaw_err)))),
+    }
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "input_norm": input_norm.state_dict(),
+            "label_norm": label_norm.state_dict(),
+            "feature_dim": features.shape[-1],
+            "pose_dim": labels.shape[-1],
+            "hidden_dim": hidden_dim,
+            **_dino_metadata(config),
+            **metrics,
+        },
+        ckpt_path,
+    )
+    write_json(artifact_dir / "pose_predictor_metrics.json", metrics)
+    return ckpt_path
+
+
+@torch.inference_mode()
+def _predict_pose_features(
+    pose_ckpt: dict[str, object],
+    features: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    model = MLP(
+        int(pose_ckpt["feature_dim"]),
+        int(pose_ckpt["pose_dim"]),
+        int(pose_ckpt["hidden_dim"]),
+        depth=3,
+    ).to(device)
+    model.load_state_dict(pose_ckpt["model"])
+    model.eval()
+    input_norm = Standardizer.from_state_dict(pose_ckpt["input_norm"])
+    label_norm = Standardizer.from_state_dict(pose_ckpt["label_norm"])
+    out: list[np.ndarray] = []
+    x = input_norm.transform(features)
+    for start in range(0, len(x), 4096):
+        pred = model(torch.from_numpy(x[start : start + 4096]).to(device).float()).cpu().numpy()
+        out.append(label_norm.inverse(pred))
+    return np.concatenate(out, axis=0).astype(np.float32)
+
+
+def train_pose_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False) -> Path:
+    set_seed(seed)
+    device = default_device()
+    artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
+    ckpt_path = artifact_dir / "bc_pose.pt"
+    if ckpt_path.exists() and not force:
+        console.print(f"Pose BC policy exists: {ckpt_path}")
+        return ckpt_path
+
+    pose_path = train_pose_predictor(config, n_traj, seed, force=force)
+    pose_ckpt = torch.load(pose_path, map_location=device, weights_only=False)
+    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+    pose_inputs: list[np.ndarray] = []
+    actions: list[np.ndarray] = []
+    for ep in episodes:
+        pose = _predict_pose_features(pose_ckpt, ep.features, device)
+        pose_inputs.append(np.concatenate([pose, ep.proprio], axis=-1))
+        actions.append(ep.actions)
+    raw_inputs = np.concatenate(pose_inputs, axis=0).astype(np.float32)
+    raw_actions = np.concatenate(actions, axis=0).astype(np.float32)
+    input_norm = Standardizer.fit(raw_inputs)
+    action_norm = Standardizer.fit(raw_actions)
+    dataset = ArrayActionDataset(
+        input_norm.transform(raw_inputs),
+        action_norm.transform(raw_actions),
+        length=max(10_000, n_traj * 1000),
+    )
+
+    hidden_dim = int(config.get("policy.hidden_dim"))
+    action_dim = raw_actions.shape[-1]
+    model = MLP(raw_inputs.shape[-1], action_dim, hidden_dim, depth=4).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(config.get("policy.lr")))
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("policy.batch_size")),
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    epochs = int(config.get("policy.epochs"))
+    timer = Timer()
+    last_loss = 0.0
+    for _epoch in tqdm(range(epochs), desc=f"train bc_pose n={n_traj} seed={seed}"):
+        for batch in loader:
+            x = batch["x"].to(device).float()
+            cond = batch["cond"].to(device).float()
+            pred = model(cond)
+            loss = torch.mean((pred - x) ** 2)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            last_loss = float(loss.detach().cpu())
+
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "kind": "bc_pose",
+            "sample_dim": action_dim,
+            "cond_dim": raw_inputs.shape[-1],
+            "hidden_dim": hidden_dim,
+            "action_dim": action_dim,
+            "chunk": 1,
+            "action_norm": action_norm.state_dict(),
+            "input_norm": input_norm.state_dict(),
+            "pose_model": pose_ckpt["model"],
+            "pose_input_norm": pose_ckpt["input_norm"],
+            "pose_label_norm": pose_ckpt["label_norm"],
+            "pose_feature_dim": pose_ckpt["feature_dim"],
+            "pose_dim": pose_ckpt["pose_dim"],
+            "pose_hidden_dim": pose_ckpt["hidden_dim"],
+            **_dino_metadata(config),
+            "elapsed_s": timer.elapsed(),
+            "last_loss": last_loss,
+        },
+        ckpt_path,
+    )
+    write_json(artifact_dir / "bc_pose_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    return ckpt_path
+
+
 @torch.inference_mode()
 def _collect_dagger_labels(
     config: Config,

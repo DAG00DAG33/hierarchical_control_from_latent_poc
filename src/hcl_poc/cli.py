@@ -16,6 +16,7 @@ from hcl_poc.train import (
     train_bc_policy,
     train_dagger_bc_policy,
     train_flow_policy,
+    train_pose_bc_policy,
     train_representation,
     train_state_bc_policy,
 )
@@ -71,6 +72,8 @@ def train_cmd(args: argparse.Namespace) -> None:
         train_bc_policy(config, args.n_traj, args.seed, force=args.force, one_step=True)
     elif args.kind == "bc_obs_dagger":
         train_dagger_bc_policy(config, args.n_traj, args.seed, force=args.force)
+    elif args.kind == "bc_pose":
+        train_pose_bc_policy(config, args.n_traj, args.seed, force=args.force)
     elif args.kind == "bc_state":
         train_state_bc_policy(config, args.n_traj, args.seed, force=args.force)
     elif args.kind in {"high", "low"}:
@@ -194,7 +197,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(p)
     p.add_argument(
         "kind",
-        choices=["encoder", "flat", "flat_obs", "bc_obs", "bc_obs_1step", "bc_obs_dagger", "bc_state", "high", "low"],
+        choices=[
+            "encoder",
+            "flat",
+            "flat_obs",
+            "bc_obs",
+            "bc_obs_1step",
+            "bc_obs_dagger",
+            "bc_pose",
+            "bc_state",
+            "high",
+            "low",
+        ],
     )
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
@@ -204,7 +218,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("eval")
     add_config_arg(p)
-    p.add_argument("method", choices=["flat", "flat_obs", "bc_obs", "bc_obs_1step", "bc_obs_dagger", "bc_state", "hier"])
+    p.add_argument(
+        "method",
+        choices=["flat", "flat_obs", "bc_obs", "bc_obs_1step", "bc_obs_dagger", "bc_pose", "bc_state", "hier"],
+    )
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon-s", type=float)

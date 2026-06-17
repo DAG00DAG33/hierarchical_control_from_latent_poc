@@ -111,6 +111,9 @@ uv run hcl-poc eval bc_obs_1step --config configs/pusht.yaml --n-traj 1000 --see
 uv run hcl-poc train bc_obs_dagger --config configs/pusht.yaml --n-traj 1000 --seed 0
 uv run hcl-poc eval bc_obs_dagger --config configs/pusht.yaml --n-traj 1000 --seed 0
 
+uv run hcl-poc train bc_pose --config configs/pusht.yaml --n-traj 1000 --seed 0
+uv run hcl-poc eval bc_pose --config configs/pusht.yaml --n-traj 1000 --seed 0
+
 uv run hcl-poc train bc_state --config configs/pusht.yaml --n-traj 1000 --seed 0
 uv run hcl-poc eval bc_state --config configs/pusht.yaml --n-traj 1000 --seed 0
 ```
@@ -119,9 +122,11 @@ uv run hcl-poc eval bc_state --config configs/pusht.yaml --n-traj 1000 --seed 0
 used by the visual policies. `bc_obs_1step` removes the auxiliary 8-step action
 chunk target and predicts only the next action. `bc_obs_dagger` rolls out the
 one-step visual BC policy, labels those visited states with the privileged PPO
-teacher, and retrains on demonstrations plus those DAgger labels. `bc_state`
-distills the privileged PPO teacher from the full simulator state and is only a
-diagnostic; it is not part of the final non-privileged method.
+teacher, and retrains on demonstrations plus those DAgger labels. `bc_pose`
+trains a supervised DINO-to-object-pose/goal bottleneck and then clones from
+predicted pose plus proprioception. `bc_state` distills the privileged PPO
+teacher from the full simulator state and is only a diagnostic; it is not part
+of the final non-privileged method.
 
 ## Method
 
@@ -189,6 +194,10 @@ Current status on June 17, 2026:
   PPO-labeled learner-visited states improves success from `0.02` to `0.04` and
   max reward from about `0.20` to `0.24`, but it remains far below privileged
   state BC.
+- A supervised DINO pose/goal bottleneck reaches about `1 cm` held-out position
+  error and `8 deg` yaw error, but BC from predicted pose plus proprioception
+  gets `0.00` success. Compressing the image to this noisy low-dimensional
+  bottleneck is worse than using DINO features directly.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
@@ -203,6 +212,7 @@ Current status on June 17, 2026:
 | BC obs | 2000 | 0.02 | 0.137 | 0.197 |
 | BC obs, 1-step | 1000 | 0.02 | 0.142 | 0.196 |
 | BC obs, DAgger | 1000 | 0.04 | 0.158 | 0.236 |
+| BC predicted pose | 1000 | 0.00 | 0.119 | 0.158 |
 | BC obs, spatial DINO | 1000 | 0.02 | 0.179 | 0.219 |
 | BC privileged state | 1000 | 0.46 | 0.582 | 0.594 |
 
