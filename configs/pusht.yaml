@@ -11,7 +11,7 @@ paths:
   prepared_path: data/prepared/pusht_ppo_dino_proprio_tcp.h5
   artifact_dir: artifacts/ppo_main
   results_dir: results/ppo_main
-  rl_dir: artifacts/rl
+  rl_dir: artifacts/rl_baseline
 
 data:
   source: privileged_ppo
@@ -27,20 +27,23 @@ rl:
   sim_backend: auto
   reconfiguration_freq: 1
   total_timesteps: 5000000
-  num_envs: 1024
-  num_steps: 100
+  num_envs: 512
+  num_steps: 50
   hidden_dim: 256
   learning_rate: 0.0003
-  anneal_lr: true
+  anneal_lr: false
   gamma: 0.8
   gae_lambda: 0.9
   num_minibatches: 32
-  update_epochs: 8
+  update_epochs: 4
   clip_coef: 0.2
+  clip_vloss: false
   ent_coef: 0.0
   vf_coef: 0.5
   max_grad_norm: 0.5
-  target_kl:
+  target_kl: 0.1
+  partial_reset: true
+  eval_partial_reset: false
   save_every_updates: 5
   target_success: 0.9
   eval_num_envs: 256

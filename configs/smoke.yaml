@@ -37,10 +37,13 @@ rl:
   num_minibatches: 1
   update_epochs: 1
   clip_coef: 0.2
+  clip_vloss: false
   ent_coef: 0.0
   vf_coef: 0.5
   max_grad_norm: 0.5
   target_kl:
+  partial_reset: true
+  eval_partial_reset: false
   save_every_updates: 1
   target_success: 2.0
   eval_num_envs: 1

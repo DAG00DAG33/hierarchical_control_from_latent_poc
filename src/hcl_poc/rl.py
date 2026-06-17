@@ -49,7 +49,7 @@ class PPOAgent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(hidden_dim, action_dim), std=0.01 * np.sqrt(2)),
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
+        self.actor_logstd = nn.Parameter(torch.ones(1, action_dim) * -0.5)
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs)
@@ -112,7 +112,12 @@ def _rl_backend(config: Config) -> str:
     return backend
 
 
-def _make_state_env(config: Config, num_envs: int, record_metrics: bool = True):
+def _make_state_env(
+    config: Config,
+    num_envs: int,
+    record_metrics: bool = True,
+    ignore_terminations: bool = True,
+):
     from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
     base = gym.make(
@@ -128,7 +133,7 @@ def _make_state_env(config: Config, num_envs: int, record_metrics: bool = True):
     return ManiSkillVectorEnv(
         base,
         num_envs,
-        ignore_terminations=True,
+        ignore_terminations=ignore_terminations,
         record_metrics=record_metrics,
     )
 
@@ -204,7 +209,11 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
     if batch_size % minibatches != 0:
         raise ValueError("rl.num_envs * rl.num_steps must divide rl.num_minibatches")
 
-    env = _make_state_env(config, num_envs)
+    env = _make_state_env(
+        config,
+        num_envs,
+        ignore_terminations=not bool(config.get("rl.partial_reset", True)),
+    )
     obs_dim = int(np.prod(env.single_observation_space.shape))
     action_dim = int(np.prod(env.single_action_space.shape))
     agent = PPOAgent(obs_dim, action_dim, int(config.get("rl.hidden_dim", 256))).to(device)
@@ -239,6 +248,7 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
     gae_lambda = float(config.get("rl.gae_lambda", 0.9))
     update_epochs = int(config.get("rl.update_epochs", 8))
     clip_coef = float(config.get("rl.clip_coef", 0.2))
+    clip_vloss = bool(config.get("rl.clip_vloss", False))
     ent_coef = float(config.get("rl.ent_coef", 0.0))
     vf_coef = float(config.get("rl.vf_coef", 0.5))
     max_grad_norm = float(config.get("rl.max_grad_norm", 0.5))
@@ -248,12 +258,15 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
     timer = Timer()
     recent_successes: list[float] = []
     latest_metrics: dict[str, Any] = {}
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
 
     for update in trange(1, num_updates + 1, desc="train privileged PPO"):
         if anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
             optimizer.param_groups[0]["lr"] = frac * float(config.get("rl.learning_rate", 3e-4))
 
+        final_values = torch.zeros((num_steps, num_envs), device=device)
         for step in range(num_steps):
             global_step += num_envs
             obs_buf[step] = next_obs
@@ -263,7 +276,9 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
             actions_buf[step] = action
             logprobs_buf[step] = logprob
             values_buf[step] = value
-            next_obs, reward, terminated, truncated, info = env.step(action)
+            next_obs, reward, terminated, truncated, info = env.step(
+                torch.clamp(action.detach(), action_low, action_high)
+            )
             next_obs = next_obs.to(device).float()
             rewards_buf[step] = reward.to(device).view(-1)
             next_done = torch.logical_or(terminated, truncated).to(device).float().view(-1)
@@ -273,6 +288,9 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
                     successes = info["final_info"]["episode"]["success_once"][mask].detach().float().cpu().numpy()
                     recent_successes.extend(float(x) for x in successes)
                     recent_successes = recent_successes[-200:]
+                    final_values[step, torch.arange(num_envs, device=device)[mask]] = agent.get_value(
+                        info["final_observation"][mask].to(device).float()
+                    ).view(-1)
 
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -285,7 +303,8 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
                 else:
                     nextnonterminal = 1.0 - dones_buf[t + 1]
                     nextvalues = values_buf[t + 1]
-                delta = rewards_buf[t] + gamma * nextvalues * nextnonterminal - values_buf[t]
+                real_next_values = nextnonterminal * nextvalues + final_values[t]
+                delta = rewards_buf[t] + gamma * real_next_values - values_buf[t]
                 advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values_buf
 
@@ -318,14 +337,17 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
                 pg_loss2 = -mb_adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
                 newvalue = newvalue.view(-1)
-                v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                v_clipped = b_values[mb_inds] + torch.clamp(
-                    newvalue - b_values[mb_inds],
-                    -clip_coef,
-                    clip_coef,
-                )
-                v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                if clip_vloss:
+                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                    v_clipped = b_values[mb_inds] + torch.clamp(
+                        newvalue - b_values[mb_inds],
+                        -clip_coef,
+                        clip_coef,
+                    )
+                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                else:
+                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
                 entropy_loss = entropy.mean()
                 loss = pg_loss - ent_coef * entropy_loss + vf_coef * v_loss
                 optimizer.zero_grad(set_to_none=True)
@@ -375,7 +397,11 @@ def evaluate_ppo(config: Config, checkpoint: str | Path | None = None, episodes:
     agent = load_ppo_agent(path, device)
     num_envs = int(config.get("rl.eval_num_envs", config.get("rl.num_envs", 64)))
     episodes = int(episodes or config.get("rl.eval_episodes", 256))
-    env = _make_state_env(config, num_envs)
+    env = _make_state_env(
+        config,
+        num_envs,
+        ignore_terminations=not bool(config.get("rl.eval_partial_reset", False)),
+    )
     obs, _info = env.reset(seed=int(config.get("rl.eval_seed", 50_000)))
     obs = obs.to(device).float()
     successes: list[float] = []
