@@ -198,6 +198,9 @@ Current status on June 17, 2026:
   error and `8 deg` yaw error, but BC from predicted pose plus proprioception
   gets `0.00` success. Compressing the image to this noisy low-dimensional
   bottleneck is worse than using DINO features directly.
+- Spatial DINO features plus one-step BC are currently the strongest visual
+  success result (`0.06`). Adding one DAgger iteration keeps success at `0.06`
+  but improves final reward to `0.273` and max reward to `0.296`.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
@@ -214,6 +217,8 @@ Current status on June 17, 2026:
 | BC obs, DAgger | 1000 | 0.04 | 0.158 | 0.236 |
 | BC predicted pose | 1000 | 0.00 | 0.119 | 0.158 |
 | BC obs, spatial DINO | 1000 | 0.02 | 0.179 | 0.219 |
+| BC obs, spatial DINO, 1-step | 1000 | 0.06 | 0.219 | 0.256 |
+| BC obs, spatial DINO, DAgger | 1000 | 0.06 | 0.273 | 0.296 |
 | BC privileged state | 1000 | 0.46 | 0.582 | 0.594 |
 
 The direct-observation result suggests the learned WM latent is not the only
