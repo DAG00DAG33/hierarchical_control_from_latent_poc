@@ -93,6 +93,12 @@ uv run hcl-poc train flat_obs --config configs/pusht.yaml --n-traj 50 --seed 0
 uv run hcl-poc eval flat_obs --config configs/pusht.yaml --n-traj 50 --seed 0
 ```
 
+To record inspection videos for a trained direct-observation flat policy:
+
+```bash
+uv run hcl-poc video flat_obs --config configs/pusht.yaml --n-traj 200 --seed 0 --episodes 4
+```
+
 ## Method
 
 The encoder maps the current RGB/proprio observation to a latent state:
@@ -133,13 +139,15 @@ Current status on June 17, 2026:
 
 - The privileged PPO expert was trained in this repo and reached `0.863`
   deterministic success over 256 evaluation episodes.
-- The prepared DINO/proprio dataset contains 200 successful PPO rollouts.
+- The prepared DINO/proprio dataset contains 2000 successful PPO rollouts.
 - The latent-conditioned flat baseline and the first hierarchical staged runs
   currently produce zero closed-loop success.
 - A direct-observation flat baseline (`flat_obs`) was added to test whether the
   learned WM latent encoder is the main failure point. It reduces the
-  flow-matching training loss substantially, but still gets zero closed-loop
-  success under the current sampler/evaluator.
+  flow-matching training loss substantially. With more data it reached one
+  successful rollout out of 50 at 1000 trajectories, but the 2000-trajectory
+  run dropped back to zero under the current sampler/evaluator.
+- Four `flat_obs` n=200 inspection videos were generated in `results/videos/`.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
@@ -148,7 +156,9 @@ Current status on June 17, 2026:
 | flat obs | 50 | 0.00 | 0.123 | 0.175 |
 | flat obs | 100 | 0.00 | 0.104 | 0.170 |
 | flat obs | 200 | 0.00 | 0.124 | 0.188 |
+| flat obs | 1000 | 0.02 | 0.144 | 0.204 |
+| flat obs | 2000 | 0.00 | 0.116 | 0.170 |
 
-The direct-observation result suggests the next issue is not only the learned
-WM latent. The action policy objective/sampling or closed-loop imitation setup
-needs debugging before spending more compute on hierarchical ablations.
+The direct-observation result suggests the learned WM latent is not the only
+issue. The action policy objective/sampling or closed-loop imitation setup needs
+debugging before spending more compute on hierarchical ablations.

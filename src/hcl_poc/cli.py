@@ -9,7 +9,7 @@ from rich.console import Console
 
 from hcl_poc.config import load_config
 from hcl_poc.data import prepare_dataset
-from hcl_poc.eval import evaluate, horizon_steps
+from hcl_poc.eval import evaluate, horizon_steps, record_videos
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.train import train_flow_policy, train_representation
@@ -70,6 +70,11 @@ def train_cmd(args: argparse.Namespace) -> None:
 def eval_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     evaluate(config, args.n_traj, args.seed, args.method, args.horizon_s)
+
+
+def video_cmd(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    record_videos(config, args.n_traj, args.seed, args.method, args.episodes, args.horizon_s)
 
 
 def run_sweep(args: argparse.Namespace) -> None:
@@ -179,6 +184,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon-s", type=float)
     p.set_defaults(func=eval_cmd)
+
+    p = sub.add_parser("video")
+    add_config_arg(p)
+    p.add_argument("method", choices=["flat_obs"])
+    p.add_argument("--n-traj", type=int, default=200)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--episodes", type=int, default=4)
+    p.add_argument("--horizon-s", type=float)
+    p.set_defaults(func=video_cmd)
 
     p = sub.add_parser("run-sweep")
     add_config_arg(p)

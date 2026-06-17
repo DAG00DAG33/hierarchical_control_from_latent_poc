@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
+import imageio.v2 as imageio
 import mani_skill  # noqa: F401
 import numpy as np
 import torch
@@ -119,6 +120,52 @@ def _load_flow(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, A
     return model, ckpt
 
 
+def _render_frame(env: gym.Env) -> np.ndarray:
+    frame = env.render()
+    if isinstance(frame, torch.Tensor):
+        frame = frame.detach().cpu().numpy()
+    frame = np.asarray(frame)
+    if frame.ndim == 4:
+        frame = frame[0]
+    return frame.astype(np.uint8)
+
+
+@torch.inference_mode()
+def _sample_action(
+    obs: Any,
+    method: str,
+    dino: DinoExtractor,
+    device: torch.device,
+    action_norm: Standardizer,
+    steps: int,
+    flat: FlowModel | None,
+    input_norm: Standardizer,
+    encoder: ObservationEncoder | None = None,
+    high: FlowModel | None = None,
+    high_ckpt: dict[str, Any] | None = None,
+    low: FlowModel | None = None,
+    subgoal: torch.Tensor | None = None,
+) -> tuple[np.ndarray, torch.Tensor | None]:
+    if method == "flat_obs":
+        assert flat is not None
+        cond_obs = encode_obs_direct(obs, dino, input_norm, device)
+        action_chunk = sample_flow(flat, cond_obs, steps, flat.sample_dim).cpu().numpy()[0]
+    else:
+        assert encoder is not None
+        z = encode_obs(obs, dino, encoder, input_norm, device)
+        if method == "flat":
+            assert flat is not None
+            action_chunk = sample_flow(flat, z, steps, flat.sample_dim).cpu().numpy()[0]
+        elif method == "hier":
+            assert high is not None and low is not None and high_ckpt is not None and subgoal is not None
+            cond = torch.cat([z, subgoal], dim=-1)
+            action_chunk = sample_flow(low, cond, steps, low.sample_dim).cpu().numpy()[0]
+        else:
+            raise ValueError(method)
+    action = action_norm.inverse(action_chunk.reshape(-1, action_norm.mean.shape[0]))[0]
+    return action, subgoal
+
+
 def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: float | None = None) -> Path:
     set_seed(seed)
     device = default_device()
@@ -182,23 +229,27 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         success = False
         while not (done or truncated):
             timer = Timer()
-            if method == "flat_obs":
-                assert flat is not None and input_norm is not None
-                cond_obs = encode_obs_direct(obs, dino, input_norm, device)
-                action_chunk = sample_flow(flat, cond_obs, steps, flat.sample_dim).cpu().numpy()[0]
-            else:
-                assert encoder is not None and input_norm is not None
-                z = encode_obs(obs, dino, encoder, input_norm, device)
-            if method == "flat":
-                assert flat is not None
-                action_chunk = sample_flow(flat, z, steps, flat.sample_dim).cpu().numpy()[0]
-            elif method == "hier":
-                assert high is not None and low is not None
+            assert input_norm is not None
+            if method == "hier":
+                assert high is not None and high_ckpt is not None and encoder is not None
                 if subgoal is None or step_idx % refresh == 0:
+                    z = encode_obs(obs, dino, encoder, input_norm, device)
                     subgoal = sample_flow(high, z, int(high_ckpt["flow_steps"]), high.sample_dim)
-                cond = torch.cat([z, subgoal], dim=-1)
-                action_chunk = sample_flow(low, cond, steps, low.sample_dim).cpu().numpy()[0]
-            action = action_norm.inverse(action_chunk.reshape(-1, action_norm.mean.shape[0]))[0]
+            action, subgoal = _sample_action(
+                obs,
+                method,
+                dino,
+                device,
+                action_norm,
+                steps,
+                flat,
+                input_norm,
+                encoder=encoder,
+                high=high,
+                high_ckpt=high_ckpt if method == "hier" else None,
+                low=low,
+                subgoal=subgoal,
+            )
             latencies.append(timer.elapsed())
             obs, reward, done, truncated, info = env.step(action)
             reward_f = float(np.asarray(reward).reshape(-1)[0])
@@ -226,3 +277,69 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
     write_json(out_path, payload)
     console.print(payload)
     return out_path
+
+
+def record_videos(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    method: str,
+    episodes: int,
+    horizon_s: float | None = None,
+) -> list[Path]:
+    if method != "flat_obs":
+        raise ValueError("Video recording currently supports flat_obs only")
+    set_seed(seed)
+    device = default_device()
+    dino = DinoExtractor(config.get("dino.model_name"), device)
+    artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
+    flat, flat_ckpt = _load_flow(artifact_dir / "flat_obs.pt", device)
+    action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
+    input_norm = Standardizer.from_state_dict(flat_ckpt["input_norm"])
+    steps = int(flat_ckpt["flow_steps"])
+    out_dir = ensure_dir(Path(config.get("paths.results_dir")).parent / "videos")
+
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode=config.get("obs_mode"),
+        control_mode=config.get("control_mode"),
+        render_mode="rgb_array",
+    )
+    eval_seed = int(config.get("data.eval_seed", 10000))
+    paths: list[Path] = []
+    for ep_idx in trange(episodes, desc=f"record {method} n={n_traj} seed={seed}"):
+        rollout_seed = eval_seed + ep_idx
+        obs, _info = env.reset(seed=rollout_seed)
+        frames = [_render_frame(env)]
+        done = False
+        truncated = False
+        success = False
+        max_reward = -float("inf")
+        final_reward = 0.0
+        while not (done or truncated):
+            action, _subgoal = _sample_action(
+                obs,
+                method,
+                dino,
+                device,
+                action_norm,
+                steps,
+                flat,
+                input_norm,
+            )
+            obs, reward, done, truncated, info = env.step(action)
+            frames.append(_render_frame(env))
+            reward_f = float(np.asarray(reward).reshape(-1)[0])
+            final_reward = reward_f
+            max_reward = max(max_reward, reward_f)
+            success = success or bool(np.asarray(info.get("success", False)).reshape(-1)[0])
+        path = out_dir / (
+            f"{method}_n{n_traj}_seed{seed}_evalseed{rollout_seed}_"
+            f"success{int(success)}_final{final_reward:.3f}_max{max_reward:.3f}.mp4"
+        )
+        imageio.mimsave(path, frames, fps=int(config.get("control_freq", 20)), macro_block_size=1)
+        paths.append(path)
+    env.close()
+    for path in paths:
+        console.print(f"Wrote {path}")
+    return paths
