@@ -201,6 +201,8 @@ Current status on June 17, 2026:
 - Spatial DINO features plus one-step BC are currently the strongest visual
   success result (`0.06`). Adding one DAgger iteration keeps success at `0.06`
   but improves final reward to `0.273` and max reward to `0.296`.
+- The spatial direct-observation flow baseline reaches `0.04` success at 1000
+  trajectories, so the flow sampler is not outperforming deterministic BC yet.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
@@ -211,6 +213,7 @@ Current status on June 17, 2026:
 | flat obs | 200 | 0.00 | 0.124 | 0.188 |
 | flat obs | 1000 | 0.02 | 0.144 | 0.204 |
 | flat obs | 2000 | 0.00 | 0.116 | 0.170 |
+| flat obs, spatial DINO | 1000 | 0.04 | 0.206 | 0.255 |
 | BC obs | 1000 | 0.00 | 0.110 | 0.176 |
 | BC obs | 2000 | 0.02 | 0.137 | 0.197 |
 | BC obs, 1-step | 1000 | 0.02 | 0.142 | 0.196 |
