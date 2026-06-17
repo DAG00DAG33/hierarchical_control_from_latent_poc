@@ -57,8 +57,8 @@ def train_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.kind == "encoder":
         train_representation(config, args.n_traj, args.seed)
-    elif args.kind == "flat":
-        train_flow_policy(config, args.n_traj, args.seed, "flat")
+    elif args.kind in {"flat", "flat_obs"}:
+        train_flow_policy(config, args.n_traj, args.seed, args.kind)
     elif args.kind in {"high", "low"}:
         if args.horizon_s is None:
             raise ValueError("--horizon-s is required for high/low")
@@ -166,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("train")
     add_config_arg(p)
-    p.add_argument("kind", choices=["encoder", "flat", "high", "low"])
+    p.add_argument("kind", choices=["encoder", "flat", "flat_obs", "high", "low"])
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon-s", type=float)
@@ -174,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("eval")
     add_config_arg(p)
-    p.add_argument("method", choices=["flat", "hier"])
+    p.add_argument("method", choices=["flat", "flat_obs", "hier"])
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon-s", type=float)

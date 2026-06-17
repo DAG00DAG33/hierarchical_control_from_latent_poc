@@ -9,6 +9,14 @@ from hcl_poc.config import Config
 from hcl_poc.utils import ensure_dir, read_json
 
 
+def _label(row: pd.Series) -> str:
+    if row["method"] == "flat":
+        return "flat latent"
+    if row["method"] == "flat_obs":
+        return "flat obs"
+    return f"hier {row['horizon_s']:g}s"
+
+
 def build_report(config: Config) -> Path:
     results_dir = ensure_dir(config.get("paths.results_dir"))
     records = []
@@ -21,10 +29,7 @@ def build_report(config: Config) -> Path:
     df.to_csv(csv_path, index=False)
 
     plot_df = df.copy()
-    plot_df["label"] = plot_df.apply(
-        lambda row: "flat" if row["method"] == "flat" else f"hier {row['horizon_s']:g}s",
-        axis=1,
-    )
+    plot_df["label"] = plot_df.apply(_label, axis=1)
     fig, ax = plt.subplots(figsize=(7, 4))
     for label, group in plot_df.groupby("label"):
         agg = group.groupby("n_traj", as_index=False)["success"].mean().sort_values("n_traj")
@@ -51,4 +56,3 @@ def build_report(config: Config) -> Path:
         fig.savefig(results_dir / f"{metric}_vs_trajectories.png", dpi=180)
         plt.close(fig)
     return csv_path
-

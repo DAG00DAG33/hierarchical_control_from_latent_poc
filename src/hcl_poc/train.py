@@ -233,13 +233,11 @@ def train_flow_policy(
     config: Config,
     n_traj: int,
     seed: int,
-    kind: Literal["flat", "low", "high"],
+    kind: Literal["flat", "flat_obs", "low", "high"],
     horizon_steps: int | None = None,
 ) -> Path:
     set_seed(seed)
     device = default_device()
-    train_representation(config, n_traj, seed)
-    episodes, latents, encoder_ckpt = encode_latents(config, n_traj, seed)
     artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
     name = kind if horizon_steps is None else f"{kind}_h{horizon_steps}"
     ckpt_path = artifact_dir / f"{name}.pt"
@@ -247,12 +245,33 @@ def train_flow_policy(
         console.print(f"Policy exists: {ckpt_path}")
         return ckpt_path
 
-    action_norm = Standardizer.from_state_dict(encoder_ckpt["action_norm"])
     chunk = int(config.get("policy.action_chunk_steps"))
-    latent_dim = int(encoder_ckpt["latent_dim"])
     hidden_dim = int(config.get("policy.hidden_dim"))
 
-    if kind == "flat":
+    if kind == "flat_obs":
+        episodes = load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+        input_norm = fit_input_standardizer(episodes)
+        action_norm = fit_action_standardizer(episodes)
+        obs_inputs = [_obs_input(ep, input_norm) for ep in episodes]
+        dataset = FlowActionDataset(
+            episodes,
+            obs_inputs,
+            action_norm,
+            chunk,
+            length=max(10_000, n_traj * 1000),
+        )
+        sample_dim = chunk * episodes[0].actions.shape[-1]
+        cond_dim = obs_inputs[0].shape[-1]
+        latent_dim = None
+    else:
+        train_representation(config, n_traj, seed)
+        episodes, latents, encoder_ckpt = encode_latents(config, n_traj, seed)
+        action_norm = Standardizer.from_state_dict(encoder_ckpt["action_norm"])
+        latent_dim = int(encoder_ckpt["latent_dim"])
+
+    if kind == "flat_obs":
+        pass
+    elif kind == "flat":
         dataset = FlowActionDataset(
             episodes,
             latents,
@@ -317,6 +336,7 @@ def train_flow_policy(
             "action_dim": episodes[0].actions.shape[-1],
             "chunk": chunk,
             "action_norm": action_norm.state_dict(),
+            "input_norm": input_norm.state_dict() if kind == "flat_obs" else None,
             "flow_steps": int(config.get("policy.flow_steps")),
             "elapsed_s": timer.elapsed(),
             "last_loss": last_loss,

@@ -85,6 +85,14 @@ uv run hcl-poc run-sweep --config configs/pusht.yaml --profile full
 uv run hcl-poc report --config configs/pusht.yaml
 ```
 
+To run only the diagnostic flat baseline that conditions directly on the
+normalized DINO/proprio observation, bypassing the learned latent encoder:
+
+```bash
+uv run hcl-poc train flat_obs --config configs/pusht.yaml --n-traj 50 --seed 0
+uv run hcl-poc eval flat_obs --config configs/pusht.yaml --n-traj 50 --seed 0
+```
+
 ## Method
 
 The encoder maps the current RGB/proprio observation to a latent state:
@@ -119,9 +127,28 @@ conditional flow matching.
 
 ## Results
 
-Results will be written by `hcl-poc report` into `results/` and summarized here
-after the staged/full runs complete.
+Results are written by `hcl-poc report` into `results/ppo_main/`.
 
-Current status: the flat and hierarchical pipeline is implemented and smoke
-tested. Full PPO training and final Push-T results are pending a working CUDA
-driver on this machine.
+Current status on June 17, 2026:
+
+- The privileged PPO expert was trained in this repo and reached `0.863`
+  deterministic success over 256 evaluation episodes.
+- The prepared DINO/proprio dataset contains 200 successful PPO rollouts.
+- The latent-conditioned flat baseline and the first hierarchical staged runs
+  currently produce zero closed-loop success.
+- A direct-observation flat baseline (`flat_obs`) was added to test whether the
+  learned WM latent encoder is the main failure point. It reduces the
+  flow-matching training loss substantially, but still gets zero closed-loop
+  success under the current sampler/evaluator.
+
+| Method | Trajectories | Success | Final reward | Max reward |
+| --- | ---: | ---: | ---: | ---: |
+| flat latent | 50 | 0.00 | 0.120 | 0.149 |
+| flat latent | 100 | 0.00 | 0.122 | 0.151 |
+| flat obs | 50 | 0.00 | 0.123 | 0.175 |
+| flat obs | 100 | 0.00 | 0.104 | 0.170 |
+| flat obs | 200 | 0.00 | 0.124 | 0.188 |
+
+The direct-observation result suggests the next issue is not only the learned
+WM latent. The action policy objective/sampling or closed-loop imitation setup
+needs debugging before spending more compute on hierarchical ablations.

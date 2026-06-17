@@ -9,5 +9,5 @@ artifacts/
 results/**/*.png
 results/**/*.csv
 results/**/*.json
+results/**/*.mp4
 !results/.gitkeep
-

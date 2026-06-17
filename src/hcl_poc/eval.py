@@ -89,6 +89,19 @@ def encode_obs(
     return encoder(torch.from_numpy(x).to(device).float())
 
 
+@torch.inference_mode()
+def encode_obs_direct(
+    obs: Any,
+    dino: DinoExtractor,
+    input_norm: Standardizer,
+    device: torch.device,
+) -> torch.Tensor:
+    rgb, proprio = extract_runtime_rgb_proprio(obs)
+    feat = dino.encode_batch(rgb[None])[0]
+    x = input_norm.transform(np.concatenate([feat, proprio], axis=0)[None])
+    return torch.from_numpy(x).to(device).float()
+
+
 def _load_encoder(config: Config, n_traj: int, seed: int, device: torch.device) -> tuple[ObservationEncoder, Standardizer]:
     ckpt_path = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt"
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -109,19 +122,28 @@ def _load_flow(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, A
 def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: float | None = None) -> Path:
     set_seed(seed)
     device = default_device()
-    encoder, input_norm = _load_encoder(config, n_traj, seed, device)
     dino = DinoExtractor(config.get("dino.model_name"), device)
     artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
     results_dir = ensure_dir(Path(config.get("paths.results_dir")) / f"n{n_traj}" / f"seed{seed}")
     result_name = method if horizon_s is None else f"{method}_{horizon_s:g}s"
     out_path = results_dir / f"{result_name}.json"
+    encoder = None
+    input_norm = None
 
     if method == "flat":
+        encoder, input_norm = _load_encoder(config, n_traj, seed, device)
         flat, flat_ckpt = _load_flow(artifact_dir / "flat.pt", device)
         action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
         low = high = None
         steps = int(flat_ckpt["flow_steps"])
+    elif method == "flat_obs":
+        flat, flat_ckpt = _load_flow(artifact_dir / "flat_obs.pt", device)
+        action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
+        input_norm = Standardizer.from_state_dict(flat_ckpt["input_norm"])
+        low = high = None
+        steps = int(flat_ckpt["flow_steps"])
     elif method == "hier":
+        encoder, input_norm = _load_encoder(config, n_traj, seed, device)
         if horizon_s is None:
             raise ValueError("Hierarchy evaluation requires horizon_s")
         h_steps = horizon_steps(config, horizon_s)
@@ -160,11 +182,17 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         success = False
         while not (done or truncated):
             timer = Timer()
-            z = encode_obs(obs, dino, encoder, input_norm, device)
+            if method == "flat_obs":
+                assert flat is not None and input_norm is not None
+                cond_obs = encode_obs_direct(obs, dino, input_norm, device)
+                action_chunk = sample_flow(flat, cond_obs, steps, flat.sample_dim).cpu().numpy()[0]
+            else:
+                assert encoder is not None and input_norm is not None
+                z = encode_obs(obs, dino, encoder, input_norm, device)
             if method == "flat":
                 assert flat is not None
                 action_chunk = sample_flow(flat, z, steps, flat.sample_dim).cpu().numpy()[0]
-            else:
+            elif method == "hier":
                 assert high is not None and low is not None
                 if subgoal is None or step_idx % refresh == 0:
                     subgoal = sample_flow(high, z, int(high_ckpt["flow_steps"]), high.sample_dim)
