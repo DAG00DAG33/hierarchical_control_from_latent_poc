@@ -117,6 +117,7 @@ def _make_state_env(
     num_envs: int,
     record_metrics: bool = True,
     ignore_terminations: bool = True,
+    reconfiguration_freq: int | None = None,
 ):
     from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
@@ -128,7 +129,7 @@ def _make_state_env(
         render_mode="rgb_array",
         sim_backend=_rl_backend(config),
         num_envs=num_envs,
-        reconfiguration_freq=int(config.get("rl.reconfiguration_freq", 1)),
+        reconfiguration_freq=reconfiguration_freq,
     )
     return ManiSkillVectorEnv(
         base,
@@ -213,6 +214,7 @@ def train_ppo(config: Config, resume: bool = True) -> Path:
         config,
         num_envs,
         ignore_terminations=not bool(config.get("rl.partial_reset", True)),
+        reconfiguration_freq=config.get("rl.reconfiguration_freq"),
     )
     obs_dim = int(np.prod(env.single_observation_space.shape))
     action_dim = int(np.prod(env.single_action_space.shape))
@@ -401,6 +403,7 @@ def evaluate_ppo(config: Config, checkpoint: str | Path | None = None, episodes:
         config,
         num_envs,
         ignore_terminations=not bool(config.get("rl.eval_partial_reset", False)),
+        reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
     )
     obs, _info = env.reset(seed=int(config.get("rl.eval_seed", 50_000)))
     obs = obs.to(device).float()
@@ -480,7 +483,7 @@ def collect_ppo_dataset(
         render_mode=None,
         sim_backend=_rl_backend(config),
         num_envs=1,
-        reconfiguration_freq=int(config.get("rl.reconfiguration_freq", 1)),
+        reconfiguration_freq=config.get("rl.collect_reconfiguration_freq", 1),
     )
     ensure_dir(out_path.parent)
     tmp_path = out_path.with_suffix(".tmp.h5")

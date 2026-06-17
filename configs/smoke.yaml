@@ -25,7 +25,9 @@ data:
 rl:
   sim_backend: physx_cpu
   allow_cpu: true
-  reconfiguration_freq: 1
+  reconfiguration_freq:
+  eval_reconfiguration_freq: 1
+  collect_reconfiguration_freq: 1
   total_timesteps: 16
   num_envs: 1
   num_steps: 8

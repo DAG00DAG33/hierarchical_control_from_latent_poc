@@ -25,7 +25,9 @@ data:
 
 rl:
   sim_backend: auto
-  reconfiguration_freq: 1
+  reconfiguration_freq:
+  eval_reconfiguration_freq: 1
+  collect_reconfiguration_freq: 1
   total_timesteps: 5000000
   num_envs: 512
   num_steps: 50
