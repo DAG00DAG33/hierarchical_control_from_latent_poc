@@ -28,6 +28,22 @@ If `uv run hcl-poc doctor` reports `CUDA available: False`, fix the NVIDIA
 driver/runtime before running the full experiment. CPU is only used for smoke
 tests.
 
+On the current machine, the observed CUDA failure was a kernel-module mismatch:
+the system was booted into `6.17.0-35-generic` while NVIDIA modules were only
+installed for `6.17.0-22-generic`. The matching package is:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  linux-modules-nvidia-580-open-6.17.0-35-generic \
+  linux-modules-nvidia-580-open-generic-hwe-24.04
+sudo modprobe nvidia
+nvidia-smi
+```
+
+If apt downloads 1187-byte files or reports `NOSPLIT`, the ETH guest network is
+intercepting package requests; authenticate at `enter-guest-net.ethz.ch` first.
+
 ## Data
 
 ```bash
