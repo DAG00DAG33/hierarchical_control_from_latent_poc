@@ -18,7 +18,7 @@ from hcl_poc.data import (
 )
 from hcl_poc.eval import extract_runtime_rgb_proprio
 from hcl_poc.features import dino_from_config
-from hcl_poc.flow import flow_matching_loss
+from hcl_poc.flow import flow_matching_loss, sample_flow
 from hcl_poc.models import FlowModel, MLP, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import _rl_paths, load_ppo_agent
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
@@ -104,6 +104,7 @@ class FlowActionDataset(Dataset):
         chunk: int,
         length: int = 200_000,
         goal_horizon: int | None = None,
+        goal_noise_std: float = 0.0,
     ) -> None:
         min_future = chunk if goal_horizon is None else max(chunk, goal_horizon)
         keep = [idx for idx, ep in enumerate(episodes) if ep.length > min_future]
@@ -115,6 +116,7 @@ class FlowActionDataset(Dataset):
         self.chunk = chunk
         self.length = length
         self.goal_horizon = goal_horizon
+        self.goal_noise_std = goal_noise_std
 
     def __len__(self) -> int:
         return self.length
@@ -129,7 +131,10 @@ class FlowActionDataset(Dataset):
         if self.goal_horizon is None:
             cond = z_t
         else:
-            cond = np.concatenate([z_t, self.latents[ep_idx][t + self.goal_horizon]], axis=-1)
+            z_goal = self.latents[ep_idx][t + self.goal_horizon]
+            if self.goal_noise_std > 0.0:
+                z_goal = z_goal + np.random.randn(*z_goal.shape).astype(np.float32) * self.goal_noise_std
+            cond = np.concatenate([z_t, z_goal], axis=-1)
         return {"x": torch.from_numpy(chunk), "cond": torch.from_numpy(cond.astype(np.float32))}
 
 
@@ -387,6 +392,7 @@ def train_flow_policy(
             chunk,
             length=max(10_000, n_traj * 1000),
             goal_horizon=horizon_steps,
+            goal_noise_std=float(config.get("policy.low_subgoal_noise_std", 0.0)),
         )
         sample_dim = chunk * episodes[0].actions.shape[-1]
         cond_dim = 2 * latent_dim
@@ -444,6 +450,155 @@ def train_flow_policy(
         artifact_dir / f"{name}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss}
     )
     return ckpt_path
+
+
+def _load_flow_model(path: Path, device: torch.device) -> tuple[FlowModel, dict]:
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    model = FlowModel(ckpt["sample_dim"], ckpt["cond_dim"], ckpt["hidden_dim"]).to(device)
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+    return model, ckpt
+
+
+def _sample_hierarchy_transitions(
+    episodes: list[Episode],
+    latents: list[np.ndarray],
+    action_norm: Standardizer,
+    horizon: int,
+    chunk: int,
+    samples: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    min_future = max(horizon, chunk)
+    keep = [idx for idx, ep in enumerate(episodes) if ep.length > min_future]
+    if not keep:
+        raise ValueError(f"No episodes longer than required horizon {min_future}")
+    norm_actions = [action_norm.transform(ep.actions) for ep in episodes]
+    z_now: list[np.ndarray] = []
+    z_future: list[np.ndarray] = []
+    action_chunks: list[np.ndarray] = []
+    for _ in range(samples):
+        ep_idx = int(keep[rng.integers(0, len(keep))])
+        ep = episodes[ep_idx]
+        t = int(rng.integers(0, ep.length - min_future))
+        z_now.append(latents[ep_idx][t])
+        z_future.append(latents[ep_idx][t + horizon])
+        action_chunks.append(norm_actions[ep_idx][t : t + chunk].reshape(-1))
+    return (
+        np.stack(z_now, axis=0).astype(np.float32),
+        np.stack(z_future, axis=0).astype(np.float32),
+        np.stack(action_chunks, axis=0).astype(np.float32),
+    )
+
+
+@torch.inference_mode()
+def _sample_flow_numpy(
+    model: FlowModel,
+    cond: np.ndarray,
+    steps: int,
+    device: torch.device,
+    batch_size: int,
+) -> np.ndarray:
+    out: list[np.ndarray] = []
+    for start in range(0, len(cond), batch_size):
+        cond_t = torch.from_numpy(cond[start : start + batch_size]).to(device).float()
+        sample = sample_flow(model, cond_t, steps, model.sample_dim).cpu().numpy()
+        out.append(sample)
+    return np.concatenate(out, axis=0).astype(np.float32)
+
+
+def _latent_metrics(pred: np.ndarray, target: np.ndarray, current: np.ndarray) -> dict[str, float]:
+    pred_mse = float(np.mean((pred - target) ** 2))
+    persistence_mse = float(np.mean((current - target) ** 2))
+    return {
+        "mse": pred_mse,
+        "rmse": float(np.sqrt(pred_mse)),
+        "persistence_mse": persistence_mse,
+        "persistence_rmse": float(np.sqrt(persistence_mse)),
+        "mse_vs_persistence": float(pred_mse / max(persistence_mse, 1e-12)),
+    }
+
+
+def _action_metrics(
+    pred_norm: np.ndarray, target_norm: np.ndarray, action_norm: Standardizer
+) -> dict[str, float]:
+    action_dim = int(action_norm.mean.shape[0])
+    pred = action_norm.inverse(pred_norm.reshape(-1, action_dim)).reshape(pred_norm.shape)
+    target = action_norm.inverse(target_norm.reshape(-1, action_dim)).reshape(target_norm.shape)
+    first_pred = pred[:, :action_dim]
+    first_target = target[:, :action_dim]
+    return {
+        "norm_mse": float(np.mean((pred_norm - target_norm) ** 2)),
+        "chunk_mae": float(np.mean(np.abs(pred - target))),
+        "first_action_mae": float(np.mean(np.abs(first_pred - first_target))),
+        "first_action_max_abs_err": float(np.max(np.abs(first_pred - first_target))),
+    }
+
+
+def diagnose_hierarchy(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    horizon_s: float,
+    samples: int,
+    out_path: Path,
+) -> Path:
+    set_seed(seed)
+    device = default_device()
+    artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
+    h_steps = max(1, int(round(float(horizon_s) * float(config.get("control_freq", 20)))))
+    chunk = int(config.get("policy.action_chunk_steps"))
+    batch_size = int(config.get("policy.batch_size"))
+
+    episodes, latents, encoder_ckpt = encode_latents(config, n_traj, seed)
+    action_norm = Standardizer.from_state_dict(encoder_ckpt["action_norm"])
+    z_now, z_future, action_target = _sample_hierarchy_transitions(
+        episodes,
+        latents,
+        action_norm,
+        h_steps,
+        chunk,
+        samples,
+        seed + 91_000 + h_steps,
+    )
+
+    high, high_ckpt = _load_flow_model(artifact_dir / f"high_h{h_steps}.pt", device)
+    low, low_ckpt = _load_flow_model(artifact_dir / f"low_h{h_steps}.pt", device)
+    flat, flat_ckpt = _load_flow_model(artifact_dir / "flat.pt", device)
+
+    high_pred = _sample_flow_numpy(high, z_now, int(high_ckpt["flow_steps"]), device, batch_size)
+    low_oracle = _sample_flow_numpy(
+        low,
+        np.concatenate([z_now, z_future], axis=-1),
+        int(low_ckpt["flow_steps"]),
+        device,
+        batch_size,
+    )
+    low_sampled_high = _sample_flow_numpy(
+        low,
+        np.concatenate([z_now, high_pred], axis=-1),
+        int(low_ckpt["flow_steps"]),
+        device,
+        batch_size,
+    )
+    flat_pred = _sample_flow_numpy(flat, z_now, int(flat_ckpt["flow_steps"]), device, batch_size)
+
+    metrics = {
+        "config": str(config.path),
+        "n_traj": int(n_traj),
+        "seed": int(seed),
+        "horizon_s": float(horizon_s),
+        "horizon_steps": int(h_steps),
+        "samples": int(samples),
+        "high_subgoal": _latent_metrics(high_pred, z_future, z_now),
+        "low_oracle_subgoal": _action_metrics(low_oracle, action_target, action_norm),
+        "low_sampled_high_subgoal": _action_metrics(low_sampled_high, action_target, action_norm),
+        "flat_latent": _action_metrics(flat_pred, action_target, action_norm),
+    }
+    write_json(out_path, metrics)
+    console.print(f"Wrote hierarchy diagnostic: {out_path}")
+    return out_path
 
 
 def train_bc_policy(

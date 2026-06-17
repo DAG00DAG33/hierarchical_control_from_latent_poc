@@ -236,6 +236,9 @@ Current status on June 17, 2026:
 | hier, spatial DINO, 512D recon WM, 0.05s | 1000 | 0.00 | 0.134 | 0.167 |
 | hier, spatial DINO, 512D recon WM, 0.10s | 1000 | 0.00 | 0.125 | 0.170 |
 | hier, spatial DINO, 512D recon WM, 0.25s | 1000 | 0.00 | 0.109 | 0.163 |
+| hier, spatial DINO, 512D recon WM, noisy low, 0.05s | 1000 | 0.10 | 0.232 | 0.276 |
+| hier, spatial DINO, 512D recon WM, noisy low, 0.10s | 1000 | 0.04 | 0.198 | 0.233 |
+| hier, spatial DINO, 512D recon WM, noisy low, 0.25s | 1000 | 0.02 | 0.174 | 0.219 |
 | hier, spatial DINO, 0.05s | 1000 | 0.00 | 0.119 | 0.152 |
 | hier, spatial DINO, 0.10s | 1000 | 0.00 | 0.113 | 0.150 |
 | hier, spatial DINO, 0.25s | 1000 | 0.00 | 0.115 | 0.150 |
@@ -263,7 +266,12 @@ also improves latent flat control from `0.00` to `0.08` success. The control
 result is still below privileged-state BC and only slightly above direct
 spatial-DINO policies. Re-running the hierarchy with the stronger encoder does
 not recover success at `0.05s`, `0.10s`, or `0.25s`, so the current high-level
-latent-goal plus low-level flow composition is now the clearest bottleneck.
+latent-goal plus low-level flow composition is now the clearest bottleneck. An
+offline diagnostic showed that the low-level policy is good with oracle future
+latents (`~0.07` chunk action MAE) but fails with sampled high-level subgoals
+(`~0.33-0.38` MAE). Adding latent subgoal noise during low-level training makes
+it robust to sampled high-level subgoals (`~0.095-0.103` MAE) and improves the
+best hierarchy rollout to `0.10` success at `0.05s`.
 
 A quick supervised probe checked whether the DINO CLS token contains the
 T-block pose. A small MLP was trained from DINOv2-S/14 CLS features to

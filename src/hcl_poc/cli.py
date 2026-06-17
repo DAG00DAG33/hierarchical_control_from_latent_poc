@@ -14,6 +14,7 @@ from hcl_poc.eval import evaluate, horizon_steps, record_videos
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.train import (
+    diagnose_hierarchy,
     train_bc_policy,
     train_dagger_bc_policy,
     train_flow_policy,
@@ -151,6 +152,18 @@ def probe_cmd(args: argparse.Namespace) -> None:
     )
 
 
+def diagnose_cmd(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    diagnose_hierarchy(
+        config,
+        args.n_traj,
+        args.seed,
+        args.horizon_s,
+        args.samples,
+        Path(args.out),
+    )
+
+
 def rl_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.rl_command == "train":
@@ -284,6 +297,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hidden-dim", type=int, default=256)
     p.add_argument("--batch-size", type=int, default=256)
     p.set_defaults(func=probe_cmd)
+
+    p = sub.add_parser("diagnose-hier")
+    add_config_arg(p)
+    p.add_argument("--n-traj", type=int, default=1000)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--horizon-s", type=float, required=True)
+    p.add_argument("--samples", type=int, default=4096)
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=diagnose_cmd)
 
     p = sub.add_parser("commit")
     p.add_argument("-m", "--message", required=True)
