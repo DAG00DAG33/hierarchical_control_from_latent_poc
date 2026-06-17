@@ -406,6 +406,18 @@ def collect_ppo_dataset(
 
     device = default_device()
     path = Path(checkpoint) if checkpoint is not None else _rl_paths(config).best
+    min_success = config.get("rl.collect_min_success")
+    if min_success is not None:
+        eval_metrics = evaluate_ppo(
+            config,
+            checkpoint=path,
+            episodes=int(config.get("rl.collect_eval_episodes", config.get("rl.eval_episodes", 256))),
+        )
+        if eval_metrics["success"] < float(min_success):
+            raise RuntimeError(
+                f"PPO checkpoint {path} has success={eval_metrics['success']:.3f}, "
+                f"below rl.collect_min_success={float(min_success):.3f}; not collecting demos."
+            )
     agent = load_ppo_agent(path, device)
     extractor = DinoExtractor(config.get("dino.model_name"), device)
     batch_size = int(config.get("dino.batch_size", 32))

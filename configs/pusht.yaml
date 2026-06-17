@@ -47,6 +47,8 @@ rl:
   eval_episodes: 256
   eval_seed: 50000
   collect_seed: 70000
+  collect_min_success: 0.8
+  collect_eval_episodes: 256
   collect_max_attempts: 4000
 
 dino:

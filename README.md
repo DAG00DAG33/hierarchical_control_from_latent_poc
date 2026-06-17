@@ -42,6 +42,10 @@ successful causal rollouts, extracts frozen DINOv2-S/14 RGB features, stores
 `qpos`, `qvel`, and `tcp_pose` as proprioception, and writes the prepared HDF5
 dataset under `data/`.
 
+Collection has a quality gate: the PPO checkpoint must reach
+`rl.collect_min_success` in privileged-state evaluation before any downstream
+DINO/proprio dataset is generated.
+
 This avoids the downloaded ManiSkill Push-T trajectories because, in the
 current simulator install, their saved actions do not reproduce the successful
 rollouts unless the environment state is overwritten during replay.
