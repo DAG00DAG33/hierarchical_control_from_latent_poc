@@ -233,6 +233,9 @@ Current status on June 17, 2026:
 | flat latent | 100 | 0.00 | 0.122 | 0.151 |
 | flat latent, spatial DINO | 1000 | 0.00 | 0.120 | 0.148 |
 | flat latent, spatial DINO, 512D recon WM | 1000 | 0.08 | 0.214 | 0.255 |
+| hier, spatial DINO, 512D recon WM, 0.05s | 1000 | 0.00 | 0.134 | 0.167 |
+| hier, spatial DINO, 512D recon WM, 0.10s | 1000 | 0.00 | 0.125 | 0.170 |
+| hier, spatial DINO, 512D recon WM, 0.25s | 1000 | 0.00 | 0.109 | 0.163 |
 | hier, spatial DINO, 0.05s | 1000 | 0.00 | 0.119 | 0.152 |
 | hier, spatial DINO, 0.10s | 1000 | 0.00 | 0.113 | 0.150 |
 | hier, spatial DINO, 0.25s | 1000 | 0.00 | 0.115 | 0.150 |
@@ -258,9 +261,9 @@ while the original action-conditioned world-model latent discarded it. The
 512D reconstruction-regularized WM latent largely fixes this diagnostic and
 also improves latent flat control from `0.00` to `0.08` success. The control
 result is still below privileged-state BC and only slightly above direct
-spatial-DINO policies, so the next useful hierarchy runs should use this
-stronger encoder while continuing to treat the low-level policy itself as a
-possible bottleneck.
+spatial-DINO policies. Re-running the hierarchy with the stronger encoder does
+not recover success at `0.05s`, `0.10s`, or `0.25s`, so the current high-level
+latent-goal plus low-level flow composition is now the clearest bottleneck.
 
 A quick supervised probe checked whether the DINO CLS token contains the
 T-block pose. A small MLP was trained from DINOv2-S/14 CLS features to
