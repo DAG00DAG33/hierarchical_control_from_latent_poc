@@ -14,7 +14,7 @@ from tqdm import trange
 from hcl_poc.config import Config
 from hcl_poc.features import DinoExtractor
 from hcl_poc.flow import sample_flow
-from hcl_poc.models import FlowModel, ObservationEncoder
+from hcl_poc.models import FlowModel, MLP, ObservationEncoder
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
 
 console = Console()
@@ -103,6 +103,20 @@ def encode_obs_direct(
     return torch.from_numpy(x).to(device).float()
 
 
+@torch.inference_mode()
+def encode_state_direct(
+    obs: Any,
+    input_norm: Standardizer,
+    device: torch.device,
+) -> torch.Tensor:
+    if isinstance(obs, torch.Tensor):
+        state = obs.detach().cpu().numpy()
+    else:
+        state = np.asarray(obs)
+    state = state.reshape(1, -1).astype(np.float32)
+    return torch.from_numpy(input_norm.transform(state)).to(device).float()
+
+
 def _load_encoder(config: Config, n_traj: int, seed: int, device: torch.device) -> tuple[ObservationEncoder, Standardizer]:
     ckpt_path = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt"
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -115,6 +129,14 @@ def _load_encoder(config: Config, n_traj: int, seed: int, device: torch.device) 
 def _load_flow(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
     ckpt = torch.load(path, map_location=device, weights_only=False)
     model = FlowModel(ckpt["sample_dim"], ckpt["cond_dim"], ckpt["hidden_dim"]).to(device)
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+    return model, ckpt
+
+
+def _load_bc(path: Path, device: torch.device) -> tuple[MLP, dict[str, Any]]:
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    model = MLP(ckpt["cond_dim"], ckpt["sample_dim"], ckpt["hidden_dim"], depth=4).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     return model, ckpt
@@ -134,12 +156,13 @@ def _render_frame(env: gym.Env) -> np.ndarray:
 def _sample_action(
     obs: Any,
     method: str,
-    dino: DinoExtractor,
+    dino: DinoExtractor | None,
     device: torch.device,
     action_norm: Standardizer,
     steps: int,
     flat: FlowModel | None,
     input_norm: Standardizer,
+    bc: MLP | None = None,
     encoder: ObservationEncoder | None = None,
     high: FlowModel | None = None,
     high_ckpt: dict[str, Any] | None = None,
@@ -147,11 +170,19 @@ def _sample_action(
     subgoal: torch.Tensor | None = None,
 ) -> tuple[np.ndarray, torch.Tensor | None]:
     if method == "flat_obs":
-        assert flat is not None
+        assert flat is not None and dino is not None
         cond_obs = encode_obs_direct(obs, dino, input_norm, device)
         action_chunk = sample_flow(flat, cond_obs, steps, flat.sample_dim).cpu().numpy()[0]
+    elif method == "bc_obs":
+        assert bc is not None and dino is not None
+        cond_obs = encode_obs_direct(obs, dino, input_norm, device)
+        action_chunk = bc(cond_obs).cpu().numpy()[0]
+    elif method == "bc_state":
+        assert bc is not None
+        cond_state = encode_state_direct(obs, input_norm, device)
+        action_chunk = bc(cond_state).cpu().numpy()[0]
     else:
-        assert encoder is not None
+        assert encoder is not None and dino is not None
         z = encode_obs(obs, dino, encoder, input_norm, device)
         if method == "flat":
             assert flat is not None
@@ -169,13 +200,13 @@ def _sample_action(
 def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: float | None = None) -> Path:
     set_seed(seed)
     device = default_device()
-    dino = DinoExtractor(config.get("dino.model_name"), device)
     artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
     results_dir = ensure_dir(Path(config.get("paths.results_dir")) / f"n{n_traj}" / f"seed{seed}")
     result_name = method if horizon_s is None else f"{method}_{horizon_s:g}s"
     out_path = results_dir / f"{result_name}.json"
     encoder = None
     input_norm = None
+    bc = None
 
     if method == "flat":
         encoder, input_norm = _load_encoder(config, n_traj, seed, device)
@@ -189,6 +220,20 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         input_norm = Standardizer.from_state_dict(flat_ckpt["input_norm"])
         low = high = None
         steps = int(flat_ckpt["flow_steps"])
+    elif method == "bc_obs":
+        bc, bc_ckpt = _load_bc(artifact_dir / "bc_obs.pt", device)
+        action_norm = Standardizer.from_state_dict(bc_ckpt["action_norm"])
+        input_norm = Standardizer.from_state_dict(bc_ckpt["input_norm"])
+        flat = None
+        low = high = None
+        steps = 0
+    elif method == "bc_state":
+        bc, bc_ckpt = _load_bc(artifact_dir / "bc_state.pt", device)
+        action_norm = Standardizer.from_state_dict(bc_ckpt["action_norm"])
+        input_norm = Standardizer.from_state_dict(bc_ckpt["input_norm"])
+        flat = None
+        low = high = None
+        steps = 0
     elif method == "hier":
         encoder, input_norm = _load_encoder(config, n_traj, seed, device)
         if horizon_s is None:
@@ -201,13 +246,16 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         steps = int(low_ckpt["flow_steps"])
     else:
         raise ValueError(method)
+    dino = None if method == "bc_state" else DinoExtractor(config.get("dino.model_name"), device)
 
     env = gym.make(
         config.get("env_id"),
-        obs_mode=config.get("obs_mode"),
+        obs_mode="state" if method == "bc_state" else config.get("obs_mode"),
         control_mode=config.get("control_mode"),
         render_mode=None,
     )
+    action_low = np.asarray(env.action_space.low, dtype=np.float32)
+    action_high = np.asarray(env.action_space.high, dtype=np.float32)
     eval_episodes = int(config.get("data.eval_episodes", 50))
     eval_seed = int(config.get("data.eval_seed", 10000))
     successes: list[float] = []
@@ -244,12 +292,15 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
                 steps,
                 flat,
                 input_norm,
+                bc=bc,
                 encoder=encoder,
                 high=high,
                 high_ckpt=high_ckpt if method == "hier" else None,
                 low=low,
                 subgoal=subgoal,
             )
+            if bool(config.get("policy.clip_actions_to_env_space", False)):
+                action = np.clip(action, action_low, action_high).astype(np.float32)
             latencies.append(timer.elapsed())
             obs, reward, done, truncated, info = env.step(action)
             reward_f = float(np.asarray(reward).reshape(-1)[0])
@@ -305,6 +356,8 @@ def record_videos(
         control_mode=config.get("control_mode"),
         render_mode="rgb_array",
     )
+    action_low = np.asarray(env.action_space.low, dtype=np.float32)
+    action_high = np.asarray(env.action_space.high, dtype=np.float32)
     eval_seed = int(config.get("data.eval_seed", 10000))
     paths: list[Path] = []
     for ep_idx in trange(episodes, desc=f"record {method} n={n_traj} seed={seed}"):
@@ -327,6 +380,8 @@ def record_videos(
                 flat,
                 input_norm,
             )
+            if bool(config.get("policy.clip_actions_to_env_space", False)):
+                action = np.clip(action, action_low, action_high).astype(np.float32)
             obs, reward, done, truncated, info = env.step(action)
             frames.append(_render_frame(env))
             reward_f = float(np.asarray(reward).reshape(-1)[0])

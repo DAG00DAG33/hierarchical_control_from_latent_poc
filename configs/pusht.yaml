@@ -70,6 +70,9 @@ representation:
   horizons_steps: [1, 2, 5, 10, 20, 40, 80]
 
 policy:
+  clip_actions_to_env_space: true
+  action_low: [-1.0, -1.0, -1.0]
+  action_high: [1.0, 1.0, 1.0]
   action_chunk_steps: 8
   flow_steps: 12
   hidden_dim: 512

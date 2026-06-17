@@ -10,4 +10,5 @@ results/**/*.png
 results/**/*.csv
 results/**/*.json
 results/**/*.mp4
+results/videos/
 !results/.gitkeep

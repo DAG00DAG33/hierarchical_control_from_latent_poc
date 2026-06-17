@@ -17,7 +17,8 @@ from hcl_poc.data import (
     load_episodes,
 )
 from hcl_poc.flow import flow_matching_loss
-from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
+from hcl_poc.models import FlowModel, MLP, ObservationEncoder, RepresentationWorldModel
+from hcl_poc.rl import _rl_paths, load_ppo_agent
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
 
 console = Console()
@@ -25,6 +26,27 @@ console = Console()
 
 def _obs_input(ep: Episode, standardizer: Standardizer) -> np.ndarray:
     return standardizer.transform(np.concatenate([ep.features, ep.proprio], axis=-1))
+
+
+def _clip_episode_actions(config: Config, episodes: list[Episode]) -> list[Episode]:
+    if not bool(config.get("policy.clip_actions_to_env_space", False)):
+        return episodes
+    low = np.asarray(config.get("policy.action_low"), dtype=np.float32)
+    high = np.asarray(config.get("policy.action_high"), dtype=np.float32)
+    return [
+        Episode(ep.features, ep.proprio, np.clip(ep.actions, low, high).astype(np.float32))
+        for ep in episodes
+    ]
+
+
+def _to_numpy(value: object) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _scalar_bool(value: object) -> bool:
+    return bool(_to_numpy(value).reshape(-1)[0])
 
 
 class RepresentationDataset(Dataset):
@@ -143,7 +165,7 @@ def train_representation(config: Config, n_traj: int, seed: int) -> Path:
         console.print(f"Encoder exists: {ckpt_path}")
         return ckpt_path
 
-    episodes = load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
     input_norm = fit_input_standardizer(episodes)
     action_norm = fit_action_standardizer(episodes)
     input_dim = episodes[0].features.shape[-1] + episodes[0].proprio.shape[-1]
@@ -218,7 +240,7 @@ def encode_latents(config: Config, n_traj: int, seed: int) -> tuple[list[Episode
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
     input_norm = Standardizer.from_state_dict(ckpt["input_norm"])
-    episodes = load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
     latents: list[np.ndarray] = []
     for ep in episodes:
         x = torch.from_numpy(_obs_input(ep, input_norm)).to(device)
@@ -235,13 +257,14 @@ def train_flow_policy(
     seed: int,
     kind: Literal["flat", "flat_obs", "low", "high"],
     horizon_steps: int | None = None,
+    force: bool = False,
 ) -> Path:
     set_seed(seed)
     device = default_device()
     artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
     name = kind if horizon_steps is None else f"{kind}_h{horizon_steps}"
     ckpt_path = artifact_dir / f"{name}.pt"
-    if ckpt_path.exists():
+    if ckpt_path.exists() and not force:
         console.print(f"Policy exists: {ckpt_path}")
         return ckpt_path
 
@@ -249,7 +272,7 @@ def train_flow_policy(
     hidden_dim = int(config.get("policy.hidden_dim"))
 
     if kind == "flat_obs":
-        episodes = load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+        episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
         input_norm = fit_input_standardizer(episodes)
         action_norm = fit_action_standardizer(episodes)
         obs_inputs = [_obs_input(ep, input_norm) for ep in episodes]
@@ -344,4 +367,200 @@ def train_flow_policy(
         ckpt_path,
     )
     write_json(artifact_dir / f"{name}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    return ckpt_path
+
+
+def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False) -> Path:
+    set_seed(seed)
+    device = default_device()
+    artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
+    ckpt_path = artifact_dir / "bc_obs.pt"
+    if ckpt_path.exists() and not force:
+        console.print(f"BC policy exists: {ckpt_path}")
+        return ckpt_path
+
+    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+    input_norm = fit_input_standardizer(episodes)
+    action_norm = fit_action_standardizer(episodes)
+    obs_inputs = [_obs_input(ep, input_norm) for ep in episodes]
+    chunk = int(config.get("policy.action_chunk_steps"))
+    hidden_dim = int(config.get("policy.hidden_dim"))
+    sample_dim = chunk * episodes[0].actions.shape[-1]
+    cond_dim = obs_inputs[0].shape[-1]
+
+    dataset = FlowActionDataset(
+        episodes,
+        obs_inputs,
+        action_norm,
+        chunk,
+        length=max(10_000, n_traj * 1000),
+    )
+    model = MLP(cond_dim, sample_dim, hidden_dim, depth=4).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(config.get("policy.lr")))
+    loader = _loader(dataset, int(config.get("policy.batch_size")))
+    epochs = int(config.get("policy.epochs"))
+    timer = Timer()
+    last_loss = 0.0
+    for _epoch in tqdm(range(epochs), desc=f"train bc_obs n={n_traj} seed={seed}"):
+        for batch in loader:
+            x = batch["x"].to(device).float()
+            cond = batch["cond"].to(device).float()
+            pred = model(cond)
+            loss = torch.mean((pred - x) ** 2)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            last_loss = float(loss.detach().cpu())
+
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "kind": "bc_obs",
+            "sample_dim": sample_dim,
+            "cond_dim": cond_dim,
+            "hidden_dim": hidden_dim,
+            "action_dim": episodes[0].actions.shape[-1],
+            "chunk": chunk,
+            "action_norm": action_norm.state_dict(),
+            "input_norm": input_norm.state_dict(),
+            "elapsed_s": timer.elapsed(),
+            "last_loss": last_loss,
+        },
+        ckpt_path,
+    )
+    write_json(artifact_dir / "bc_obs_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    return ckpt_path
+
+
+@torch.inference_mode()
+def _collect_state_teacher_episodes(
+    config: Config,
+    n_traj: int,
+    seed: int,
+) -> tuple[list[np.ndarray], list[np.ndarray], int]:
+    import gymnasium as gym
+    import mani_skill  # noqa: F401
+
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode="state",
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        reconfiguration_freq=config.get("rl.collect_reconfiguration_freq", 1),
+    )
+    action_low = np.asarray(config.get("policy.action_low"), dtype=np.float32)
+    action_high = np.asarray(config.get("policy.action_high"), dtype=np.float32)
+    max_attempts = int(config.get("rl.collect_max_attempts", n_traj * 4))
+    states: list[np.ndarray] = []
+    actions: list[np.ndarray] = []
+    attempts = 0
+    collect_seed = int(config.get("rl.collect_seed", 70_000)) + 200_000 + seed * max_attempts
+    for attempts in tqdm(range(1, max_attempts + 1), desc=f"collect state teacher n={n_traj} seed={seed}"):
+        obs, _info = env.reset(seed=collect_seed + attempts)
+        ep_states: list[np.ndarray] = []
+        ep_actions: list[np.ndarray] = []
+        done = False
+        truncated = False
+        success = False
+        while not (done or truncated):
+            state = _to_numpy(obs).reshape(-1).astype(np.float32)
+            state_t = torch.from_numpy(state[None]).to(device).float()
+            action_t, _logprob, _entropy, _value = teacher.get_action_and_value(state_t, deterministic=True)
+            action = action_t.detach().cpu().numpy()[0].astype(np.float32)
+            if bool(config.get("policy.clip_actions_to_env_space", False)):
+                action = np.clip(action, action_low, action_high).astype(np.float32)
+            ep_states.append(state)
+            ep_actions.append(action)
+            obs, _reward, done, truncated, info = env.step(action)
+            success = success or _scalar_bool(info.get("success", False))
+        if success:
+            states.append(np.stack(ep_states, axis=0))
+            actions.append(np.stack(ep_actions, axis=0))
+            if len(states) >= n_traj:
+                break
+    env.close()
+    if len(states) < n_traj:
+        raise RuntimeError(f"Collected only {len(states)}/{n_traj} successful state teacher episodes")
+    return states, actions, attempts
+
+
+def train_state_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False) -> Path:
+    set_seed(seed)
+    device = default_device()
+    artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
+    ckpt_path = artifact_dir / "bc_state.pt"
+    if ckpt_path.exists() and not force:
+        console.print(f"State BC policy exists: {ckpt_path}")
+        return ckpt_path
+
+    states, actions, attempts = _collect_state_teacher_episodes(config, n_traj, seed)
+    input_norm = Standardizer.fit(np.concatenate(states, axis=0))
+    action_norm = Standardizer.fit(np.concatenate(actions, axis=0))
+    state_inputs = [input_norm.transform(x) for x in states]
+    fake_episodes = [
+        Episode(
+            features=np.empty((len(a), 0), dtype=np.float32),
+            proprio=np.empty((len(a), 0), dtype=np.float32),
+            actions=a,
+        )
+        for a in actions
+    ]
+
+    chunk = int(config.get("policy.action_chunk_steps"))
+    hidden_dim = int(config.get("policy.hidden_dim"))
+    sample_dim = chunk * actions[0].shape[-1]
+    cond_dim = states[0].shape[-1]
+    dataset = FlowActionDataset(
+        fake_episodes,
+        state_inputs,
+        action_norm,
+        chunk,
+        length=max(10_000, n_traj * 1000),
+    )
+    model = MLP(cond_dim, sample_dim, hidden_dim, depth=4).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(config.get("policy.lr")))
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("policy.batch_size")),
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    epochs = int(config.get("policy.epochs"))
+    timer = Timer()
+    last_loss = 0.0
+    for _epoch in tqdm(range(epochs), desc=f"train bc_state n={n_traj} seed={seed}"):
+        for batch in loader:
+            x = batch["x"].to(device).float()
+            cond = batch["cond"].to(device).float()
+            pred = model(cond)
+            loss = torch.mean((pred - x) ** 2)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            last_loss = float(loss.detach().cpu())
+
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "kind": "bc_state",
+            "sample_dim": sample_dim,
+            "cond_dim": cond_dim,
+            "hidden_dim": hidden_dim,
+            "action_dim": actions[0].shape[-1],
+            "chunk": chunk,
+            "action_norm": action_norm.state_dict(),
+            "input_norm": input_norm.state_dict(),
+            "attempts": attempts,
+            "elapsed_s": timer.elapsed(),
+            "last_loss": last_loss,
+        },
+        ckpt_path,
+    )
+    write_json(
+        artifact_dir / "bc_state_metrics.json",
+        {"elapsed_s": timer.elapsed(), "loss": last_loss, "attempts": attempts},
+    )
     return ckpt_path

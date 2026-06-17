@@ -14,6 +14,10 @@ def _label(row: pd.Series) -> str:
         return "flat latent"
     if row["method"] == "flat_obs":
         return "flat obs"
+    if row["method"] == "bc_obs":
+        return "BC obs"
+    if row["method"] == "bc_state":
+        return "BC privileged state"
     return f"hier {row['horizon_s']:g}s"
 
 

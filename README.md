@@ -99,6 +99,21 @@ To record inspection videos for a trained direct-observation flat policy:
 uv run hcl-poc video flat_obs --config configs/pusht.yaml --n-traj 200 --seed 0 --episodes 4
 ```
 
+Two imitation-learning diagnostics are also available:
+
+```bash
+uv run hcl-poc train bc_obs --config configs/pusht.yaml --n-traj 1000 --seed 0
+uv run hcl-poc eval bc_obs --config configs/pusht.yaml --n-traj 1000 --seed 0
+
+uv run hcl-poc train bc_state --config configs/pusht.yaml --n-traj 1000 --seed 0
+uv run hcl-poc eval bc_state --config configs/pusht.yaml --n-traj 1000 --seed 0
+```
+
+`bc_obs` is deterministic behavioral cloning from the same DINO/proprio input
+used by the visual policies. `bc_state` distills the privileged PPO teacher from
+the full simulator state and is only a diagnostic; it is not part of the final
+non-privileged method.
+
 ## Method
 
 The encoder maps the current RGB/proprio observation to a latent state:
@@ -147,7 +162,19 @@ Current status on June 17, 2026:
   flow-matching training loss substantially. With more data it reached one
   successful rollout out of 50 at 1000 trajectories, but the 2000-trajectory
   run dropped back to zero under the current sampler/evaluator.
-- Four `flat_obs` n=200 inspection videos were generated in `results/videos/`.
+- `flat_obs` inspection videos were generated for n=200, n=1000, and n=2000 in
+  `results/videos/`. Contact sheets for one n=1000 and one n=2000 rollout are
+  in `results/videos/contact_sheets/`.
+- The PPO teacher emits some raw actions outside the `Box(-1, 1, shape=(3,))`
+  action space. Clipping the teacher does not change privileged PPO success
+  (`0.863` raw and clipped), so downstream training and evaluation now clip
+  actions to the environment bounds explicitly.
+- Deterministic BC from DINO/proprio (`bc_obs`) remains near zero success, while
+  deterministic BC from full privileged state (`bc_state`) reaches `0.46`
+  success with 1000 teacher rollouts. This shows that plain BC can solve a
+  substantial fraction of Push-T when object/goal state is available; the
+  current DINO CLS-token observation is the main bottleneck before returning to
+  hierarchy.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
@@ -158,7 +185,12 @@ Current status on June 17, 2026:
 | flat obs | 200 | 0.00 | 0.124 | 0.188 |
 | flat obs | 1000 | 0.02 | 0.144 | 0.204 |
 | flat obs | 2000 | 0.00 | 0.116 | 0.170 |
+| BC obs | 1000 | 0.00 | 0.110 | 0.176 |
+| BC obs | 2000 | 0.02 | 0.137 | 0.197 |
+| BC privileged state | 1000 | 0.46 | 0.582 | 0.594 |
 
 The direct-observation result suggests the learned WM latent is not the only
-issue. The action policy objective/sampling or closed-loop imitation setup needs
-debugging before spending more compute on hierarchical ablations.
+issue. Before spending more compute on hierarchical ablations, the visual
+observation path should be improved. The most direct next experiments are
+spatial DINO patch features or a small trainable visual encoder, then DAgger
+with the privileged PPO teacher if closed-loop covariate shift remains.

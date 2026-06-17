@@ -12,7 +12,7 @@ from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps, record_videos
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
-from hcl_poc.train import train_flow_policy, train_representation
+from hcl_poc.train import train_bc_policy, train_flow_policy, train_representation, train_state_bc_policy
 
 console = Console()
 
@@ -58,11 +58,22 @@ def train_cmd(args: argparse.Namespace) -> None:
     if args.kind == "encoder":
         train_representation(config, args.n_traj, args.seed)
     elif args.kind in {"flat", "flat_obs"}:
-        train_flow_policy(config, args.n_traj, args.seed, args.kind)
+        train_flow_policy(config, args.n_traj, args.seed, args.kind, force=args.force)
+    elif args.kind == "bc_obs":
+        train_bc_policy(config, args.n_traj, args.seed, force=args.force)
+    elif args.kind == "bc_state":
+        train_state_bc_policy(config, args.n_traj, args.seed, force=args.force)
     elif args.kind in {"high", "low"}:
         if args.horizon_s is None:
             raise ValueError("--horizon-s is required for high/low")
-        train_flow_policy(config, args.n_traj, args.seed, args.kind, horizon_steps(config, args.horizon_s))
+        train_flow_policy(
+            config,
+            args.n_traj,
+            args.seed,
+            args.kind,
+            horizon_steps(config, args.horizon_s),
+            force=args.force,
+        )
     else:
         raise ValueError(args.kind)
 
@@ -171,15 +182,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("train")
     add_config_arg(p)
-    p.add_argument("kind", choices=["encoder", "flat", "flat_obs", "high", "low"])
+    p.add_argument("kind", choices=["encoder", "flat", "flat_obs", "bc_obs", "bc_state", "high", "low"])
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon-s", type=float)
+    p.add_argument("--force", action="store_true")
     p.set_defaults(func=train_cmd)
 
     p = sub.add_parser("eval")
     add_config_arg(p)
-    p.add_argument("method", choices=["flat", "flat_obs", "hier"])
+    p.add_argument("method", choices=["flat", "flat_obs", "bc_obs", "bc_state", "hier"])
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon-s", type=float)

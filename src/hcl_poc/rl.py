@@ -485,6 +485,8 @@ def collect_ppo_dataset(
         num_envs=1,
         reconfiguration_freq=config.get("rl.collect_reconfiguration_freq", 1),
     )
+    action_low = np.asarray(env.action_space.low, dtype=np.float32)
+    action_high = np.asarray(env.action_space.high, dtype=np.float32)
     ensure_dir(out_path.parent)
     tmp_path = out_path.with_suffix(".tmp.h5")
     if tmp_path.exists():
@@ -514,6 +516,8 @@ def collect_ppo_dataset(
                     deterministic=True,
                 )
                 action = action_t.detach().cpu().numpy()[0].astype(np.float32)
+                if bool(config.get("policy.clip_actions_to_env_space", False)):
+                    action = np.clip(action, action_low, action_high).astype(np.float32)
                 rgbs.append(rgb)
                 proprios.append(state[:21].copy())
                 actions.append(action)
