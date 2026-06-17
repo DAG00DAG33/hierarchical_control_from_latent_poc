@@ -16,6 +16,8 @@ from hcl_poc.data import (
     fit_input_standardizer,
     load_episodes,
 )
+from hcl_poc.eval import extract_runtime_rgb_proprio
+from hcl_poc.features import dino_from_config
 from hcl_poc.flow import flow_matching_loss
 from hcl_poc.models import FlowModel, MLP, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import _rl_paths, load_ppo_agent
@@ -157,6 +159,25 @@ class FlowLatentDataset(Dataset):
         return {
             "x": torch.from_numpy(self.latents[ep_idx][t + self.horizon]),
             "cond": torch.from_numpy(self.latents[ep_idx][t]),
+        }
+
+
+class ArrayActionDataset(Dataset):
+    def __init__(self, inputs: np.ndarray, actions: np.ndarray, length: int) -> None:
+        if len(inputs) != len(actions):
+            raise ValueError(f"Input/action length mismatch: {len(inputs)} != {len(actions)}")
+        self.inputs = inputs.astype(np.float32)
+        self.actions = actions.astype(np.float32)
+        self.length = length
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _idx: int) -> dict[str, torch.Tensor]:
+        idx = int(np.random.randint(0, len(self.inputs)))
+        return {
+            "cond": torch.from_numpy(self.inputs[idx]),
+            "x": torch.from_numpy(self.actions[idx]),
         }
 
 
@@ -380,11 +401,12 @@ def train_flow_policy(
     return ckpt_path
 
 
-def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False) -> Path:
+def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False, one_step: bool = False) -> Path:
     set_seed(seed)
     device = default_device()
     artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
-    ckpt_path = artifact_dir / "bc_obs.pt"
+    kind = "bc_obs_1step" if one_step else "bc_obs"
+    ckpt_path = artifact_dir / f"{kind}.pt"
     if ckpt_path.exists() and not force:
         console.print(f"BC policy exists: {ckpt_path}")
         return ckpt_path
@@ -393,7 +415,7 @@ def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False)
     input_norm = fit_input_standardizer(episodes)
     action_norm = fit_action_standardizer(episodes)
     obs_inputs = [_obs_input(ep, input_norm) for ep in episodes]
-    chunk = int(config.get("policy.action_chunk_steps"))
+    chunk = 1 if one_step else int(config.get("policy.action_chunk_steps"))
     hidden_dim = int(config.get("policy.hidden_dim"))
     sample_dim = chunk * episodes[0].actions.shape[-1]
     cond_dim = obs_inputs[0].shape[-1]
@@ -411,7 +433,7 @@ def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False)
     epochs = int(config.get("policy.epochs"))
     timer = Timer()
     last_loss = 0.0
-    for _epoch in tqdm(range(epochs), desc=f"train bc_obs n={n_traj} seed={seed}"):
+    for _epoch in tqdm(range(epochs), desc=f"train {kind} n={n_traj} seed={seed}"):
         for batch in loader:
             x = batch["x"].to(device).float()
             cond = batch["cond"].to(device).float()
@@ -425,7 +447,7 @@ def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False)
     torch.save(
         {
             "model": model.state_dict(),
-            "kind": "bc_obs",
+            "kind": kind,
             "sample_dim": sample_dim,
             "cond_dim": cond_dim,
             "hidden_dim": hidden_dim,
@@ -439,7 +461,184 @@ def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False)
         },
         ckpt_path,
     )
-    write_json(artifact_dir / "bc_obs_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    write_json(artifact_dir / f"{kind}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    return ckpt_path
+
+
+def _structured_state_vector(obs: object) -> np.ndarray:
+    if not isinstance(obs, dict):
+        raise TypeError("DAgger teacher labeling requires structured state observations")
+    agent = obs["agent"]
+    extra = obs["extra"]
+    parts = [
+        _to_numpy(agent["qpos"]).reshape(-1),
+        _to_numpy(agent["qvel"]).reshape(-1),
+        _to_numpy(extra["tcp_pose"]).reshape(-1),
+        _to_numpy(extra["goal_pos"]).reshape(-1),
+        _to_numpy(extra["obj_pose"]).reshape(-1),
+    ]
+    return np.concatenate(parts, axis=0).astype(np.float32)
+
+
+@torch.inference_mode()
+def _collect_dagger_labels(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    rollout_episodes: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    import gymnasium as gym
+    import mani_skill  # noqa: F401
+
+    device = default_device()
+    artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
+    init_ckpt_path = artifact_dir / "bc_obs_1step.pt"
+    if not init_ckpt_path.exists():
+        train_bc_policy(config, n_traj, seed, one_step=True)
+    learner_ckpt = torch.load(init_ckpt_path, map_location=device, weights_only=False)
+    learner = MLP(learner_ckpt["cond_dim"], learner_ckpt["sample_dim"], learner_ckpt["hidden_dim"], depth=4).to(device)
+    learner.load_state_dict(learner_ckpt["model"])
+    learner.eval()
+    input_norm = Standardizer.from_state_dict(learner_ckpt["input_norm"])
+    action_norm = Standardizer.from_state_dict(learner_ckpt["action_norm"])
+
+    dino = dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode=config.get("obs_mode"),
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+    )
+    action_low = np.asarray(env.action_space.low, dtype=np.float32)
+    action_high = np.asarray(env.action_space.high, dtype=np.float32)
+    eval_seed = int(config.get("data.eval_seed", 10000)) + 300_000 + seed * 10_000
+
+    inputs: list[np.ndarray] = []
+    teacher_actions: list[np.ndarray] = []
+    for ep_idx in tqdm(range(rollout_episodes), desc=f"collect dagger labels n={n_traj} seed={seed}"):
+        obs, _info = env.reset(seed=eval_seed + ep_idx)
+        done = False
+        truncated = False
+        while not (done or truncated):
+            rgb, proprio = extract_runtime_rgb_proprio(obs)
+            feat = dino.encode_batch(rgb[None])[0]
+            learner_input = np.concatenate([feat, proprio], axis=0).astype(np.float32)
+            cond = torch.from_numpy(input_norm.transform(learner_input[None])).to(device).float()
+            pred = learner(cond).cpu().numpy()[0]
+            action = action_norm.inverse(pred.reshape(-1, action_norm.mean.shape[0]))[0]
+            if bool(config.get("policy.clip_actions_to_env_space", False)):
+                action = np.clip(action, action_low, action_high).astype(np.float32)
+
+            state = _structured_state_vector(obs)
+            teacher_action_t, _logprob, _entropy, _value = teacher.get_action_and_value(
+                torch.from_numpy(state[None]).to(device).float(),
+                deterministic=True,
+            )
+            teacher_action = teacher_action_t.detach().cpu().numpy()[0].astype(np.float32)
+            if bool(config.get("policy.clip_actions_to_env_space", False)):
+                teacher_action = np.clip(teacher_action, action_low, action_high).astype(np.float32)
+            inputs.append(learner_input)
+            teacher_actions.append(teacher_action)
+
+            obs, _reward, done, truncated, _info = env.step(action)
+    env.close()
+    return np.stack(inputs, axis=0), np.stack(teacher_actions, axis=0)
+
+
+def train_dagger_bc_policy(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    force: bool = False,
+    rollout_episodes: int | None = None,
+) -> Path:
+    set_seed(seed)
+    device = default_device()
+    artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
+    ckpt_path = artifact_dir / "bc_obs_dagger.pt"
+    if ckpt_path.exists() and not force:
+        console.print(f"DAgger BC policy exists: {ckpt_path}")
+        return ckpt_path
+
+    rollout_episodes = rollout_episodes or int(config.get("data.eval_episodes", 50))
+    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+    demo_inputs = np.concatenate([np.concatenate([ep.features, ep.proprio], axis=-1) for ep in episodes], axis=0)
+    demo_actions = np.concatenate([ep.actions for ep in episodes], axis=0)
+    labels_path = artifact_dir / "bc_obs_dagger_labels.npz"
+    if labels_path.exists() and not force:
+        labels = np.load(labels_path)
+        dagger_inputs = labels["inputs"]
+        dagger_actions = labels["actions"]
+    else:
+        dagger_inputs, dagger_actions = _collect_dagger_labels(config, n_traj, seed, rollout_episodes)
+        np.savez_compressed(labels_path, inputs=dagger_inputs, actions=dagger_actions)
+
+    raw_inputs = np.concatenate([demo_inputs, dagger_inputs], axis=0).astype(np.float32)
+    raw_actions = np.concatenate([demo_actions, dagger_actions], axis=0).astype(np.float32)
+    input_norm = Standardizer.fit(raw_inputs)
+    action_norm = Standardizer.fit(raw_actions)
+    dataset = ArrayActionDataset(
+        input_norm.transform(raw_inputs),
+        action_norm.transform(raw_actions),
+        length=max(10_000, n_traj * 1000),
+    )
+
+    hidden_dim = int(config.get("policy.hidden_dim"))
+    action_dim = raw_actions.shape[-1]
+    model = MLP(raw_inputs.shape[-1], action_dim, hidden_dim, depth=4).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(config.get("policy.lr")))
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("policy.batch_size")),
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    epochs = int(config.get("policy.epochs"))
+    timer = Timer()
+    last_loss = 0.0
+    for _epoch in tqdm(range(epochs), desc=f"train bc_obs_dagger n={n_traj} seed={seed}"):
+        for batch in loader:
+            x = batch["x"].to(device).float()
+            cond = batch["cond"].to(device).float()
+            pred = model(cond)
+            loss = torch.mean((pred - x) ** 2)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            last_loss = float(loss.detach().cpu())
+
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "kind": "bc_obs_dagger",
+            "sample_dim": action_dim,
+            "cond_dim": raw_inputs.shape[-1],
+            "hidden_dim": hidden_dim,
+            "action_dim": action_dim,
+            "chunk": 1,
+            "action_norm": action_norm.state_dict(),
+            "input_norm": input_norm.state_dict(),
+            "dagger_rollout_episodes": rollout_episodes,
+            "dagger_samples": int(len(dagger_inputs)),
+            "demo_samples": int(len(demo_inputs)),
+            **_dino_metadata(config),
+            "elapsed_s": timer.elapsed(),
+            "last_loss": last_loss,
+        },
+        ckpt_path,
+    )
+    write_json(
+        artifact_dir / "bc_obs_dagger_metrics.json",
+        {
+            "elapsed_s": timer.elapsed(),
+            "loss": last_loss,
+            "dagger_rollout_episodes": rollout_episodes,
+            "dagger_samples": int(len(dagger_inputs)),
+            "demo_samples": int(len(demo_inputs)),
+        },
+    )
     return ckpt_path
 
 

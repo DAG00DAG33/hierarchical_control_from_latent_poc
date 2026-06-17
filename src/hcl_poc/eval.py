@@ -188,7 +188,7 @@ def _sample_action(
         assert flat is not None and dino is not None
         cond_obs = encode_obs_direct(obs, dino, input_norm, device)
         action_chunk = sample_flow(flat, cond_obs, steps, flat.sample_dim).cpu().numpy()[0]
-    elif method == "bc_obs":
+    elif method in {"bc_obs", "bc_obs_1step", "bc_obs_dagger"}:
         assert bc is not None and dino is not None
         cond_obs = encode_obs_direct(obs, dino, input_norm, device)
         action_chunk = bc(cond_obs).cpu().numpy()[0]
@@ -237,8 +237,8 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         low = high = None
         steps = int(flat_ckpt["flow_steps"])
         dino_ckpt = flat_ckpt
-    elif method == "bc_obs":
-        bc, bc_ckpt = _load_bc(artifact_dir / "bc_obs.pt", device)
+    elif method in {"bc_obs", "bc_obs_1step", "bc_obs_dagger"}:
+        bc, bc_ckpt = _load_bc(artifact_dir / f"{method}.pt", device)
         action_norm = Standardizer.from_state_dict(bc_ckpt["action_norm"])
         input_norm = Standardizer.from_state_dict(bc_ckpt["input_norm"])
         flat = None
