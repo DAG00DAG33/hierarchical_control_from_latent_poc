@@ -81,7 +81,7 @@ policy:
   batch_size: 512
   epochs: 25
   lr: 0.0003
-  high_level_horizons_s: [0.25, 1.0, 4.0]
+  high_level_horizons_s: [0.05, 0.10, 0.25]
   high_level_refresh_fraction: 0.25
 
 sweep:

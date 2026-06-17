@@ -7,7 +7,7 @@ low-level policy uses that latent as a subgoal.
 The intended experiment compares:
 
 - a flat flow-matching action policy;
-- hierarchical flow policies with high-level horizons of `0.25s`, `1s`, and `4s`;
+- hierarchical flow policies with high-level horizons of `0.05s`, `0.10s`, and `0.25s`;
 - nested training sets with `50`, `100`, and `200` demonstration trajectories.
 
 The observation is a frozen DINOv2 RGB feature plus non-privileged robot
@@ -169,8 +169,9 @@ Current status on June 17, 2026:
 - The privileged PPO expert was trained in this repo and reached `0.863`
   deterministic success over 256 evaluation episodes.
 - The prepared DINO/proprio dataset contains 2000 successful PPO rollouts.
-- The latent-conditioned flat baseline and the first hierarchical staged runs
-  currently produce zero closed-loop success.
+- The latent-conditioned flat baseline and the hierarchical runs currently
+  produce zero closed-loop success, including the smaller `0.05s`, `0.10s`,
+  and `0.25s` spatial-DINO hierarchy horizons.
 - A direct-observation flat baseline (`flat_obs`) was added to test whether the
   learned WM latent encoder is the main failure point. It reduces the
   flow-matching training loss substantially. With more data it reached one
@@ -203,11 +204,20 @@ Current status on June 17, 2026:
   but improves final reward to `0.273` and max reward to `0.296`.
 - The spatial direct-observation flow baseline reaches `0.04` success at 1000
   trajectories, so the flow sampler is not outperforming deterministic BC yet.
+- A pose probe on the spatial features confirms that the observation contains
+  the T pose, but the learned latent does not. A small MLP from spatial DINO
+  predicts T position to about `4 mm` MAE and yaw to `4.5 deg` MAE. The same
+  probe from the learned `z` is essentially baseline: about `3.6 cm`/`4.6 cm`
+  position MAE and `30 deg` yaw MAE.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
 | flat latent | 50 | 0.00 | 0.120 | 0.149 |
 | flat latent | 100 | 0.00 | 0.122 | 0.151 |
+| flat latent, spatial DINO | 1000 | 0.00 | 0.120 | 0.148 |
+| hier, spatial DINO, 0.05s | 1000 | 0.00 | 0.119 | 0.152 |
+| hier, spatial DINO, 0.10s | 1000 | 0.00 | 0.113 | 0.150 |
+| hier, spatial DINO, 0.25s | 1000 | 0.00 | 0.115 | 0.150 |
 | flat obs | 50 | 0.00 | 0.123 | 0.175 |
 | flat obs | 100 | 0.00 | 0.104 | 0.170 |
 | flat obs | 200 | 0.00 | 0.124 | 0.188 |
@@ -224,11 +234,13 @@ Current status on June 17, 2026:
 | BC obs, spatial DINO, DAgger | 1000 | 0.06 | 0.273 | 0.296 |
 | BC privileged state | 1000 | 0.46 | 0.582 | 0.594 |
 
-The direct-observation result suggests the learned WM latent is not the only
-issue. Before spending more compute on hierarchical ablations, the visual
-observation path should be improved. The most direct next experiments are
-spatial DINO patch features or a small trainable visual encoder, then DAgger
-with the privileged PPO teacher if closed-loop covariate shift remains.
+The direct-observation result suggests the learned WM latent is a major
+bottleneck: spatial DINO itself contains the object pose, while the current
+action-conditioned world-model latent does not preserve it. Before spending
+more compute on hierarchy variants, the representation objective should be
+changed so `z` remains useful for control, for example by adding an explicit
+observation reconstruction/pose auxiliary loss or by training the policy
+directly on spatial DINO features.
 
 A quick supervised probe checked whether the DINO CLS token contains the
 T-block pose. A small MLP was trained from DINOv2-S/14 CLS features to
