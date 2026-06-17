@@ -8,11 +8,13 @@ camera_name: base_camera
 paths:
   data_dir: data
   raw_demo_dir: data/raw
-  prepared_path: data/prepared/pusht_dino_proprio.h5
-  artifact_dir: artifacts
-  results_dir: results
+  prepared_path: data/prepared/pusht_ppo_dino_proprio_tcp.h5
+  artifact_dir: artifacts/ppo_main
+  results_dir: results/ppo_main
+  rl_dir: artifacts/rl
 
 data:
+  source: privileged_ppo
   max_trajectories: 200
   replay_count: 240
   replay_num_envs: 8
@@ -20,6 +22,32 @@ data:
   eval_episodes: 50
   eval_seed: 10000
   batch_size_features: 32
+
+rl:
+  sim_backend: auto
+  reconfiguration_freq: 1
+  total_timesteps: 5000000
+  num_envs: 1024
+  num_steps: 100
+  hidden_dim: 256
+  learning_rate: 0.0003
+  anneal_lr: true
+  gamma: 0.8
+  gae_lambda: 0.9
+  num_minibatches: 32
+  update_epochs: 8
+  clip_coef: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl:
+  save_every_updates: 5
+  target_success: 0.9
+  eval_num_envs: 256
+  eval_episodes: 256
+  eval_seed: 50000
+  collect_seed: 70000
+  collect_max_attempts: 4000
 
 dino:
   model_name: facebook/dinov2-small

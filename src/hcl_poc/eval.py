@@ -11,7 +11,6 @@ from rich.console import Console
 from tqdm import trange
 
 from hcl_poc.config import Config
-from hcl_poc.data import Episode
 from hcl_poc.features import DinoExtractor
 from hcl_poc.flow import sample_flow
 from hcl_poc.models import FlowModel, ObservationEncoder
@@ -62,15 +61,18 @@ def extract_runtime_rgb_proprio(obs: Any) -> tuple[np.ndarray, np.ndarray]:
 
     qpos = None
     qvel = None
+    tcp_pose = None
     for key, value in flat.items():
         low = key.lower()
         if low.endswith("qpos") or "/qpos" in low:
             qpos = value.reshape(-1)
         if low.endswith("qvel") or "/qvel" in low:
             qvel = value.reshape(-1)
-    if qpos is None or qvel is None:
-        raise KeyError(f"Missing qpos/qvel in observation keys: {sorted(flat)[:80]}")
-    return rgb.astype(np.uint8), np.concatenate([qpos, qvel]).astype(np.float32)
+        if low.endswith("tcp_pose") or "/tcp_pose" in low:
+            tcp_pose = value.reshape(-1)
+    if qpos is None or qvel is None or tcp_pose is None:
+        raise KeyError(f"Missing qpos/qvel/tcp_pose in observation keys: {sorted(flat)[:80]}")
+    return rgb.astype(np.uint8), np.concatenate([qpos, qvel, tcp_pose]).astype(np.float32)
 
 
 @torch.inference_mode()

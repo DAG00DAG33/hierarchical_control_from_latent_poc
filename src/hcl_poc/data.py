@@ -4,7 +4,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import h5py
 import numpy as np
@@ -155,7 +154,11 @@ def _extract_raw_episode(group: h5py.Group) -> tuple[np.ndarray, np.ndarray, np.
         rgb = rgb[..., :3]
     qpos = as_array(_pick_named(datasets, "qpos"), length=length).astype(np.float32)
     qvel = as_array(_pick_named(datasets, "qvel"), length=length).astype(np.float32)
-    proprio = np.concatenate([qpos.reshape(length, -1), qvel.reshape(length, -1)], axis=-1)
+    tcp_pose = as_array(_pick_named(datasets, "tcp_pose"), length=length).astype(np.float32)
+    proprio = np.concatenate(
+        [qpos.reshape(length, -1), qvel.reshape(length, -1), tcp_pose.reshape(length, -1)],
+        axis=-1,
+    )
     return rgb, proprio, actions
 
 

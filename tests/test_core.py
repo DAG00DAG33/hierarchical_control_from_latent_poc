@@ -7,6 +7,7 @@ from hcl_poc.config import Config
 from hcl_poc.eval import horizon_steps
 from hcl_poc.flow import flow_matching_loss, sample_flow
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
+from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
 
 
@@ -44,3 +45,12 @@ def test_flow_shapes_and_sample() -> None:
     sample = sample_flow(model, cond, steps=2, sample_dim=6)
     assert sample.shape == (5, 6)
 
+
+def test_ppo_agent_shapes() -> None:
+    agent = PPOAgent(obs_dim=31, action_dim=3, hidden_dim=16)
+    obs = torch.randn(4, 31)
+    action, logprob, entropy, value = agent.get_action_and_value(obs, deterministic=True)
+    assert action.shape == (4, 3)
+    assert logprob.shape == (4,)
+    assert entropy.shape == (4,)
+    assert value.shape == (4,)

@@ -22,19 +22,29 @@ uv sync --python 3.11
 uv run hcl-poc doctor
 ```
 
-If GPU memory is already occupied, close the other process before training. The
-initial machine check found an RTX 4060 Ti with 16 GB VRAM, but only about 3 GB
-was free at that moment.
+Privileged PPO training uses ManiSkill vectorized simulation and expects CUDA.
+If `uv run hcl-poc doctor` reports `CUDA available: False`, fix the NVIDIA
+driver/runtime before running the full experiment. CPU is only used for smoke
+tests.
 
 ## Data
 
 ```bash
+uv run hcl-poc rl train --config configs/pusht.yaml
+uv run hcl-poc rl eval --config configs/pusht.yaml
 uv run hcl-poc data prepare --config configs/pusht.yaml
 ```
 
-The data command downloads ManiSkill `PushT-v1` demonstrations when needed,
-replays them to `rgb+state_dict` with `pd_ee_delta_pos`, extracts frozen
-DINOv2-S/14 features, and writes the prepared HDF5 dataset under `data/`.
+The current dataset source is a privileged-state PPO policy trained in this
+repository with the same `pd_ee_delta_pos` action space used by the downstream
+policies. The collector runs that PPO policy in `rgb+state` mode, keeps only
+successful causal rollouts, extracts frozen DINOv2-S/14 RGB features, stores
+`qpos`, `qvel`, and `tcp_pose` as proprioception, and writes the prepared HDF5
+dataset under `data/`.
+
+This avoids the downloaded ManiSkill Push-T trajectories because, in the
+current simulator install, their saved actions do not reproduce the successful
+rollouts unless the environment state is overwritten during replay.
 
 ## Training And Evaluation
 
@@ -90,3 +100,6 @@ conditional flow matching.
 Results will be written by `hcl-poc report` into `results/` and summarized here
 after the staged/full runs complete.
 
+Current status: the flat and hierarchical pipeline is implemented and smoke
+tested. Full PPO training and final Push-T results are pending a working CUDA
+driver on this machine.

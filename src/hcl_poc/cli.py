@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from pathlib import Path
 
 import torch
 from rich.console import Console
@@ -12,6 +11,7 @@ from hcl_poc.config import load_config
 from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps
 from hcl_poc.report import build_report
+from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, train_ppo
 from hcl_poc.train import train_flow_policy, train_representation
 
 console = Console()
@@ -45,7 +45,10 @@ def doctor(args: argparse.Namespace) -> None:
 def data_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.data_command == "prepare":
-        prepare_dataset(config, force=args.force)
+        if config.get("data.source") == "privileged_ppo":
+            collect_ppo_dataset(config, force=args.force)
+        else:
+            prepare_dataset(config, force=args.force)
     else:
         raise ValueError(args.data_command)
 
@@ -76,7 +79,10 @@ def run_sweep(args: argparse.Namespace) -> None:
     n_values = [int(n) for n in config.get("data.train_trajectories")]
     horizons = [float(h) for h in config.get("policy.high_level_horizons_s")]
 
-    prepare_dataset(config, force=False)
+    if config.get("data.source") == "privileged_ppo":
+        collect_ppo_dataset(config, force=False)
+    else:
+        prepare_dataset(config, force=False)
     for seed in seeds:
         for n_traj in n_values:
             train_representation(config, n_traj, seed)
@@ -94,6 +100,23 @@ def report_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     path = build_report(config)
     console.print(f"Wrote {path}")
+
+
+def rl_cmd(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    if args.rl_command == "train":
+        train_ppo(config, resume=not args.no_resume)
+    elif args.rl_command == "eval":
+        evaluate_ppo(config, checkpoint=args.checkpoint, episodes=args.episodes)
+    elif args.rl_command == "collect":
+        collect_ppo_dataset(
+            config,
+            checkpoint=args.checkpoint,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    else:
+        raise ValueError(args.rl_command)
 
 
 def commit_cmd(args: argparse.Namespace) -> None:
@@ -116,6 +139,25 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(pp)
     pp.add_argument("--force", action="store_true")
     pp.set_defaults(func=data_cmd)
+
+    p = sub.add_parser("rl")
+    add_config_arg(p)
+    rl_sub = p.add_subparsers(dest="rl_command", required=True)
+    rt = rl_sub.add_parser("train")
+    add_config_arg(rt)
+    rt.add_argument("--no-resume", action="store_true")
+    rt.set_defaults(func=rl_cmd)
+    re = rl_sub.add_parser("eval")
+    add_config_arg(re)
+    re.add_argument("--checkpoint")
+    re.add_argument("--episodes", type=int)
+    re.set_defaults(func=rl_cmd)
+    rc = rl_sub.add_parser("collect")
+    add_config_arg(rc)
+    rc.add_argument("--checkpoint")
+    rc.add_argument("--episodes", type=int)
+    rc.add_argument("--force", action="store_true")
+    rc.set_defaults(func=rl_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

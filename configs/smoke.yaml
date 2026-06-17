@@ -11,6 +11,7 @@ paths:
   prepared_path: data/prepared/pusht_dino_proprio.h5
   artifact_dir: artifacts/smoke
   results_dir: results/smoke
+  rl_dir: artifacts/rl_smoke
 
 data:
   max_trajectories: 200
@@ -20,6 +21,33 @@ data:
   eval_episodes: 1
   eval_seed: 12000
   batch_size_features: 32
+
+rl:
+  sim_backend: physx_cpu
+  allow_cpu: true
+  reconfiguration_freq: 1
+  total_timesteps: 16
+  num_envs: 1
+  num_steps: 8
+  hidden_dim: 32
+  learning_rate: 0.0003
+  anneal_lr: false
+  gamma: 0.8
+  gae_lambda: 0.9
+  num_minibatches: 1
+  update_epochs: 1
+  clip_coef: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl:
+  save_every_updates: 1
+  target_success: 2.0
+  eval_num_envs: 1
+  eval_episodes: 1
+  eval_seed: 50000
+  collect_seed: 70000
+  collect_max_attempts: 2
 
 dino:
   model_name: facebook/dinov2-small
@@ -47,4 +75,3 @@ policy:
 sweep:
   profile: staged
   seeds: [0]
-
