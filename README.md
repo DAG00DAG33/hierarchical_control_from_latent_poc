@@ -215,12 +215,21 @@ Current status on June 17, 2026:
   90 epochs instead of 30 also does not help (`29.3 deg` yaw MAE), so the issue
   is not simply too few encoder epochs. A one-step-only world model is only
   marginally better (`28.9 deg` yaw MAE).
+- Adding an intrinsic reconstruction regularizer to the world-model encoder is
+  the first representation change that clearly helps. A 64D latent with
+  reconstruction weight `0.1` improves the pose probe to `2.4 cm`/`3.2 cm` and
+  `27.2 deg`. Increasing the latent to 512D, hidden width to 512, and
+  reconstruction weight to `1.0` improves the frozen-latent probe to `8.2 mm`
+  x MAE, `9.0 mm` y MAE, and `9.2 deg` yaw MAE. This is within about 2x of the
+  spatial DINO probe (`3.8 mm`, `4.3 mm`, `4.5 deg`) without adding any direct
+  pose-supervised encoder loss.
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
 | flat latent | 50 | 0.00 | 0.120 | 0.149 |
 | flat latent | 100 | 0.00 | 0.122 | 0.151 |
 | flat latent, spatial DINO | 1000 | 0.00 | 0.120 | 0.148 |
+| flat latent, spatial DINO, 512D recon WM | 1000 | 0.08 | 0.214 | 0.255 |
 | hier, spatial DINO, 0.05s | 1000 | 0.00 | 0.119 | 0.152 |
 | hier, spatial DINO, 0.10s | 1000 | 0.00 | 0.113 | 0.150 |
 | hier, spatial DINO, 0.25s | 1000 | 0.00 | 0.115 | 0.150 |
@@ -240,14 +249,15 @@ Current status on June 17, 2026:
 | BC obs, spatial DINO, DAgger | 1000 | 0.06 | 0.273 | 0.296 |
 | BC privileged state | 1000 | 0.46 | 0.582 | 0.594 |
 
-The direct-observation result suggests the learned WM latent is a major
-bottleneck: spatial DINO itself contains the object pose, while the current
-action-conditioned world-model latent does not preserve it. Before spending
-more compute on hierarchy variants, the world-model representation training
-needs a non-collapse/identifiability improvement that is still intrinsic to the
-WM objective, such as reconstructing future observations/features from `z`,
-using a contrastive or covariance regularizer, or otherwise preventing the
-encoder from choosing a latent that is easy to predict but discards task state.
+The direct-observation result and the probe suggest the original learned WM
+latent was a major bottleneck: spatial DINO itself contains the object pose,
+while the original action-conditioned world-model latent discarded it. The
+512D reconstruction-regularized WM latent largely fixes this diagnostic and
+also improves latent flat control from `0.00` to `0.08` success. The control
+result is still below privileged-state BC and only slightly above direct
+spatial-DINO policies, so the next useful hierarchy runs should use this
+stronger encoder while continuing to treat the low-level policy itself as a
+possible bottleneck.
 
 A quick supervised probe checked whether the DINO CLS token contains the
 T-block pose. A small MLP was trained from DINOv2-S/14 CLS features to

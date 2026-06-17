@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from pathlib import Path
 
 import torch
 from rich.console import Console
@@ -16,6 +17,7 @@ from hcl_poc.train import (
     train_bc_policy,
     train_dagger_bc_policy,
     train_flow_policy,
+    probe_latent_pose,
     train_pose_bc_policy,
     train_representation,
     train_state_bc_policy,
@@ -41,7 +43,11 @@ def doctor(args: argparse.Namespace) -> None:
         import gymnasium as gym
         import mani_skill  # noqa: F401
 
-        env = gym.make(config.get("env_id"), obs_mode=config.get("obs_mode"), control_mode=config.get("control_mode"))
+        env = gym.make(
+            config.get("env_id"),
+            obs_mode=config.get("obs_mode"),
+            control_mode=config.get("control_mode"),
+        )
         console.print(f"ManiSkill env OK: {config.get('env_id')}")
         console.print(f"Action space: {env.action_space}")
         env.close()
@@ -129,6 +135,20 @@ def report_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     path = build_report(config)
     console.print(f"Wrote {path}")
+
+
+def probe_cmd(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    probe_latent_pose(
+        config,
+        args.n_traj,
+        args.seed,
+        Path(args.samples_file),
+        Path(args.out),
+        epochs=args.epochs,
+        hidden_dim=args.hidden_dim,
+        batch_size=args.batch_size,
+    )
 
 
 def rl_cmd(args: argparse.Namespace) -> None:
@@ -220,7 +240,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(p)
     p.add_argument(
         "method",
-        choices=["flat", "flat_obs", "bc_obs", "bc_obs_1step", "bc_obs_dagger", "bc_pose", "bc_state", "hier"],
+        choices=[
+            "flat",
+            "flat_obs",
+            "bc_obs",
+            "bc_obs_1step",
+            "bc_obs_dagger",
+            "bc_pose",
+            "bc_state",
+            "hier",
+        ],
     )
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
@@ -244,6 +273,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("report")
     add_config_arg(p)
     p.set_defaults(func=report_cmd)
+
+    p = sub.add_parser("probe-latent")
+    add_config_arg(p)
+    p.add_argument("--n-traj", type=int, default=1000)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--samples-file", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--epochs", type=int, default=300)
+    p.add_argument("--hidden-dim", type=int, default=256)
+    p.add_argument("--batch-size", type=int, default=256)
+    p.set_defaults(func=probe_cmd)
 
     p = sub.add_parser("commit")
     p.add_argument("-m", "--message", required=True)

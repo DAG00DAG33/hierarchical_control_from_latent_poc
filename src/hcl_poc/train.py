@@ -182,7 +182,9 @@ class ArrayActionDataset(Dataset):
 
 
 def _loader(dataset: Dataset, batch_size: int) -> DataLoader:
-    return DataLoader(dataset, batch_size=batch_size, num_workers=2, pin_memory=torch.cuda.is_available())
+    return DataLoader(
+        dataset, batch_size=batch_size, num_workers=2, pin_memory=torch.cuda.is_available()
+    )
 
 
 def train_representation(config: Config, n_traj: int, seed: int) -> Path:
@@ -194,7 +196,9 @@ def train_representation(config: Config, n_traj: int, seed: int) -> Path:
         console.print(f"Encoder exists: {ckpt_path}")
         return ckpt_path
 
-    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+    episodes = _clip_episode_actions(
+        config, load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+    )
     input_norm = fit_input_standardizer(episodes)
     action_norm = fit_action_standardizer(episodes)
     input_dim = episodes[0].features.shape[-1] + episodes[0].proprio.shape[-1]
@@ -206,7 +210,16 @@ def train_representation(config: Config, n_traj: int, seed: int) -> Path:
 
     encoder = ObservationEncoder(input_dim, latent_dim, hidden_dim).to(device)
     world_model = RepresentationWorldModel(latent_dim, action_dim, hidden_dim).to(device)
-    opt = torch.optim.AdamW(list(encoder.parameters()) + list(world_model.parameters()), lr=float(config.get("representation.lr")))
+    reconstruction_weight = float(config.get("representation.reconstruction_weight", 0.0))
+    decoder = (
+        MLP(latent_dim, input_dim, hidden_dim, depth=3).to(device)
+        if reconstruction_weight > 0.0
+        else None
+    )
+    params = list(encoder.parameters()) + list(world_model.parameters())
+    if decoder is not None:
+        params += list(decoder.parameters())
+    opt = torch.optim.AdamW(params, lr=float(config.get("representation.lr")))
     dataset = RepresentationDataset(
         episodes,
         input_norm,
@@ -220,6 +233,8 @@ def train_representation(config: Config, n_traj: int, seed: int) -> Path:
     sig_weight = float(config.get("representation.sigreg_weight"))
     timer = Timer()
     last_loss = 0.0
+    last_pred_loss = 0.0
+    last_reconstruction_loss = 0.0
     for _epoch in tqdm(range(epochs), desc=f"train encoder n={n_traj} seed={seed}"):
         for batch in loader:
             x_t = batch["x_t"].to(device)
@@ -233,44 +248,70 @@ def train_representation(config: Config, n_traj: int, seed: int) -> Path:
             std = torch.sqrt(z_t.var(dim=0) + 1e-4)
             sigreg = torch.mean(torch.relu(1.0 - std))
             loss = pred_loss + sig_weight * sigreg
+            reconstruction_loss = torch.zeros((), device=device)
+            if decoder is not None:
+                reconstruction_loss = 0.5 * (
+                    torch.mean((decoder(z_t) - x_t) ** 2) + torch.mean((decoder(z_f) - x_f) ** 2)
+                )
+                loss = loss + reconstruction_weight * reconstruction_loss
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             last_loss = float(loss.detach().cpu())
+            last_pred_loss = float(pred_loss.detach().cpu())
+            last_reconstruction_loss = float(reconstruction_loss.detach().cpu())
 
-    torch.save(
+    payload = {
+        "encoder": encoder.state_dict(),
+        "world_model": world_model.state_dict(),
+        "input_norm": input_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "input_dim": input_dim,
+        "action_dim": action_dim,
+        "latent_dim": latent_dim,
+        "hidden_dim": hidden_dim,
+        "reconstruction_weight": reconstruction_weight,
+        **_dino_metadata(config),
+        "elapsed_s": timer.elapsed(),
+        "last_loss": last_loss,
+        "last_pred_loss": last_pred_loss,
+        "last_reconstruction_loss": last_reconstruction_loss,
+    }
+    if decoder is not None:
+        payload["decoder"] = decoder.state_dict()
+    torch.save(payload, ckpt_path)
+    write_json(
+        artifact_dir / "encoder_metrics.json",
         {
-            "encoder": encoder.state_dict(),
-            "world_model": world_model.state_dict(),
-            "input_norm": input_norm.state_dict(),
-            "action_norm": action_norm.state_dict(),
-            "input_dim": input_dim,
-            "action_dim": action_dim,
-            "latent_dim": latent_dim,
-            "hidden_dim": hidden_dim,
-            **_dino_metadata(config),
             "elapsed_s": timer.elapsed(),
-            "last_loss": last_loss,
+            "loss": last_loss,
+            "pred_loss": last_pred_loss,
+            "reconstruction_loss": last_reconstruction_loss,
+            "reconstruction_weight": reconstruction_weight,
         },
-        ckpt_path,
     )
-    write_json(artifact_dir / "encoder_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
     return ckpt_path
 
 
 @torch.inference_mode()
-def encode_latents(config: Config, n_traj: int, seed: int) -> tuple[list[Episode], list[np.ndarray], dict]:
+def encode_latents(
+    config: Config, n_traj: int, seed: int
+) -> tuple[list[Episode], list[np.ndarray], dict]:
     device = default_device()
     ckpt = torch.load(
         Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt",
         map_location=device,
         weights_only=False,
     )
-    encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(device)
+    encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(
+        device
+    )
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
     input_norm = Standardizer.from_state_dict(ckpt["input_norm"])
-    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+    episodes = _clip_episode_actions(
+        config, load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+    )
     latents: list[np.ndarray] = []
     for ep in episodes:
         x = torch.from_numpy(_obs_input(ep, input_norm)).to(device)
@@ -302,7 +343,9 @@ def train_flow_policy(
     hidden_dim = int(config.get("policy.hidden_dim"))
 
     if kind == "flat_obs":
-        episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+        episodes = _clip_episode_actions(
+            config, load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+        )
         input_norm = fit_input_standardizer(episodes)
         action_norm = fit_action_standardizer(episodes)
         obs_inputs = [_obs_input(ep, input_norm) for ep in episodes]
@@ -397,11 +440,15 @@ def train_flow_policy(
         },
         ckpt_path,
     )
-    write_json(artifact_dir / f"{name}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    write_json(
+        artifact_dir / f"{name}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss}
+    )
     return ckpt_path
 
 
-def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False, one_step: bool = False) -> Path:
+def train_bc_policy(
+    config: Config, n_traj: int, seed: int, force: bool = False, one_step: bool = False
+) -> Path:
     set_seed(seed)
     device = default_device()
     artifact_dir = ensure_dir(Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}")
@@ -411,7 +458,9 @@ def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False,
         console.print(f"BC policy exists: {ckpt_path}")
         return ckpt_path
 
-    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+    episodes = _clip_episode_actions(
+        config, load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+    )
     input_norm = fit_input_standardizer(episodes)
     action_norm = fit_action_standardizer(episodes)
     obs_inputs = [_obs_input(ep, input_norm) for ep in episodes]
@@ -461,7 +510,9 @@ def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False,
         },
         ckpt_path,
     )
-    write_json(artifact_dir / f"{kind}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    write_json(
+        artifact_dir / f"{kind}_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss}
+    )
     return ckpt_path
 
 
@@ -644,6 +695,127 @@ def train_pose_predictor(
     return ckpt_path
 
 
+def _pose_probe_metrics(pred: np.ndarray, target: np.ndarray) -> dict[str, float]:
+    pred_yaw = np.arctan2(pred[:, 2], pred[:, 3])
+    target_yaw = np.arctan2(target[:, 2], target[:, 3])
+    yaw_err = np.arctan2(np.sin(pred_yaw - target_yaw), np.cos(pred_yaw - target_yaw))
+    return {
+        "pos_mae_x_m": float(np.mean(np.abs(pred[:, 0] - target[:, 0]))),
+        "pos_mae_y_m": float(np.mean(np.abs(pred[:, 1] - target[:, 1]))),
+        "pos_rmse_x_m": float(np.sqrt(np.mean((pred[:, 0] - target[:, 0]) ** 2))),
+        "pos_rmse_y_m": float(np.sqrt(np.mean((pred[:, 1] - target[:, 1]) ** 2))),
+        "yaw_mae_rad": float(np.mean(np.abs(yaw_err))),
+        "yaw_mae_deg": float(np.degrees(np.mean(np.abs(yaw_err)))),
+    }
+
+
+@torch.inference_mode()
+def _encode_probe_samples(
+    config: Config, n_traj: int, seed: int, sample_path: Path
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    device = default_device()
+    ckpt = torch.load(
+        Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt",
+        map_location=device,
+        weights_only=False,
+    )
+    encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(
+        device
+    )
+    encoder.load_state_dict(ckpt["encoder"])
+    encoder.eval()
+    input_norm = Standardizer.from_state_dict(ckpt["input_norm"])
+    data = np.load(sample_path)
+    raw_inputs = np.concatenate(
+        [data["features"].astype(np.float32), data["proprios"].astype(np.float32)], axis=-1
+    )
+    inputs = input_norm.transform(raw_inputs)
+    latents: list[np.ndarray] = []
+    for start in range(0, len(inputs), 4096):
+        x = torch.from_numpy(inputs[start : start + 4096]).to(device).float()
+        latents.append(encoder(x).cpu().numpy())
+    return (
+        np.concatenate(latents, axis=0).astype(np.float32),
+        data["labels"].astype(np.float32),
+        ckpt,
+    )
+
+
+def probe_latent_pose(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    sample_path: Path,
+    out_path: Path,
+    epochs: int = 300,
+    hidden_dim: int = 256,
+    batch_size: int = 256,
+) -> Path:
+    set_seed(seed)
+    device = default_device()
+    timer = Timer()
+    latents, labels, ckpt = _encode_probe_samples(config, n_traj, seed, sample_path)
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(latents))
+    split = int(0.8 * len(order))
+    train_idx = order[:split]
+    val_idx = order[split:]
+    input_norm = Standardizer.fit(latents[train_idx])
+    label_norm = Standardizer.fit(labels[train_idx])
+    train_x = input_norm.transform(latents[train_idx])
+    train_y = label_norm.transform(labels[train_idx])
+    val_x = input_norm.transform(latents[val_idx])
+
+    model = MLP(latents.shape[-1], labels.shape[-1], hidden_dim, depth=3).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    dataset = torch.utils.data.TensorDataset(torch.from_numpy(train_x), torch.from_numpy(train_y))
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    last_loss = 0.0
+    for _epoch in tqdm(range(epochs), desc=f"probe latent pose n={n_traj} seed={seed}"):
+        for x, y in loader:
+            x = x.to(device).float()
+            y = y.to(device).float()
+            pred = model(x)
+            loss = torch.mean((pred - y) ** 2)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            last_loss = float(loss.detach().cpu())
+
+    model.eval()
+    with torch.inference_mode():
+        train_pred = label_norm.inverse(
+            model(torch.from_numpy(train_x).to(device).float()).cpu().numpy()
+        )
+        val_pred = label_norm.inverse(
+            model(torch.from_numpy(val_x).to(device).float()).cpu().numpy()
+        )
+    baseline = np.broadcast_to(labels[train_idx].mean(axis=0, keepdims=True), labels[val_idx].shape)
+    metrics = {
+        "elapsed_s": timer.elapsed(),
+        "samples": int(len(latents)),
+        "train_samples": int(len(train_idx)),
+        "val_samples": int(len(val_idx)),
+        "latent_dim": int(ckpt["latent_dim"]),
+        "hidden_dim": int(ckpt["hidden_dim"]),
+        "probe_hidden_dim": int(hidden_dim),
+        "probe_epochs": int(epochs),
+        "loss": last_loss,
+        "train": _pose_probe_metrics(train_pred, labels[train_idx]),
+        "val": _pose_probe_metrics(val_pred, labels[val_idx]),
+        "mean_pose_baseline_val": _pose_probe_metrics(baseline, labels[val_idx]),
+    }
+    write_json(out_path, metrics)
+    console.print(f"Wrote latent pose probe: {out_path}")
+    return out_path
+
+
 @torch.inference_mode()
 def _predict_pose_features(
     pose_ckpt: dict[str, object],
@@ -679,7 +851,9 @@ def train_pose_bc_policy(config: Config, n_traj: int, seed: int, force: bool = F
 
     pose_path = train_pose_predictor(config, n_traj, seed, force=force)
     pose_ckpt = torch.load(pose_path, map_location=device, weights_only=False)
-    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
+    episodes = _clip_episode_actions(
+        config, load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+    )
     pose_inputs: list[np.ndarray] = []
     actions: list[np.ndarray] = []
     for ep in episodes:
@@ -743,7 +917,9 @@ def train_pose_bc_policy(config: Config, n_traj: int, seed: int, force: bool = F
         },
         ckpt_path,
     )
-    write_json(artifact_dir / "bc_pose_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss})
+    write_json(
+        artifact_dir / "bc_pose_metrics.json", {"elapsed_s": timer.elapsed(), "loss": last_loss}
+    )
     return ckpt_path
 
 
@@ -763,7 +939,9 @@ def _collect_dagger_labels(
     if not init_ckpt_path.exists():
         train_bc_policy(config, n_traj, seed, one_step=True)
     learner_ckpt = torch.load(init_ckpt_path, map_location=device, weights_only=False)
-    learner = MLP(learner_ckpt["cond_dim"], learner_ckpt["sample_dim"], learner_ckpt["hidden_dim"], depth=4).to(device)
+    learner = MLP(
+        learner_ckpt["cond_dim"], learner_ckpt["sample_dim"], learner_ckpt["hidden_dim"], depth=4
+    ).to(device)
     learner.load_state_dict(learner_ckpt["model"])
     learner.eval()
     input_norm = Standardizer.from_state_dict(learner_ckpt["input_norm"])
@@ -784,7 +962,9 @@ def _collect_dagger_labels(
 
     inputs: list[np.ndarray] = []
     teacher_actions: list[np.ndarray] = []
-    for ep_idx in tqdm(range(rollout_episodes), desc=f"collect dagger labels n={n_traj} seed={seed}"):
+    for ep_idx in tqdm(
+        range(rollout_episodes), desc=f"collect dagger labels n={n_traj} seed={seed}"
+    ):
         obs, _info = env.reset(seed=eval_seed + ep_idx)
         done = False
         truncated = False
@@ -830,8 +1010,12 @@ def train_dagger_bc_policy(
         return ckpt_path
 
     rollout_episodes = rollout_episodes or int(config.get("data.eval_episodes", 50))
-    episodes = _clip_episode_actions(config, load_episodes(config.get("paths.prepared_path"), limit=n_traj))
-    demo_inputs = np.concatenate([np.concatenate([ep.features, ep.proprio], axis=-1) for ep in episodes], axis=0)
+    episodes = _clip_episode_actions(
+        config, load_episodes(config.get("paths.prepared_path"), limit=n_traj)
+    )
+    demo_inputs = np.concatenate(
+        [np.concatenate([ep.features, ep.proprio], axis=-1) for ep in episodes], axis=0
+    )
     demo_actions = np.concatenate([ep.actions for ep in episodes], axis=0)
     labels_path = artifact_dir / "bc_obs_dagger_labels.npz"
     if labels_path.exists() and not force:
@@ -839,7 +1023,9 @@ def train_dagger_bc_policy(
         dagger_inputs = labels["inputs"]
         dagger_actions = labels["actions"]
     else:
-        dagger_inputs, dagger_actions = _collect_dagger_labels(config, n_traj, seed, rollout_episodes)
+        dagger_inputs, dagger_actions = _collect_dagger_labels(
+            config, n_traj, seed, rollout_episodes
+        )
         np.savez_compressed(labels_path, inputs=dagger_inputs, actions=dagger_actions)
 
     raw_inputs = np.concatenate([demo_inputs, dagger_inputs], axis=0).astype(np.float32)
@@ -935,7 +1121,9 @@ def _collect_state_teacher_episodes(
     actions: list[np.ndarray] = []
     attempts = 0
     collect_seed = int(config.get("rl.collect_seed", 70_000)) + 200_000 + seed * max_attempts
-    for attempts in tqdm(range(1, max_attempts + 1), desc=f"collect state teacher n={n_traj} seed={seed}"):
+    for attempts in tqdm(
+        range(1, max_attempts + 1), desc=f"collect state teacher n={n_traj} seed={seed}"
+    ):
         obs, _info = env.reset(seed=collect_seed + attempts)
         ep_states: list[np.ndarray] = []
         ep_actions: list[np.ndarray] = []
@@ -945,7 +1133,9 @@ def _collect_state_teacher_episodes(
         while not (done or truncated):
             state = _to_numpy(obs).reshape(-1).astype(np.float32)
             state_t = torch.from_numpy(state[None]).to(device).float()
-            action_t, _logprob, _entropy, _value = teacher.get_action_and_value(state_t, deterministic=True)
+            action_t, _logprob, _entropy, _value = teacher.get_action_and_value(
+                state_t, deterministic=True
+            )
             action = action_t.detach().cpu().numpy()[0].astype(np.float32)
             if bool(config.get("policy.clip_actions_to_env_space", False)):
                 action = np.clip(action, action_low, action_high).astype(np.float32)
@@ -960,7 +1150,9 @@ def _collect_state_teacher_episodes(
                 break
     env.close()
     if len(states) < n_traj:
-        raise RuntimeError(f"Collected only {len(states)}/{n_traj} successful state teacher episodes")
+        raise RuntimeError(
+            f"Collected only {len(states)}/{n_traj} successful state teacher episodes"
+        )
     return states, actions, attempts
 
 
