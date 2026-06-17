@@ -14,7 +14,7 @@ from torch import nn
 from tqdm import trange
 
 from hcl_poc.config import Config
-from hcl_poc.features import DinoExtractor, batched
+from hcl_poc.features import batched, dino_from_config
 from hcl_poc.utils import Timer, default_device, ensure_dir, read_json, set_seed, write_json
 
 console = Console()
@@ -472,7 +472,7 @@ def collect_ppo_dataset(
                 f"below rl.collect_min_success={float(min_success):.3f}; not collecting demos."
             )
     agent = load_ppo_agent(path, device)
-    extractor = DinoExtractor(config.get("dino.model_name"), device)
+    extractor = dino_from_config(config, device)
     batch_size = int(config.get("dino.batch_size", 32))
     max_attempts = int(config.get("rl.collect_max_attempts", required * 20))
     env = gym.make(
@@ -498,6 +498,8 @@ def collect_ppo_dataset(
         meta.attrs["source"] = "privileged_ppo"
         meta.attrs["checkpoint"] = str(path)
         meta.attrs["dino_model"] = config.get("dino.model_name")
+        meta.attrs["dino_feature_type"] = config.get("dino.feature_type", "cls")
+        meta.attrs["dino_spatial_pool"] = int(config.get("dino.spatial_pool", 4))
         meta.attrs["control_mode"] = config.get("control_mode")
         meta.attrs["obs_mode"] = "rgb+state"
         for attempts in trange(1, max_attempts + 1, desc="collect PPO demos"):

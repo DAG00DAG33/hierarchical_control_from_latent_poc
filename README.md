@@ -194,3 +194,12 @@ issue. Before spending more compute on hierarchical ablations, the visual
 observation path should be improved. The most direct next experiments are
 spatial DINO patch features or a small trainable visual encoder, then DAgger
 with the privileged PPO teacher if closed-loop covariate shift remains.
+
+A quick supervised probe checked whether the DINO CLS token contains the
+T-block pose. A small MLP was trained from DINOv2-S/14 CLS features to
+`obj_pose[x, y, sin(yaw), cos(yaw)]` on 4000 teacher rollout frames. On 800
+held-out frames it reached `1.0 cm` x MAE, `1.2 cm` y MAE, and `9.0 deg` yaw
+MAE. This means the CLS token is not blind to the T pose, but the remaining
+error may still be too coarse for contact-rich pushing. Spatial DINO features
+can be enabled with `configs/pusht_spatial.yaml`; they use CLS plus a 4x4
+pooled patch-token grid and write to separate data/artifact/result paths.

@@ -12,7 +12,7 @@ from rich.console import Console
 from tqdm import tqdm
 
 from hcl_poc.config import Config
-from hcl_poc.features import DinoExtractor, batched
+from hcl_poc.features import batched, dino_from_config
 from hcl_poc.h5util import as_array, episode_groups, list_datasets, pick_dataset
 from hcl_poc.utils import Standardizer, default_device, ensure_dir
 
@@ -184,7 +184,7 @@ def prepare_dataset(config: Config, force: bool = False) -> Path:
 
     replayed = replay_demo(config, _prefer_raw_source(candidates, str(config.get("control_mode"))))
     device = default_device()
-    extractor = DinoExtractor(config.get("dino.model_name"), device)
+    extractor = dino_from_config(config, device)
     batch_size = int(config.get("dino.batch_size", 32))
     max_trajectories = int(config.get("data.max_trajectories", 206))
     ensure_dir(out_path.parent)
@@ -194,6 +194,8 @@ def prepare_dataset(config: Config, force: bool = False) -> Path:
         meta = dst.create_group("meta")
         meta.attrs["source_h5"] = str(replayed)
         meta.attrs["dino_model"] = config.get("dino.model_name")
+        meta.attrs["dino_feature_type"] = config.get("dino.feature_type", "cls")
+        meta.attrs["dino_spatial_pool"] = int(config.get("dino.spatial_pool", 4))
         meta.attrs["control_mode"] = config.get("control_mode")
         meta.attrs["obs_mode"] = config.get("obs_mode")
         for idx, group in enumerate(tqdm(episodes, desc="Extract DINO features")):

@@ -28,6 +28,14 @@ def _obs_input(ep: Episode, standardizer: Standardizer) -> np.ndarray:
     return standardizer.transform(np.concatenate([ep.features, ep.proprio], axis=-1))
 
 
+def _dino_metadata(config: Config) -> dict[str, object]:
+    return {
+        "dino_model": config.get("dino.model_name"),
+        "dino_feature_type": config.get("dino.feature_type", "cls"),
+        "dino_spatial_pool": int(config.get("dino.spatial_pool", 4)),
+    }
+
+
 def _clip_episode_actions(config: Config, episodes: list[Episode]) -> list[Episode]:
     if not bool(config.get("policy.clip_actions_to_env_space", False)):
         return episodes
@@ -219,6 +227,7 @@ def train_representation(config: Config, n_traj: int, seed: int) -> Path:
             "action_dim": action_dim,
             "latent_dim": latent_dim,
             "hidden_dim": hidden_dim,
+            **_dino_metadata(config),
             "elapsed_s": timer.elapsed(),
             "last_loss": last_loss,
         },
@@ -361,6 +370,7 @@ def train_flow_policy(
             "action_norm": action_norm.state_dict(),
             "input_norm": input_norm.state_dict() if kind == "flat_obs" else None,
             "flow_steps": int(config.get("policy.flow_steps")),
+            **_dino_metadata(config),
             "elapsed_s": timer.elapsed(),
             "last_loss": last_loss,
         },
@@ -423,6 +433,7 @@ def train_bc_policy(config: Config, n_traj: int, seed: int, force: bool = False)
             "chunk": chunk,
             "action_norm": action_norm.state_dict(),
             "input_norm": input_norm.state_dict(),
+            **_dino_metadata(config),
             "elapsed_s": timer.elapsed(),
             "last_loss": last_loss,
         },

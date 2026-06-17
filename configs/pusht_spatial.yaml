@@ -8,17 +8,17 @@ camera_name: base_camera
 paths:
   data_dir: data
   raw_demo_dir: data/raw
-  prepared_path: data/prepared/pusht_ppo_dino_proprio_tcp.h5
-  artifact_dir: artifacts/ppo_main
-  results_dir: results/ppo_main
+  prepared_path: data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5
+  artifact_dir: artifacts/ppo_spatial
+  results_dir: results/ppo_spatial
   rl_dir: artifacts/rl_pusht_official
 
 data:
   source: privileged_ppo
-  max_trajectories: 200
+  max_trajectories: 1000
   replay_count: 240
   replay_num_envs: 8
-  train_trajectories: [50, 100, 200]
+  train_trajectories: [1000]
   eval_episodes: 50
   eval_seed: 10000
   batch_size_features: 32
@@ -58,7 +58,7 @@ rl:
 
 dino:
   model_name: facebook/dinov2-small
-  feature_type: cls
+  feature_type: spatial
   spatial_pool: 4
   batch_size: 32
 

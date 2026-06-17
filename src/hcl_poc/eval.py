@@ -20,6 +20,16 @@ from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_s
 console = Console()
 
 
+def _dino_from_checkpoint(config: Config, ckpt: dict[str, Any] | None, device: torch.device) -> DinoExtractor:
+    ckpt = ckpt or {}
+    return DinoExtractor(
+        str(ckpt.get("dino_model", config.get("dino.model_name"))),
+        device,
+        feature_type=str(ckpt.get("dino_feature_type", config.get("dino.feature_type", "cls"))),
+        spatial_pool=int(ckpt.get("dino_spatial_pool", config.get("dino.spatial_pool", 4))),
+    )
+
+
 def horizon_steps(config: Config, horizon_s: float) -> int:
     control_freq = float(config.get("control_freq", 20))
     return max(1, int(round(horizon_s * control_freq)))
@@ -117,13 +127,18 @@ def encode_state_direct(
     return torch.from_numpy(input_norm.transform(state)).to(device).float()
 
 
-def _load_encoder(config: Config, n_traj: int, seed: int, device: torch.device) -> tuple[ObservationEncoder, Standardizer]:
+def _load_encoder(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    device: torch.device,
+) -> tuple[ObservationEncoder, Standardizer, dict[str, Any]]:
     ckpt_path = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt"
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(device)
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
-    return encoder, Standardizer.from_state_dict(ckpt["input_norm"])
+    return encoder, Standardizer.from_state_dict(ckpt["input_norm"]), ckpt
 
 
 def _load_flow(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
@@ -207,9 +222,10 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
     encoder = None
     input_norm = None
     bc = None
+    dino_ckpt = None
 
     if method == "flat":
-        encoder, input_norm = _load_encoder(config, n_traj, seed, device)
+        encoder, input_norm, dino_ckpt = _load_encoder(config, n_traj, seed, device)
         flat, flat_ckpt = _load_flow(artifact_dir / "flat.pt", device)
         action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
         low = high = None
@@ -220,6 +236,7 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         input_norm = Standardizer.from_state_dict(flat_ckpt["input_norm"])
         low = high = None
         steps = int(flat_ckpt["flow_steps"])
+        dino_ckpt = flat_ckpt
     elif method == "bc_obs":
         bc, bc_ckpt = _load_bc(artifact_dir / "bc_obs.pt", device)
         action_norm = Standardizer.from_state_dict(bc_ckpt["action_norm"])
@@ -227,6 +244,7 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         flat = None
         low = high = None
         steps = 0
+        dino_ckpt = bc_ckpt
     elif method == "bc_state":
         bc, bc_ckpt = _load_bc(artifact_dir / "bc_state.pt", device)
         action_norm = Standardizer.from_state_dict(bc_ckpt["action_norm"])
@@ -235,7 +253,7 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         low = high = None
         steps = 0
     elif method == "hier":
-        encoder, input_norm = _load_encoder(config, n_traj, seed, device)
+        encoder, input_norm, dino_ckpt = _load_encoder(config, n_traj, seed, device)
         if horizon_s is None:
             raise ValueError("Hierarchy evaluation requires horizon_s")
         h_steps = horizon_steps(config, horizon_s)
@@ -246,7 +264,7 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         steps = int(low_ckpt["flow_steps"])
     else:
         raise ValueError(method)
-    dino = None if method == "bc_state" else DinoExtractor(config.get("dino.model_name"), device)
+    dino = None if method == "bc_state" else _dino_from_checkpoint(config, dino_ckpt, device)
 
     env = gym.make(
         config.get("env_id"),
@@ -342,9 +360,9 @@ def record_videos(
         raise ValueError("Video recording currently supports flat_obs only")
     set_seed(seed)
     device = default_device()
-    dino = DinoExtractor(config.get("dino.model_name"), device)
     artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
     flat, flat_ckpt = _load_flow(artifact_dir / "flat_obs.pt", device)
+    dino = _dino_from_checkpoint(config, flat_ckpt, device)
     action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
     input_norm = Standardizer.from_state_dict(flat_ckpt["input_norm"])
     steps = int(flat_ckpt["flow_steps"])
