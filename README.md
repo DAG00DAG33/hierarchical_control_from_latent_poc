@@ -209,6 +209,12 @@ Current status on June 17, 2026:
   predicts T position to about `4 mm` MAE and yaw to `4.5 deg` MAE. The same
   probe from the learned `z` is essentially baseline: about `3.6 cm`/`4.6 cm`
   position MAE and `30 deg` yaw MAE.
+- Shortening the world-model training horizons did not fix the latent. With
+  `horizons_steps: [1, 2, 5]`, the latent pose probe still gives about `3.6 cm`
+  x MAE, `4.3 cm` y MAE, and `29.4 deg` yaw MAE. Training the same setup for
+  90 epochs instead of 30 also does not help (`29.3 deg` yaw MAE), so the issue
+  is not simply too few encoder epochs. A one-step-only world model is only
+  marginally better (`28.9 deg` yaw MAE).
 
 | Method | Trajectories | Success | Final reward | Max reward |
 | --- | ---: | ---: | ---: | ---: |
@@ -237,10 +243,11 @@ Current status on June 17, 2026:
 The direct-observation result suggests the learned WM latent is a major
 bottleneck: spatial DINO itself contains the object pose, while the current
 action-conditioned world-model latent does not preserve it. Before spending
-more compute on hierarchy variants, the representation objective should be
-changed so `z` remains useful for control, for example by adding an explicit
-observation reconstruction/pose auxiliary loss or by training the policy
-directly on spatial DINO features.
+more compute on hierarchy variants, the world-model representation training
+needs a non-collapse/identifiability improvement that is still intrinsic to the
+WM objective, such as reconstructing future observations/features from `z`,
+using a contrastive or covariance regularizer, or otherwise preventing the
+encoder from choosing a latent that is easy to predict but discards task state.
 
 A quick supervised probe checked whether the DINO CLS token contains the
 T-block pose. A small MLP was trained from DINOv2-S/14 CLS features to
