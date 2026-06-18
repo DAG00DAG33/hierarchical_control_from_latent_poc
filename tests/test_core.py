@@ -45,6 +45,9 @@ def test_flow_shapes_and_sample() -> None:
     assert loss.ndim == 0
     sample = sample_flow(model, cond, steps=2, sample_dim=6)
     assert sample.shape == (5, 6)
+    initial_noise = torch.zeros(5, 6)
+    sample_from_noise = sample_flow(model, cond, steps=2, sample_dim=6, initial_noise=initial_noise)
+    assert sample_from_noise.shape == (5, 6)
 
 
 def test_ppo_agent_shapes() -> None:

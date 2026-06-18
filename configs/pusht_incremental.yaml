@@ -63,3 +63,22 @@ incremental:
     recovery_xy_std_m: 0.01
     recovery_yaw_std_deg: 5.0
     recovery_max_steps: 100
+  phase3:
+    dagger_iteration: 3
+    label_kind: deterministic_clipped
+    hidden_dim: 256
+    batch_size: 4096
+    epochs: 200
+    lr: 0.0005
+    flow_steps: 24
+    eval_episodes: 100
+    eval_seed: 10000
+    eval_samples: 8
+    eval_mode: zero_noise
+    validation_action_interval: 10
+    validation_action_subset: 4096
+    endpoint_consistency_weight: 20.0
+    endpoint_consistency_steps: 4
+    endpoint_consistency_batch: 512
+    overfit_steps: 5000
+    overfit_lr: 0.001

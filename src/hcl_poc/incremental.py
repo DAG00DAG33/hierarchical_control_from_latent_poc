@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import trange
 
 from hcl_poc.config import Config
+from hcl_poc.flow import flow_matching_loss, sample_flow
+from hcl_poc.models import FlowModel
 from hcl_poc.rl import PPOAgent, _make_state_env, _rl_paths, evaluate_ppo, load_ppo_agent
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
 
@@ -1594,6 +1596,480 @@ def evaluate_phase2_recovery(
             and float(np.mean(paired_learner_success)) >= 0.80
         ),
         "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def _load_phase3_aggregate_queries(
+    config: Config,
+    iteration: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    label_kind = str(config.get("incremental.phase3.label_kind", "deterministic_raw"))
+    dataset_path = collect_phase1_query_dataset(config, force=False)
+    train_states, train_actions, val_states, val_actions, base_metadata = _load_phase1_queries(
+        dataset_path,
+        "all",
+        int(config.get("incremental.phase1.train_episodes", 2000)),
+        int(config.get("incremental.phase1.validation_episodes", 200)),
+        label_kind,
+    )
+    dagger_states = []
+    dagger_actions = []
+    dagger_metadata = []
+    for current_iteration in range(1, iteration + 1):
+        path = _phase2_query_path(config, current_iteration, seed=0)
+        if not path.exists():
+            raise FileNotFoundError(f"Missing DAgger query file: {path}")
+        with np.load(path) as data:
+            dagger_states.append(np.asarray(data["states"], dtype=np.float32))
+            teacher_actions = np.asarray(data["teacher_raw_actions"], dtype=np.float32)
+            if label_kind == "deterministic_clipped":
+                teacher_actions = np.clip(teacher_actions, -1.0, 1.0).astype(np.float32)
+            elif label_kind != "deterministic_raw":
+                raise ValueError(f"Unsupported Phase 3 label kind: {label_kind}")
+            dagger_actions.append(teacher_actions)
+            dagger_metadata.append(
+                {
+                    "iteration": current_iteration,
+                    "queries": int(len(data["states"])),
+                    "rollout_success": float(data["rollout_success"]),
+                }
+            )
+    all_states = np.concatenate([train_states, *dagger_states], axis=0)
+    all_actions = np.concatenate([train_actions, *dagger_actions], axis=0)
+    metadata = {
+        "dataset_type": "query_dataset",
+        "label_kind": label_kind,
+        "base": base_metadata,
+        "dagger_iterations": dagger_metadata,
+        "train_queries": int(len(all_states)),
+        "validation_queries": int(len(val_states)),
+    }
+    return all_states, all_actions, val_states, val_actions, metadata
+
+
+def _phase3_action_metrics(
+    model: FlowModel,
+    states: np.ndarray,
+    actions: np.ndarray,
+    input_norm: Standardizer,
+    action_norm: Standardizer,
+    flow_steps: int,
+    sample_repeats: int = 1,
+) -> dict[str, Any]:
+    device = next(model.parameters()).device
+    preds = []
+    batch_size = 8192
+    with torch.inference_mode():
+        for start in range(0, len(states), batch_size):
+            cond_np = input_norm.transform(states[start : start + batch_size])
+            cond = torch.from_numpy(cond_np).to(device).float()
+            samples = []
+            for _ in range(sample_repeats):
+                pred_norm = sample_flow(model, cond, flow_steps, model.sample_dim)
+                samples.append(pred_norm.detach().cpu().numpy())
+            pred_norm_np = np.mean(samples, axis=0)
+            preds.append(action_norm.inverse(pred_norm_np))
+    prediction = np.concatenate(preds, axis=0)
+    metrics = _action_regression_metrics(prediction, actions)
+    if sample_repeats > 1:
+        metrics["sample_repeats"] = sample_repeats
+    return metrics
+
+
+def _phase3_zero_noise_action_metrics(
+    model: FlowModel,
+    states: np.ndarray,
+    actions: np.ndarray,
+    input_norm: Standardizer,
+    action_norm: Standardizer,
+    flow_steps: int,
+) -> dict[str, Any]:
+    device = next(model.parameters()).device
+    preds = []
+    batch_size = 8192
+    with torch.inference_mode():
+        for start in range(0, len(states), batch_size):
+            cond = torch.from_numpy(input_norm.transform(states[start : start + batch_size])).to(
+                device
+            ).float()
+            noise = torch.zeros(cond.shape[0], model.sample_dim, device=device, dtype=cond.dtype)
+            pred_norm = sample_flow(
+                model,
+                cond,
+                flow_steps,
+                model.sample_dim,
+                initial_noise=noise,
+            )
+            preds.append(action_norm.inverse(pred_norm.detach().cpu().numpy()))
+    prediction = np.concatenate(preds, axis=0)
+    metrics = _action_regression_metrics(prediction, actions)
+    metrics["mode"] = "zero_noise"
+    return metrics
+
+
+def _integrate_flow_train(
+    model: FlowModel,
+    cond: torch.Tensor,
+    steps: int,
+    sample_dim: int,
+    initial_noise: torch.Tensor,
+) -> torch.Tensor:
+    x = initial_noise
+    dt = 1.0 / steps
+    for step in range(steps):
+        t = torch.full((cond.shape[0],), step / steps, device=cond.device, dtype=cond.dtype)
+        x = x + dt * model(x, t, cond)
+    return x
+
+
+def _flow_sampling_diagnostics(
+    model: FlowModel,
+    states: np.ndarray,
+    actions: np.ndarray,
+    input_norm: Standardizer,
+    action_norm: Standardizer,
+    flow_steps: int,
+) -> dict[str, Any]:
+    device = next(model.parameters()).device
+    count = min(256, len(states))
+    cond = torch.from_numpy(input_norm.transform(states[:count])).to(device).float()
+    samples = []
+    with torch.inference_mode():
+        for _ in range(16):
+            pred = sample_flow(model, cond, flow_steps, model.sample_dim)
+            samples.append(action_norm.inverse(pred.detach().cpu().numpy()))
+    sample_arr = np.stack(samples, axis=0)
+    mean_action = sample_arr.mean(axis=0)
+    return {
+        "states": count,
+        "sample_action_std_mean": float(sample_arr.std(axis=0).mean()),
+        "sample_mean_action_mae": float(np.mean(np.abs(mean_action - actions[:count]))),
+        "single_sample_action_mae": float(np.mean(np.abs(sample_arr[0] - actions[:count]))),
+        "preclip_out_of_bounds_fraction": float(
+            np.mean(np.any((sample_arr < -1.0) | (sample_arr > 1.0), axis=-1))
+        ),
+    }
+
+
+def _run_phase3_overfit_diagnostics(
+    config: Config,
+    states: np.ndarray,
+    actions: np.ndarray,
+    input_norm: Standardizer,
+    action_norm: Standardizer,
+) -> dict[str, Any]:
+    device = default_device()
+    out: dict[str, Any] = {}
+    for name, count in [("one_query", 1), ("ten_queries", 10), ("hundred_queries", 100)]:
+        set_seed(10_000 + count)
+        model = FlowModel(
+            sample_dim=actions.shape[-1],
+            cond_dim=states.shape[-1],
+            hidden_dim=int(config.get("incremental.phase3.hidden_dim", 256)),
+        ).to(device)
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=float(config.get("incremental.phase3.overfit_lr", 1e-3))
+        )
+        cond = torch.from_numpy(input_norm.transform(states[:count])).to(device).float()
+        target = torch.from_numpy(action_norm.transform(actions[:count])).to(device).float()
+        steps = int(config.get("incremental.phase3.overfit_steps", 5000))
+        last_loss = 0.0
+        for _ in range(steps):
+            loss = flow_matching_loss(model, target, cond)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            last_loss = float(loss.detach().cpu())
+        metrics = _phase3_action_metrics(
+            model,
+            states[:count],
+            actions[:count],
+            input_norm,
+            action_norm,
+            int(config.get("incremental.phase3.flow_steps", 24)),
+            sample_repeats=8,
+        )
+        metrics["final_flow_loss"] = last_loss
+        metrics["queries"] = count
+        out[name] = metrics
+    return out
+
+
+def train_phase3_flow(
+    config: Config,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    iteration = int(config.get("incremental.phase3.dagger_iteration", 3))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase3"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "one_step_flow.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 3 flow exists: {checkpoint_path}")
+        return checkpoint_path
+    train_states, train_actions, val_states, val_actions, data_metadata = (
+        _load_phase3_aggregate_queries(config, iteration)
+    )
+    input_norm = Standardizer.fit(train_states)
+    action_norm = Standardizer.fit(train_actions)
+    train_dataset = TensorDataset(
+        torch.from_numpy(input_norm.transform(train_states)).float(),
+        torch.from_numpy(action_norm.transform(train_actions)).float(),
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase3.batch_size", 4096)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    device = default_device()
+    model = FlowModel(
+        sample_dim=train_actions.shape[-1],
+        cond_dim=train_states.shape[-1],
+        hidden_dim=int(config.get("incremental.phase3.hidden_dim", 256)),
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(config.get("incremental.phase3.lr", 5e-4))
+    )
+    val_cond = torch.from_numpy(input_norm.transform(val_states)).to(device).float()
+    val_target = torch.from_numpy(action_norm.transform(val_actions)).to(device).float()
+    epochs = int(config.get("incremental.phase3.epochs", 200))
+    best_state = None
+    best_val_loss = float("inf")
+    best_val_action_mae = float("inf")
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc="train phase3 one-step flow"):
+        model.train()
+        train_loss_sum = 0.0
+        train_count = 0
+        for states, actions in loader:
+            states = states.to(device, non_blocking=True)
+            actions = actions.to(device, non_blocking=True)
+            loss = flow_matching_loss(model, actions, states)
+            consistency_weight = float(
+                config.get("incremental.phase3.endpoint_consistency_weight", 0.0)
+            )
+            if consistency_weight > 0.0:
+                consistency_count = min(
+                    int(config.get("incremental.phase3.endpoint_consistency_batch", 512)),
+                    len(states),
+                )
+                consistency_steps = int(
+                    config.get("incremental.phase3.endpoint_consistency_steps", 4)
+                )
+                zero = torch.zeros(
+                    consistency_count,
+                    model.sample_dim,
+                    device=device,
+                    dtype=states.dtype,
+                )
+                endpoint = _integrate_flow_train(
+                    model,
+                    states[:consistency_count],
+                    consistency_steps,
+                    model.sample_dim,
+                    zero,
+                )
+                loss = loss + consistency_weight * torch.mean(
+                    (endpoint - actions[:consistency_count]) ** 2
+                )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            train_loss_sum += float(loss.detach().cpu()) * len(states)
+            train_count += len(states)
+        model.eval()
+        with torch.inference_mode():
+            # Use the loss as a cheap validation criterion. Action MAE is computed after training.
+            val_loss = float(flow_matching_loss(model, val_target, val_cond).detach().cpu())
+        history.append(
+            {
+                "epoch": epoch,
+                "train_flow_loss": train_loss_sum / train_count,
+                "validation_flow_loss": val_loss,
+            }
+        )
+        row = history[-1]
+        if epoch % int(config.get("incremental.phase3.validation_action_interval", 10)) == 0:
+            subset = min(int(config.get("incremental.phase3.validation_action_subset", 4096)), len(val_states))
+            if str(config.get("incremental.phase3.eval_mode", "sample_mean")) == "zero_noise":
+                action_metrics = _phase3_zero_noise_action_metrics(
+                    model,
+                    val_states[:subset],
+                    val_actions[:subset],
+                    input_norm,
+                    action_norm,
+                    int(config.get("incremental.phase3.flow_steps", 24)),
+                )
+            else:
+                action_metrics = _phase3_action_metrics(
+                    model,
+                    val_states[:subset],
+                    val_actions[:subset],
+                    input_norm,
+                    action_norm,
+                    int(config.get("incremental.phase3.flow_steps", 24)),
+                    sample_repeats=2,
+                )
+            row["validation_action_mae"] = action_metrics["mae"]
+            if action_metrics["mae"] < best_val_action_mae:
+                best_val_action_mae = action_metrics["mae"]
+                best_val_loss = val_loss
+                best_state = copy.deepcopy(model.state_dict())
+        elif best_state is None and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 3 flow training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    flow_steps = int(config.get("incremental.phase3.flow_steps", 24))
+    validation_action_metrics = (
+        _phase3_zero_noise_action_metrics(
+            model, val_states, val_actions, input_norm, action_norm, flow_steps
+        )
+        if str(config.get("incremental.phase3.eval_mode", "sample_mean")) == "zero_noise"
+        else _phase3_action_metrics(
+            model, val_states, val_actions, input_norm, action_norm, flow_steps, sample_repeats=4
+        )
+    )
+    sampling = _flow_sampling_diagnostics(
+        model, val_states, val_actions, input_norm, action_norm, flow_steps
+    )
+    overfit = _run_phase3_overfit_diagnostics(
+        config,
+        train_states,
+        train_actions,
+        input_norm,
+        action_norm,
+    )
+    payload = {
+        "model": model.state_dict(),
+        "sample_dim": train_actions.shape[-1],
+        "cond_dim": train_states.shape[-1],
+        "hidden_dim": int(config.get("incremental.phase3.hidden_dim", 256)),
+        "input_norm": input_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "flow_steps": flow_steps,
+        "data": data_metadata,
+        "history": history,
+        "best_validation_flow_loss": best_val_loss,
+        "best_validation_action_mae": best_val_action_mae,
+        "validation_action_metrics": validation_action_metrics,
+        "sampling_diagnostics": sampling,
+        "overfit_diagnostics": overfit,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "one_step_flow_metrics.json",
+        {
+            "data": data_metadata,
+            "best_validation_flow_loss": best_val_loss,
+            "best_validation_action_mae": best_val_action_mae,
+            "validation_action_metrics": validation_action_metrics,
+            "sampling_diagnostics": sampling,
+            "overfit_diagnostics": overfit,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 3 one-step flow: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_phase3_flow(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model = FlowModel(
+        sample_dim=int(checkpoint["sample_dim"]),
+        cond_dim=int(checkpoint["cond_dim"]),
+        hidden_dim=int(checkpoint["hidden_dim"]),
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    return model, checkpoint
+
+
+def evaluate_phase3_flow(
+    config: Config,
+    seed: int = 0,
+    episodes: int | None = None,
+) -> Path:
+    checkpoint_path = train_phase3_flow(config, seed=seed, force=False)
+    device = default_device()
+    model, checkpoint = _load_phase3_flow(checkpoint_path, device)
+    input_norm = Standardizer.from_state_dict(checkpoint["input_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    flow_steps = int(checkpoint["flow_steps"])
+    sample_dim = int(checkpoint["sample_dim"])
+    eval_samples = int(config.get("incremental.phase3.eval_samples", 1))
+    eval_mode = str(config.get("incremental.phase3.eval_mode", "sample_mean"))
+
+    @torch.inference_mode()
+    def policy(state: np.ndarray) -> np.ndarray:
+        cond = torch.from_numpy(input_norm.transform(state[None])).to(device).float()
+        if eval_mode == "zero_noise":
+            noise = torch.zeros(cond.shape[0], sample_dim, device=device, dtype=cond.dtype)
+            action_normed = sample_flow(
+                model, cond, flow_steps, sample_dim, initial_noise=noise
+            ).detach().cpu().numpy()
+        elif eval_mode == "sample_mean":
+            samples = []
+            for _ in range(eval_samples):
+                pred_norm = sample_flow(model, cond, flow_steps, sample_dim)
+                samples.append(pred_norm.detach().cpu().numpy())
+            action_normed = np.mean(samples, axis=0)
+        else:
+            raise ValueError(f"Unknown Phase 3 eval mode: {eval_mode}")
+        return action_norm.inverse(action_normed)[0]
+
+    eval_episodes = int(episodes or config.get("incremental.phase3.eval_episodes", 100))
+    metrics = _evaluate_scalar_policy(
+        config,
+        policy,
+        eval_episodes,
+        int(config.get("incremental.phase3.eval_seed", 10000)),
+    )
+    bc_reference_path = (
+        config.path_value("paths.incremental_results_dir")
+        / "phase2"
+        / "iteration_03"
+        / f"seed{seed}"
+        / "bc_dagger.json"
+    )
+    if not bc_reference_path.exists():
+        raise FileNotFoundError(f"Missing Phase 2 BC reference: {bc_reference_path}")
+    import json
+
+    with bc_reference_path.open("r", encoding="utf-8") as f:
+        bc_reference = json.load(f)
+    bc_success = float(bc_reference["closed_loop"]["success"])
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir") / "phase3" / f"seed{seed}"
+    )
+    output_path = results_dir / "one_step_flow.json"
+    payload = {
+        "phase": 3,
+        "method": "privileged_one_step_flow",
+        "seed": seed,
+        "closed_loop": metrics,
+        "eval_mode": eval_mode,
+        "bc_reference_success": bc_success,
+        "held_out_action_metrics": checkpoint["validation_action_metrics"],
+        "sampling_diagnostics": checkpoint["sampling_diagnostics"],
+        "overfit_diagnostics": checkpoint["overfit_diagnostics"],
+        "data": checkpoint["data"],
+        "metadata": _runtime_metadata(config),
+        "gate_passed": metrics["success"] >= bc_success - 0.05,
     }
     write_json(output_path, payload)
     console.print(payload)

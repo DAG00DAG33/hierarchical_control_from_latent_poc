@@ -14,11 +14,20 @@ def flow_matching_loss(model: nn.Module, x_1: torch.Tensor, cond: torch.Tensor) 
 
 
 @torch.inference_mode()
-def sample_flow(model: nn.Module, cond: torch.Tensor, steps: int, sample_dim: int) -> torch.Tensor:
-    x = torch.randn(cond.shape[0], sample_dim, device=cond.device, dtype=cond.dtype)
+def sample_flow(
+    model: nn.Module,
+    cond: torch.Tensor,
+    steps: int,
+    sample_dim: int,
+    initial_noise: torch.Tensor | None = None,
+) -> torch.Tensor:
+    x = (
+        torch.randn(cond.shape[0], sample_dim, device=cond.device, dtype=cond.dtype)
+        if initial_noise is None
+        else initial_noise.to(device=cond.device, dtype=cond.dtype)
+    )
     dt = 1.0 / steps
     for i in range(steps):
         t = torch.full((cond.shape[0],), i / steps, device=cond.device, dtype=cond.dtype)
         x = x + dt * model(x, t, cond)
     return x
-

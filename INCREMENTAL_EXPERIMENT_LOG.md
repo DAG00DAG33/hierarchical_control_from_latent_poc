@@ -27,9 +27,9 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 3: privileged flow-matching policy |
-| Gate | One-step privileged flow within 5 percentage points of privileged BC |
-| Gate state | Phases 0-2 passed; Phase 3 not yet evaluated |
+| Active phase | Phase 4: visual deterministic BC |
+| Gate | Visual deterministic BC reaches at least 50% success |
+| Gate state | Phases 0-3 passed; Phase 4 not yet evaluated |
 | Current blocker | None |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
@@ -332,3 +332,71 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Recovery gate decision:** Passed.
 - **Phase 2 conclusion:** Freeze iteration 3 as the privileged deterministic
   baseline and proceed to one-step privileged flow matching.
+
+### 2026-06-18 - P3-D01: Raw-action one-step privileged flow
+
+- **Dataset type:** Aggregated `query_dataset` from Phase 1 plus three DAgger
+  iterations, 247,546 training queries.
+- **Model:** Conditional flow matching, one-step action target, 3D action
+  sample, 31D privileged state condition, 3x256 MLP.
+- **Labels:** Raw deterministic PPO actor outputs.
+- **Evaluation:** 100 episodes, fixed reset seeds 10000-10099.
+- **Result:** 67% success with one sample; 75% success when averaging eight
+  flow samples.
+- **Diagnostics:**
+  - held-out action MAE: `0.0329`;
+  - sample mean action MAE on 256 fixed states: `0.0247`;
+  - single-sample action MAE on the same states: `0.0315`;
+  - sample action standard deviation mean: `0.0260`.
+- **Gate decision:** Failed. Sampling noise and endpoint error were too large
+  for contact control.
+
+### 2026-06-18 - P3-D02: Clipped-action targets and deterministic zero-noise evaluation
+
+- **Change:** Train on clipped deterministic teacher actions, because these
+  are the actions actually executed by the simulator.
+- **Change:** Evaluate by integrating from zero noise instead of sampling or
+  averaging stochastic actions.
+- **Result:** 75% success.
+- **Diagnostics:** Clipped labels reduce out-of-bounds samples but do not by
+  themselves close the gate.
+- **Gate decision:** Failed.
+
+### 2026-06-18 - P3-D03: Endpoint-consistency loss
+
+- **Change:** Added a deterministic endpoint-consistency loss by integrating
+  the flow from zero noise on a 512-sample sub-batch and penalizing distance to
+  the teacher action.
+- **Attempt:** Weight `1.0` did not help; success dropped to 68%.
+- **Diagnosis:** Checkpoint selection still used stochastic sample averaging
+  while evaluation used zero-noise integration. The auxiliary loss was also
+  too weak relative to the flow-matching loss.
+
+### 2026-06-18 - P3-G01: Consistency-trained clipped privileged flow
+
+- **Final Phase 3 recipe:**
+  - clipped deterministic teacher action targets;
+  - conditional flow matching plus endpoint-consistency loss;
+  - endpoint-consistency weight `20.0`;
+  - 4 integration steps for the differentiable training endpoint loss;
+  - 24 integration steps for evaluation;
+  - zero-noise deterministic evaluation;
+  - checkpoint selection by zero-noise validation action MAE.
+- **Results:**
+  - closed-loop success: 79/100;
+  - Phase 2 BC reference success: 82/100;
+  - gate margin: flow is 3 percentage points below BC, within the 5 point gate;
+  - final/max normalized reward: `0.855` / `0.855`;
+  - held-out zero-noise action MAE/RMSE: `0.0254` / `0.0379`;
+  - fixed-state random-sample action std mean: `0.0273`;
+  - fixed-state sample-mean action MAE: `0.0196`;
+  - fixed-state single-sample action MAE: `0.0297`.
+- **Gate decision:** Passed.
+- **Interpretation:** Pure stochastic sampling remains noisier than
+  deterministic BC. For this mostly unimodal teacher, the useful flow policy is
+  the zero-noise deterministic flow endpoint. This is acceptable for the Phase
+  3 gate because the flow implementation can now solve the privileged
+  one-step task within the required margin, but later visual/hierarchical flow
+  phases should track sampling variance explicitly.
+- **Next action:** Start Phase 4 with temporal visual deterministic BC using
+  the strong privileged DAgger policy as the teacher-label source.
