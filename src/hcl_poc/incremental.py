@@ -17,9 +17,17 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import trange
 
 from hcl_poc.config import Config
+from hcl_poc.features import DinoExtractor, batched
 from hcl_poc.flow import flow_matching_loss, sample_flow
 from hcl_poc.models import FlowModel
-from hcl_poc.rl import PPOAgent, _make_state_env, _rl_paths, evaluate_ppo, load_ppo_agent
+from hcl_poc.rl import (
+    PPOAgent,
+    _make_state_env,
+    _rl_backend,
+    _rl_paths,
+    evaluate_ppo,
+    load_ppo_agent,
+)
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
 
 console = Console()
@@ -397,6 +405,59 @@ class _OverfitActor(nn.Module):
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.net(obs)
+
+
+class _TemporalConcatPolicy(nn.Module):
+    def __init__(
+        self,
+        step_dim: int,
+        history: int,
+        action_dim: int,
+        hidden_dim: int,
+    ) -> None:
+        super().__init__()
+        self.step_dim = step_dim
+        self.history = history
+        self.action_dim = action_dim
+        self.net = nn.Sequential(
+            nn.Linear(step_dim * history, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, history: torch.Tensor) -> torch.Tensor:
+        return self.net(history.flatten(start_dim=1))
+
+
+class _TemporalGruPolicy(nn.Module):
+    def __init__(
+        self,
+        step_dim: int,
+        history: int,
+        action_dim: int,
+        hidden_dim: int,
+    ) -> None:
+        super().__init__()
+        self.step_dim = step_dim
+        self.history = history
+        self.action_dim = action_dim
+        self.input = nn.Linear(step_dim, hidden_dim)
+        self.gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.output = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, history: torch.Tensor) -> torch.Tensor:
+        x = self.input(history)
+        out, _ = self.gru(x)
+        return self.output(out[:, -1])
 
 
 def _load_audit_queries(dataset_path: Path) -> tuple[list[np.ndarray], list[np.ndarray], list[int]]:
@@ -2073,4 +2134,770 @@ def evaluate_phase3_flow(
     }
     write_json(output_path, payload)
     console.print(payload)
+    return output_path
+
+
+def _phase4_dino_from_config(config: Config, device: torch.device) -> DinoExtractor:
+    return DinoExtractor(
+        str(config.get("dino.model_name")),
+        device,
+        feature_type=str(config.get("dino.feature_type", "spatial")),
+        spatial_pool=int(config.get("dino.spatial_pool", 4)),
+    )
+
+
+def _phase4_prepared_path(config: Config) -> Path:
+    return Path(config.get("incremental.phase4.prepared_path"))
+
+
+def _load_phase4_episodes(
+    config: Config,
+) -> tuple[list[dict[str, np.ndarray]], list[dict[str, np.ndarray]], dict[str, Any]]:
+    path = _phase4_prepared_path(config)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing Phase 4 prepared visual dataset: {path}")
+    train_episodes = int(config.get("incremental.phase4.train_episodes", 1800))
+    validation_episodes = int(config.get("incremental.phase4.validation_episodes", 200))
+    with h5py.File(path, "r") as h5:
+        keys = sorted(k for k in h5 if k.startswith("episode_"))
+        required = train_episodes + validation_episodes
+        if len(keys) < required:
+            raise ValueError(f"{path} has {len(keys)} episodes, requires {required}")
+        train_keys = keys[:train_episodes]
+        val_keys = keys[-validation_episodes:]
+        action_low = np.asarray(config.get("policy.action_low"), dtype=np.float32)
+        action_high = np.asarray(config.get("policy.action_high"), dtype=np.float32)
+
+        def read(keys_in: list[str]) -> list[dict[str, np.ndarray]]:
+            episodes = []
+            for key in keys_in:
+                group = h5[key]
+                features = np.asarray(group["dino"], dtype=np.float32)
+                proprio = np.asarray(group["proprio"], dtype=np.float32)
+                actions = np.asarray(group["actions"], dtype=np.float32)
+                actions = np.clip(actions, action_low, action_high).astype(np.float32)
+                frames = np.concatenate([features, proprio], axis=-1).astype(np.float32)
+                episodes.append({"frames": frames, "actions": actions})
+            return episodes
+
+        metadata = {
+            "dataset_type": "causal_dataset",
+            "path": str(path),
+            "source": str(h5["meta"].attrs.get("source", "unknown")) if "meta" in h5 else "unknown",
+            "dino_model": (
+                str(h5["meta"].attrs.get("dino_model", config.get("dino.model_name")))
+                if "meta" in h5
+                else str(config.get("dino.model_name"))
+            ),
+            "dino_feature_type": (
+                str(h5["meta"].attrs.get("dino_feature_type", config.get("dino.feature_type")))
+                if "meta" in h5
+                else str(config.get("dino.feature_type"))
+            ),
+            "dino_spatial_pool": (
+                int(h5["meta"].attrs.get("dino_spatial_pool", config.get("dino.spatial_pool", 4)))
+                if "meta" in h5
+                else int(config.get("dino.spatial_pool", 4))
+            ),
+            "train_episodes": train_episodes,
+            "validation_episodes": validation_episodes,
+        }
+        train = read(train_keys)
+        val = read(val_keys)
+    metadata["train_queries"] = int(sum(len(ep["actions"]) for ep in train))
+    metadata["validation_queries"] = int(sum(len(ep["actions"]) for ep in val))
+    metadata["frame_dim"] = int(train[0]["frames"].shape[-1])
+    metadata["action_dim"] = int(train[0]["actions"].shape[-1])
+    return train, val, metadata
+
+
+def _phase4_fit_standardizers(
+    train_episodes: list[dict[str, np.ndarray]],
+) -> tuple[Standardizer, Standardizer]:
+    frames = np.concatenate([ep["frames"] for ep in train_episodes], axis=0)
+    actions = np.concatenate([ep["actions"] for ep in train_episodes], axis=0)
+    return Standardizer.fit(frames), Standardizer.fit(actions)
+
+
+def _phase4_normalize_episodes(
+    episodes: list[dict[str, np.ndarray]],
+    frame_norm: Standardizer,
+    action_norm: Standardizer,
+) -> list[dict[str, np.ndarray]]:
+    normalized = []
+    for ep in episodes:
+        normalized.append(
+            {
+                "frames": frame_norm.transform(ep["frames"]),
+                "actions": action_norm.transform(ep["actions"]),
+                "raw_actions": ep["actions"],
+            }
+        )
+    return normalized
+
+
+def _phase4_history(
+    frames: np.ndarray,
+    actions: np.ndarray,
+    t: int,
+    history: int,
+    zero_action_norm: np.ndarray,
+) -> np.ndarray:
+    rows = []
+    for offset in range(history):
+        frame_t = t - history + 1 + offset
+        source_t = max(0, frame_t)
+        prev_t = frame_t - 1
+        prev_action = actions[prev_t] if prev_t >= 0 else zero_action_norm
+        rows.append(np.concatenate([frames[source_t], prev_action], axis=0))
+    return np.stack(rows, axis=0).astype(np.float32)
+
+
+class _Phase4HistoryDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        episodes: list[dict[str, np.ndarray]],
+        history: int,
+        zero_action_norm: np.ndarray,
+        length: int,
+    ) -> None:
+        self.episodes = [ep for ep in episodes if len(ep["actions"]) > 0]
+        self.history = history
+        self.zero_action_norm = zero_action_norm
+        self.length = length
+        if not self.episodes:
+            raise ValueError("No usable Phase 4 episodes")
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        episode = self.episodes[np.random.randint(0, len(self.episodes))]
+        t = int(np.random.randint(0, len(episode["actions"])))
+        history = _phase4_history(
+            episode["frames"],
+            episode["actions"],
+            t,
+            self.history,
+            self.zero_action_norm,
+        )
+        return torch.from_numpy(history), torch.from_numpy(episode["actions"][t])
+
+
+def _make_phase4_policy(
+    architecture: str,
+    step_dim: int,
+    history: int,
+    action_dim: int,
+    hidden_dim: int,
+) -> nn.Module:
+    if architecture == "concat":
+        return _TemporalConcatPolicy(step_dim, history, action_dim, hidden_dim)
+    if architecture == "gru":
+        return _TemporalGruPolicy(step_dim, history, action_dim, hidden_dim)
+    raise ValueError(f"Unknown Phase 4 architecture: {architecture}")
+
+
+def _phase4_action_metrics(
+    model: nn.Module,
+    episodes: list[dict[str, np.ndarray]],
+    history: int,
+    action_norm: Standardizer,
+    zero_action_norm: np.ndarray,
+    max_queries: int,
+) -> dict[str, Any]:
+    device = next(model.parameters()).device
+    rng = np.random.default_rng(20_000 + history)
+    candidates = [(ep_i, t) for ep_i, ep in enumerate(episodes) for t in range(len(ep["actions"]))]
+    if len(candidates) > max_queries:
+        chosen = rng.choice(len(candidates), size=max_queries, replace=False)
+        candidates = [candidates[int(index)] for index in chosen]
+    predictions = []
+    targets = []
+    batch = []
+    batch_targets = []
+    batch_size = 2048
+    with torch.inference_mode():
+        for ep_i, t in candidates:
+            episode = episodes[ep_i]
+            batch.append(
+                _phase4_history(
+                    episode["frames"],
+                    episode["actions"],
+                    t,
+                    history,
+                    zero_action_norm,
+                )
+            )
+            batch_targets.append(episode["raw_actions"][t])
+            if len(batch) == batch_size:
+                x = torch.from_numpy(np.stack(batch)).to(device).float()
+                pred = model(x).detach().cpu().numpy()
+                predictions.append(action_norm.inverse(pred))
+                targets.append(np.stack(batch_targets))
+                batch.clear()
+                batch_targets.clear()
+        if batch:
+            x = torch.from_numpy(np.stack(batch)).to(device).float()
+            pred = model(x).detach().cpu().numpy()
+            predictions.append(action_norm.inverse(pred))
+            targets.append(np.stack(batch_targets))
+    return _action_regression_metrics(np.concatenate(predictions), np.concatenate(targets))
+
+
+def train_phase4_visual_bc(
+    config: Config,
+    history: int,
+    architecture: str | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    architecture = architecture or str(config.get("incremental.phase4.architecture", "concat"))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase4"
+        / f"{architecture}_h{history}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "visual_bc.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 4 visual BC exists: {checkpoint_path}")
+        return checkpoint_path
+    train_episodes, val_episodes, data_metadata = _load_phase4_episodes(config)
+    frame_norm, action_norm = _phase4_fit_standardizers(train_episodes)
+    train_norm = _phase4_normalize_episodes(train_episodes, frame_norm, action_norm)
+    val_norm = _phase4_normalize_episodes(val_episodes, frame_norm, action_norm)
+    zero_action_norm = action_norm.transform(np.zeros((1, data_metadata["action_dim"]), dtype=np.float32))[0]
+    step_dim = data_metadata["frame_dim"] + data_metadata["action_dim"]
+    hidden_dim = int(config.get("incremental.phase4.hidden_dim", 512))
+    model = _make_phase4_policy(
+        architecture,
+        step_dim,
+        history,
+        data_metadata["action_dim"],
+        hidden_dim,
+    ).to(default_device())
+    dataset = _Phase4HistoryDataset(
+        train_norm,
+        history,
+        zero_action_norm,
+        length=int(config.get("incremental.phase4.batch_size", 512))
+        * int(config.get("incremental.phase4.batches_per_epoch", 500)),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase4.batch_size", 512)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase4.lr", 3e-4)),
+    )
+    epochs = int(config.get("incremental.phase4.epochs", 50))
+    timer = Timer()
+    best_state = None
+    best_mae = float("inf")
+    history_rows = []
+    device = next(model.parameters()).device
+    for epoch in trange(1, epochs + 1, desc=f"train phase4 {architecture} h={history}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            pred = model(x)
+            loss = torch.mean((pred - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        metrics = _phase4_action_metrics(
+            model,
+            val_norm,
+            history,
+            action_norm,
+            zero_action_norm,
+            int(config.get("incremental.phase4.validation_queries", 10000)),
+        )
+        row = {
+            "epoch": epoch,
+            "train_mse": loss_sum / count,
+            "validation_action_mae": metrics["mae"],
+            "validation_action_rmse": metrics["rmse"],
+        }
+        history_rows.append(row)
+        if metrics["mae"] < best_mae:
+            best_mae = metrics["mae"]
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 4 visual BC training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    validation_metrics = _phase4_action_metrics(
+        model,
+        val_norm,
+        history,
+        action_norm,
+        zero_action_norm,
+        int(config.get("incremental.phase4.validation_queries", 10000)),
+    )
+    payload = {
+        "model": model.state_dict(),
+        "architecture": architecture,
+        "history": history,
+        "step_dim": step_dim,
+        "frame_dim": data_metadata["frame_dim"],
+        "action_dim": data_metadata["action_dim"],
+        "hidden_dim": hidden_dim,
+        "frame_norm": frame_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "zero_action_norm": zero_action_norm,
+        "validation_metrics": validation_metrics,
+        "data": data_metadata,
+        "history_rows": history_rows,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "visual_bc_metrics.json",
+        {
+            "architecture": architecture,
+            "history": history,
+            "validation_metrics": validation_metrics,
+            "data": data_metadata,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 4 visual BC: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_phase4_visual_bc(path: Path, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model = _make_phase4_policy(
+        str(checkpoint["architecture"]),
+        int(checkpoint["step_dim"]),
+        int(checkpoint["history"]),
+        int(checkpoint["action_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    return model, checkpoint
+
+
+def _phase4_rgb_state(obs: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    rgb = _numpy(obs["sensor_data"]["base_camera"]["rgb"])
+    state = _numpy(obs["state"])
+    if rgb.shape[-1] == 4:
+        rgb = rgb[..., :3]
+    return rgb.astype(np.uint8), state.astype(np.float32)
+
+
+@torch.inference_mode()
+def _phase4_frame_inputs(
+    obs: dict[str, Any],
+    dino: DinoExtractor,
+    batch_size: int,
+) -> np.ndarray:
+    rgb, state = _phase4_rgb_state(obs)
+    features = [dino.encode_batch(chunk) for chunk in batched(rgb, batch_size)]
+    dino_features = np.concatenate(features, axis=0)
+    proprio = state[:, :21].astype(np.float32)
+    return np.concatenate([dino_features, proprio], axis=-1).astype(np.float32)
+
+
+def _phase4_make_visual_env(config: Config, num_envs: int):
+    from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
+
+    base = gym.make(
+        config.get("env_id"),
+        obs_mode="rgb+state",
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        sim_backend=_rl_backend(config),
+        num_envs=num_envs,
+        reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+    )
+    return ManiSkillVectorEnv(
+        base,
+        num_envs,
+        ignore_terminations=not bool(config.get("rl.eval_partial_reset", False)),
+        record_metrics=True,
+    )
+
+
+def evaluate_phase4_visual_bc(
+    config: Config,
+    history: int,
+    architecture: str | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+) -> Path:
+    architecture = architecture or str(config.get("incremental.phase4.architecture", "concat"))
+    checkpoint_path = train_phase4_visual_bc(
+        config,
+        history=history,
+        architecture=architecture,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    model, checkpoint = _load_phase4_visual_bc(checkpoint_path, device)
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    zero_action_norm = np.asarray(checkpoint["zero_action_norm"], dtype=np.float32)
+    dino = _phase4_dino_from_config(config, device)
+    eval_episodes = int(episodes or config.get("incremental.phase4.eval_episodes", 100))
+    num_envs = min(int(config.get("incremental.phase4.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase4.eval_seed", 10000)))
+    frames = frame_norm.transform(
+        _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+    )
+    frame_history = np.repeat(frames[:, None, :], history, axis=1).astype(np.float32)
+    action_history = np.repeat(zero_action_norm[None, None, :], num_envs, axis=0)
+    action_history = np.repeat(action_history, history, axis=1).astype(np.float32)
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    latencies: list[float] = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    while len(successes) < eval_episodes:
+        policy_input = np.concatenate([frame_history, action_history], axis=-1)
+        timer = Timer()
+        with torch.inference_mode():
+            pred_norm = model(torch.from_numpy(policy_input).to(device).float())
+            raw_action = action_norm.inverse(pred_norm.detach().cpu().numpy())
+        latencies.append(timer.elapsed() / num_envs)
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        executed_norm = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+        next_frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        frame_history = np.roll(frame_history, shift=-1, axis=1)
+        frame_history[:, -1] = next_frames
+        action_history = np.roll(action_history, shift=-1, axis=1)
+        action_history[:, -1] = executed_norm
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    frame_history[env_idx] = np.repeat(
+                        next_frames[env_idx][None, :], history, axis=0
+                    )
+                    action_history[env_idx] = np.repeat(
+                        zero_action_norm[None, :], history, axis=0
+                    )
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    metrics = {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(
+            np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)
+        ),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "seed_start": int(config.get("incremental.phase4.eval_seed", 10000)),
+        "num_envs": num_envs,
+    }
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase4"
+        / f"{architecture}_h{history}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "visual_bc.json"
+    payload = {
+        "phase": 4,
+        "method": "visual_deterministic_bc",
+        "architecture": architecture,
+        "history": history,
+        "seed": seed,
+        "closed_loop": metrics,
+        "held_out_action_metrics": checkpoint["validation_metrics"],
+        "data": checkpoint["data"],
+        "metadata": _runtime_metadata(config),
+        "gate_passed": metrics["success"] >= 0.50,
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def _phase4_obj_yaw(state: np.ndarray) -> np.ndarray:
+    return (2.0 * np.arctan2(state[:, 30], state[:, 27])).astype(np.float32)
+
+
+def _phase4_probe_labels(
+    state: np.ndarray,
+    prev_motion_state: np.ndarray,
+    config: Config,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    obj_xy = state[:, 24:26].astype(np.float32)
+    yaw = _phase4_obj_yaw(state)
+    tcp_xy = state[:, 14:16].astype(np.float32)
+    motion_state = np.concatenate([obj_xy, yaw[:, None], tcp_xy], axis=-1)
+    dt_inv = float(config.get("control_freq", 20))
+    obj_vel_xy = (motion_state[:, :2] - prev_motion_state[:, :2]) * dt_inv
+    yaw_delta = np.arctan2(
+        np.sin(motion_state[:, 2] - prev_motion_state[:, 2]),
+        np.cos(motion_state[:, 2] - prev_motion_state[:, 2]),
+    )
+    yaw_vel = yaw_delta[:, None] * dt_inv
+    tcp_vel_xy = (motion_state[:, 3:5] - prev_motion_state[:, 3:5]) * dt_inv
+    contact_threshold = float(config.get("incremental.phase4.probe_contact_distance_m", 0.08))
+    contact = (np.linalg.norm(tcp_xy - obj_xy, axis=-1) < contact_threshold).astype(np.float32)
+    labels = np.concatenate(
+        [obj_xy, yaw[:, None], obj_vel_xy, yaw_vel, tcp_xy, tcp_vel_xy],
+        axis=-1,
+    ).astype(np.float32)
+    return labels, contact[:, None], motion_state.astype(np.float32)
+
+
+def _binary_auc(scores: np.ndarray, labels: np.ndarray) -> float:
+    labels = labels.astype(bool)
+    positives = int(labels.sum())
+    negatives = int((~labels).sum())
+    if positives == 0 or negatives == 0:
+        return float("nan")
+    order = np.argsort(scores)
+    ranks = np.empty_like(order, dtype=np.float64)
+    ranks[order] = np.arange(1, len(scores) + 1)
+    return float((ranks[labels].sum() - positives * (positives + 1) / 2) / (positives * negatives))
+
+
+def probe_phase4_visual_history(
+    config: Config,
+    history: int,
+    architecture: str | None = None,
+    seed: int = 0,
+    samples: int | None = None,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    architecture = architecture or str(config.get("incremental.phase4.architecture", "concat"))
+    samples = int(samples or config.get("incremental.phase4.probe_samples", 8000))
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase4"
+        / f"{architecture}_h{history}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "visual_history_probe.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 4 visual-history probe exists: {output_path}")
+        return output_path
+    checkpoint_path = train_phase4_visual_bc(
+        config,
+        history=history,
+        architecture=architecture,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    _model, checkpoint = _load_phase4_visual_bc(checkpoint_path, device)
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    zero_action_norm = np.asarray(checkpoint["zero_action_norm"], dtype=np.float32)
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = min(int(config.get("incremental.phase4.eval_num_envs", 64)), samples)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase4.eval_seed", 10000)) + 700_000)
+    frames = frame_norm.transform(
+        _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+    )
+    frame_history = np.repeat(frames[:, None, :], history, axis=1).astype(np.float32)
+    action_history = np.repeat(zero_action_norm[None, None, :], num_envs, axis=0)
+    action_history = np.repeat(action_history, history, axis=1).astype(np.float32)
+    _rgb, state = _phase4_rgb_state(obs)
+    prev_motion_state = np.concatenate(
+        [state[:, 24:26], _phase4_obj_yaw(state)[:, None], state[:, 14:16]],
+        axis=-1,
+    )
+    inputs = []
+    continuous_labels = []
+    contact_labels = []
+    progress = trange(samples, desc=f"collect phase4 probe h={history}")
+    while len(inputs) < samples:
+        state_t = torch.from_numpy(state).to(device).float()
+        raw_action = teacher.actor_mean(state_t)
+        action = torch.clamp(raw_action, action_low, action_high)
+        labels, contact, current_motion_state = _phase4_probe_labels(
+            state, prev_motion_state, config
+        )
+        take = min(num_envs, samples - len(inputs))
+        current_input = np.concatenate([frame_history, action_history], axis=-1)
+        inputs.append(current_input[:take].reshape(take, -1).astype(np.float32))
+        continuous_labels.append(labels[:take])
+        contact_labels.append(contact[:take])
+        progress.update(take)
+        obs, _reward, _terminated, _truncated, info = env.step(action)
+        executed_norm = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+        next_frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        frame_history = np.roll(frame_history, shift=-1, axis=1)
+        frame_history[:, -1] = next_frames
+        action_history = np.roll(action_history, shift=-1, axis=1)
+        action_history[:, -1] = executed_norm
+        _rgb, state = _phase4_rgb_state(obs)
+        next_motion_state = np.concatenate(
+            [state[:, 24:26], _phase4_obj_yaw(state)[:, None], state[:, 14:16]],
+            axis=-1,
+        )
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            for env_idx in np.flatnonzero(mask):
+                frame_history[env_idx] = np.repeat(next_frames[env_idx][None, :], history, axis=0)
+                action_history[env_idx] = np.repeat(zero_action_norm[None, :], history, axis=0)
+        prev_motion_state = current_motion_state
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            prev_motion_state[mask] = next_motion_state[mask]
+        if len(inputs) * num_envs >= samples + num_envs:
+            break
+    progress.close()
+    env.close()
+    x_all = np.concatenate(inputs, axis=0)[:samples]
+    y_all = np.concatenate(continuous_labels, axis=0)[:samples]
+    c_all = np.concatenate(contact_labels, axis=0)[:samples]
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(samples)
+    split = int(0.8 * samples)
+    train_idx = order[:split]
+    val_idx = order[split:]
+    x_norm = Standardizer.fit(x_all[train_idx])
+    y_norm = Standardizer.fit(y_all[train_idx])
+    train_x = torch.from_numpy(x_norm.transform(x_all[train_idx])).float()
+    train_y = torch.from_numpy(y_norm.transform(y_all[train_idx])).float()
+    train_c = torch.from_numpy(c_all[train_idx]).float()
+    dataset = TensorDataset(train_x, train_y, train_c)
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase4.probe_batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    hidden_dim = int(config.get("incremental.phase4.probe_hidden_dim", 512))
+    trunk = nn.Sequential(
+        nn.Linear(x_all.shape[-1], hidden_dim),
+        nn.SiLU(),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.SiLU(),
+    ).to(device)
+    continuous_head = nn.Linear(hidden_dim, y_all.shape[-1]).to(device)
+    contact_head = nn.Linear(hidden_dim, 1).to(device)
+    optimizer = torch.optim.AdamW(
+        list(trunk.parameters()) + list(continuous_head.parameters()) + list(contact_head.parameters()),
+        lr=float(config.get("incremental.phase4.probe_lr", 1e-3)),
+    )
+    epochs = int(config.get("incremental.phase4.probe_epochs", 100))
+    timer = Timer()
+    for _epoch in trange(epochs, desc=f"train phase4 probe h={history}"):
+        for x, y, c in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            c = c.to(device, non_blocking=True).float()
+            hidden = trunk(x)
+            pred_y = continuous_head(hidden)
+            pred_c = contact_head(hidden)
+            loss = torch.mean((pred_y - y) ** 2) + torch.nn.functional.binary_cross_entropy_with_logits(
+                pred_c, c
+            )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+    with torch.inference_mode():
+        val_x = torch.from_numpy(x_norm.transform(x_all[val_idx])).to(device).float()
+        hidden = trunk(val_x)
+        pred_y = y_norm.inverse(continuous_head(hidden).detach().cpu().numpy())
+        contact_logits = contact_head(hidden).detach().cpu().numpy()[:, 0]
+    target_y = y_all[val_idx]
+    target_c = c_all[val_idx, 0]
+    mean_y = np.broadcast_to(y_all[train_idx].mean(axis=0, keepdims=True), target_y.shape)
+    contact_prior = float(c_all[train_idx].mean())
+    contact_pred = (1.0 / (1.0 + np.exp(-contact_logits))) >= 0.5
+    baseline_contact = np.full_like(target_c.astype(bool), contact_prior >= 0.5)
+    names = [
+        "obj_x_m",
+        "obj_y_m",
+        "obj_yaw_rad",
+        "obj_vx_mps",
+        "obj_vy_mps",
+        "obj_yaw_rate_rps",
+        "tcp_x_m",
+        "tcp_y_m",
+        "tcp_vx_mps",
+        "tcp_vy_mps",
+    ]
+    mae = np.mean(np.abs(pred_y - target_y), axis=0)
+    baseline_mae = np.mean(np.abs(mean_y - target_y), axis=0)
+    metrics = {
+        "phase": 4,
+        "method": "visual_history_probe",
+        "architecture": architecture,
+        "history": history,
+        "samples": samples,
+        "train_samples": int(len(train_idx)),
+        "validation_samples": int(len(val_idx)),
+        "continuous_mae": {name: float(value) for name, value in zip(names, mae, strict=True)},
+        "mean_baseline_mae": {
+            name: float(value) for name, value in zip(names, baseline_mae, strict=True)
+        },
+        "contact": {
+            "positive_fraction_train": contact_prior,
+            "positive_fraction_val": float(target_c.mean()),
+            "accuracy": float(np.mean(contact_pred == target_c.astype(bool))),
+            "majority_baseline_accuracy": float(np.mean(baseline_contact == target_c.astype(bool))),
+            "auroc": _binary_auc(contact_logits, target_c),
+        },
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    metrics["gate_support"] = {
+        "pose_better_than_mean": bool(mae[0] < baseline_mae[0] and mae[1] < baseline_mae[1]),
+        "velocity_better_than_mean": bool(
+            mae[3] < baseline_mae[3] and mae[4] < baseline_mae[4]
+        ),
+        "contact_better_than_majority": bool(
+            metrics["contact"]["accuracy"] > metrics["contact"]["majority_baseline_accuracy"]
+        ),
+    }
+    write_json(output_path, metrics)
+    console.print(metrics)
     return output_path

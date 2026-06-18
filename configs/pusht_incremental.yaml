@@ -4,6 +4,12 @@ obs_mode: state
 control_mode: pd_ee_delta_pos
 control_freq: 20
 
+dino:
+  model_name: facebook/dinov2-small
+  feature_type: spatial
+  spatial_pool: 4
+  batch_size: 64
+
 paths:
   rl_dir: artifacts/rl_pusht_official
   incremental_data_dir: data/incremental
@@ -82,3 +88,24 @@ incremental:
     endpoint_consistency_batch: 512
     overfit_steps: 5000
     overfit_lr: 0.001
+  phase4:
+    prepared_path: data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5
+    train_episodes: 1800
+    validation_episodes: 200
+    history_lengths: [1, 2, 4, 8]
+    architecture: concat
+    hidden_dim: 512
+    batch_size: 512
+    batches_per_epoch: 500
+    epochs: 50
+    lr: 0.0003
+    validation_queries: 10000
+    eval_episodes: 100
+    eval_seed: 10000
+    eval_num_envs: 64
+    probe_samples: 8000
+    probe_epochs: 100
+    probe_batch_size: 512
+    probe_hidden_dim: 512
+    probe_lr: 0.001
+    probe_contact_distance_m: 0.08
