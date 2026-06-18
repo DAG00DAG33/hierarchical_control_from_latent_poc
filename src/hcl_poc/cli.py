@@ -14,12 +14,17 @@ from hcl_poc.eval import evaluate, horizon_steps, record_videos
 from hcl_poc.incremental import (
     collect_phase1_query_dataset,
     collect_phase2_dagger_queries,
+    collect_phase6_latent_dagger_queries,
     evaluate_phase1_bc,
     evaluate_phase2_dagger_bc,
     evaluate_phase2_recovery,
     evaluate_phase3_flow,
     evaluate_phase4_visual_bc,
     evaluate_phase5_visual_flow,
+    evaluate_phase6_latent_bc,
+    evaluate_phase6_latent_dagger_bc,
+    evaluate_phase6_latent_flow,
+    probe_phase6_representation,
     probe_phase4_visual_history,
     run_phase0,
     train_phase1_bc,
@@ -27,6 +32,10 @@ from hcl_poc.incremental import (
     train_phase3_flow,
     train_phase4_visual_bc,
     train_phase5_visual_flow,
+    train_phase6_latent_bc,
+    train_phase6_latent_dagger_bc,
+    train_phase6_latent_flow,
+    train_phase6_representation,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -298,6 +307,86 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             episodes=args.episodes,
         )
+    elif args.incremental_command == "phase6-train":
+        train_phase6_representation(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-probe":
+        probe_phase6_representation(
+            config,
+            representation=args.representation,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-control-train":
+        train_phase6_latent_bc(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-control-eval":
+        evaluate_phase6_latent_bc(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-flow-train":
+        train_phase6_latent_flow(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-flow-eval":
+        evaluate_phase6_latent_flow(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-dagger-collect":
+        collect_phase6_latent_dagger_queries(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            iteration=args.iteration,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-dagger-train":
+        train_phase6_latent_dagger_bc(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            iteration=args.iteration,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase6-dagger-eval":
+        evaluate_phase6_latent_dagger_bc(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            iteration=args.iteration,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -417,6 +506,52 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "phase5-eval":
             phase5.add_argument("--episodes", type=int)
         phase5.set_defaults(func=incremental_cmd)
+    phase6_train = incremental_sub.add_parser("phase6-train")
+    add_config_arg(phase6_train)
+    phase6_train.add_argument("--latent-dim", type=int, required=True)
+    phase6_train.add_argument("--variant", default=None)
+    phase6_train.add_argument("--seed", type=int, default=0)
+    phase6_train.add_argument("--force", action="store_true")
+    phase6_train.set_defaults(func=incremental_cmd)
+    phase6_probe = incremental_sub.add_parser("phase6-probe")
+    add_config_arg(phase6_probe)
+    phase6_probe.add_argument("--representation", choices=["raw", "latent"], default="raw")
+    phase6_probe.add_argument("--latent-dim", type=int)
+    phase6_probe.add_argument("--variant", default=None)
+    phase6_probe.add_argument("--seed", type=int, default=0)
+    phase6_probe.add_argument("--force", action="store_true")
+    phase6_probe.set_defaults(func=incremental_cmd)
+    for command in ["phase6-control-train", "phase6-control-eval"]:
+        phase6_control = incremental_sub.add_parser(command)
+        add_config_arg(phase6_control)
+        phase6_control.add_argument("--latent-dim", type=int, required=True)
+        phase6_control.add_argument("--variant", default=None)
+        phase6_control.add_argument("--seed", type=int, default=0)
+        phase6_control.add_argument("--force", action="store_true")
+        if command == "phase6-control-eval":
+            phase6_control.add_argument("--episodes", type=int)
+        phase6_control.set_defaults(func=incremental_cmd)
+    for command in ["phase6-flow-train", "phase6-flow-eval"]:
+        phase6_flow = incremental_sub.add_parser(command)
+        add_config_arg(phase6_flow)
+        phase6_flow.add_argument("--latent-dim", type=int, required=True)
+        phase6_flow.add_argument("--variant", default=None)
+        phase6_flow.add_argument("--seed", type=int, default=0)
+        phase6_flow.add_argument("--force", action="store_true")
+        if command == "phase6-flow-eval":
+            phase6_flow.add_argument("--episodes", type=int)
+        phase6_flow.set_defaults(func=incremental_cmd)
+    for command in ["phase6-dagger-collect", "phase6-dagger-train", "phase6-dagger-eval"]:
+        phase6_dagger = incremental_sub.add_parser(command)
+        add_config_arg(phase6_dagger)
+        phase6_dagger.add_argument("--latent-dim", type=int, required=True)
+        phase6_dagger.add_argument("--variant", default=None)
+        phase6_dagger.add_argument("--iteration", type=int, default=1)
+        phase6_dagger.add_argument("--seed", type=int, default=0)
+        phase6_dagger.add_argument("--force", action="store_true")
+        if command in {"phase6-dagger-collect", "phase6-dagger-eval"}:
+            phase6_dagger.add_argument("--episodes", type=int)
+        phase6_dagger.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

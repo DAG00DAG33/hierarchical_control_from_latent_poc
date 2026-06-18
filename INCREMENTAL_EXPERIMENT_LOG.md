@@ -27,9 +27,9 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 6: learned latent representation validation |
-| Gate | Latent probes approach raw spatial-DINO probes and latent flat policy keeps most visual-flow performance |
-| Gate state | Phases 0-5 passed; Phase 6 not yet evaluated |
+| Active phase | Phase 7: oracle future-latent low-level policy |
+| Gate | Oracle future-latent interface should match the flat visual-flow baseline before high-level prediction |
+| Gate state | Phases 0-6 passed |
 | Current blocker | None |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
@@ -496,3 +496,94 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   visual flow baseline and proceed to Phase 6 representation validation. The
   Phase 6 plan already includes the requested reconstruction-only autoencoder
   ablation with no world-model prediction loss.
+
+### 2026-06-18 - P6-I01: Representation validation implementation
+
+- **Dataset:** Same successful PPO causal visual dataset as Phases 4-5,
+  `data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5`.
+- **Representation inputs:** Spatial DINOv2-small base-camera RGB features plus
+  the first 21 proprioceptive state dimensions.
+- **Implemented Phase 6 commands:**
+  - `incremental phase6-train`;
+  - `incremental phase6-probe`;
+  - `incremental phase6-control-{train,eval}`;
+  - `incremental phase6-flow-{train,eval}`;
+  - `incremental phase6-dagger-{collect,train,eval}`.
+- **Representation variants:** world-model plus reconstruction,
+  world-model without reconstruction, and reconstruction-only autoencoder.
+  The reconstruction-only autoencoder has zero world-model prediction loss, as
+  requested in the Phase 6 plan.
+- **Probe labels:** Object pose/velocity, TCP pose/velocity, contact, reward,
+  inverse dynamics, and forward next-label prediction. Yaw probes use
+  sin/cos targets and report angular MAE to avoid wrap artifacts.
+
+### 2026-06-18 - P6-D01: Initial 512D autoencoder probe passed but control failed
+
+- **Initial representation:** `ae_recon_z512`, hidden width 512, unweighted
+  full-observation reconstruction.
+- **Probe result after yaw fix:** Passed all static probe gates:
+  object x/y `0.0028` / `0.0031` m, yaw `0.052` rad, contact AUROC `0.990`,
+  inverse-dynamics action MAE `0.0577` vs mean baseline `0.2107`.
+- **Control result:** Latent deterministic BC reached 35/100 success after
+  adding previous-action conditioning. Latent zero-noise flow reached 42/100.
+  Both missed the 80% of direct visual-flow target, where direct visual flow is
+  66/100.
+- **Diagnosis:** The latent probe was too weak as a control diagnostic. Feeding
+  decoded AE reconstructions into the already-successful Phase 4 visual BC gave
+  action MAE `0.0677`, compared with `0.0382` on true visual inputs. The
+  reconstruction loss was dominated by thousands of DINO dimensions and
+  underweighted the 21D proprio tail.
+
+### 2026-06-18 - P6-D02: Capacity-only change was insufficient
+
+- **Experiment:** 1024D reconstruction-only autoencoder with the original
+  hidden width.
+- **Result:** Latent zero-noise flow reached 31/100 success and held-out MAE
+  `0.0512`, worse than the 512D version.
+- **Diagnosis:** Increasing latent dimensionality alone did not fix the
+  information bottleneck because the encoder/decoder hidden width and
+  unbalanced reconstruction objective still limited action-relevant
+  reconstruction.
+
+### 2026-06-18 - P6-G01: Balanced proprio reconstruction fixes the representation
+
+- **Final representation:** `ae_recon_z512`, hidden width 1024, reconstruction
+  loss computed as DINO-feature MSE plus proprio-tail MSE over the final 21
+  input dimensions.
+- **Observation:** This is still pure observation reconstruction. It does not
+  add a pose, reward, or action loss to the encoder.
+- **Reconstruction diagnostic:** Phase 4 visual BC on decoded inputs improved
+  from `0.0677` action MAE to `0.0410`; true inputs remain `0.0382`.
+- **Final probe result:** Passed all Phase 6 probe gates:
+  - object x/y MAE: `0.0025` / `0.0027` m;
+  - object yaw MAE: `0.0488` rad;
+  - object vx/vy/yaw-rate MAE: `0.0155` / `0.0177` m/s / `0.164` rad/s;
+  - TCP x/y MAE: `0.0030` / `0.0037` m;
+  - TCP vx/vy MAE: `0.0254` / `0.0322` m/s;
+  - contact AUROC: `0.994`;
+  - reward MAE: `0.0218` vs mean baseline `0.3479`;
+  - inverse-dynamics action MAE: `0.0183` vs mean baseline `0.2107`.
+
+### 2026-06-18 - P6-G02: Latent flat-control gate with DAgger
+
+- **Before DAgger:** Balanced latent BC reached 44/100 success with held-out
+  action MAE `0.0322`; balanced latent flow reached 42/100 with held-out MAE
+  `0.0381`. This showed that one-step held-out action MAE was no longer the
+  limiting diagnostic; closed-loop distribution shift remained.
+- **DAgger collection:** 200 latent-policy episodes, state-query semantics only:
+  visited RGB/state observations were labeled by the privileged PPO teacher and
+  used only for action-head imitation, not for world-model or future-state
+  targets.
+- **DAgger training:** Fixed the balanced 512D encoder and trained a latent
+  deterministic BC head on causal teacher data plus relabeled visited states,
+  with query samples repeated 4x.
+- **Closed-loop result:** 59/100 success.
+- **Reference:** Direct visual flow is 66/100 on the same 100 evaluation seeds.
+- **Gate:** Passed the 80% control target (`59/66 = 89%`). It does not pass the
+  stricter 90% target by a small margin.
+- **Final/max normalized reward:** `0.637` / `0.700`.
+- **Held-out action MAE/RMSE:** `0.0355` / `0.0619`.
+- **Phase 6 conclusion:** The learned latent now preserves the task-relevant
+  state variables and can support a flat latent controller that retains most of
+  the direct-observation visual-flow performance. Proceed to Phase 7 oracle
+  future-latent low-level validation.

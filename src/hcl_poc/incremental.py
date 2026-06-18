@@ -19,7 +19,7 @@ from tqdm import trange
 from hcl_poc.config import Config
 from hcl_poc.features import DinoExtractor, batched
 from hcl_poc.flow import flow_matching_loss, sample_flow
-from hcl_poc.models import FlowModel
+from hcl_poc.models import FlowModel, MLP, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import (
     PPOAgent,
     _make_state_env,
@@ -3296,6 +3296,1872 @@ def evaluate_phase5_visual_flow(
         "data": checkpoint["data"],
         "metadata": _runtime_metadata(config),
         "gate_passed": metrics["success"] >= bc_success - 0.05,
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+class _Phase6RepresentationDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        episodes: list[dict[str, np.ndarray]],
+        horizons: list[int],
+        max_horizon: int,
+        length: int,
+    ) -> None:
+        self.episodes = [ep for ep in episodes if len(ep["actions"]) > max_horizon]
+        self.horizons = horizons
+        self.max_horizon = max_horizon
+        self.length = length
+        if not self.episodes:
+            raise ValueError(f"No Phase 6 episodes longer than max horizon {max_horizon}")
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _index: int) -> dict[str, torch.Tensor]:
+        episode = self.episodes[np.random.randint(0, len(self.episodes))]
+        valid_horizons = [h for h in self.horizons if len(episode["actions"]) > h]
+        horizon = int(valid_horizons[np.random.randint(0, len(valid_horizons))])
+        t = int(np.random.randint(0, len(episode["actions"]) - horizon))
+        action_seq = np.zeros(
+            (self.max_horizon, episode["actions"].shape[-1]),
+            dtype=np.float32,
+        )
+        action_seq[:horizon] = episode["actions"][t : t + horizon]
+        return {
+            "x_t": torch.from_numpy(episode["frames"][t]),
+            "x_future": torch.from_numpy(episode["frames"][t + horizon]),
+            "actions": torch.from_numpy(action_seq),
+            "horizon": torch.tensor(horizon, dtype=torch.long),
+        }
+
+
+def _phase6_variant_weights(config: Config, variant: str) -> tuple[float, float, float]:
+    prediction_weight = float(config.get("incremental.phase6.prediction_weight", 1.0))
+    sigreg_weight = float(config.get("incremental.phase6.sigreg_weight", 0.05))
+    reconstruction_weight = float(config.get("incremental.phase6.reconstruction_weight", 0.1))
+    if variant == "wm_recon":
+        return prediction_weight, sigreg_weight, reconstruction_weight
+    if variant == "wm_norecon":
+        return prediction_weight, sigreg_weight, 0.0
+    if variant == "ae_recon":
+        return 0.0, 0.0, reconstruction_weight
+    raise ValueError(f"Unknown Phase 6 variant: {variant}")
+
+
+def _load_phase6_train_episodes(
+    config: Config,
+) -> tuple[list[dict[str, np.ndarray]], list[dict[str, np.ndarray]], dict[str, Any]]:
+    train, val, metadata = _load_phase4_episodes(config)
+    train_episodes = int(config.get("incremental.phase6.train_episodes", 1800))
+    validation_episodes = int(config.get("incremental.phase6.validation_episodes", 200))
+    train = train[:train_episodes]
+    val = val[:validation_episodes]
+    metadata = {
+        **metadata,
+        "phase6_train_episodes": train_episodes,
+        "phase6_validation_episodes": validation_episodes,
+        "phase6_train_queries": int(sum(len(ep["actions"]) for ep in train)),
+        "phase6_validation_queries": int(sum(len(ep["actions"]) for ep in val)),
+    }
+    return train, val, metadata
+
+
+def _phase6_normalize_episodes(
+    episodes: list[dict[str, np.ndarray]],
+    frame_norm: Standardizer,
+    action_norm: Standardizer,
+) -> list[dict[str, np.ndarray]]:
+    out = []
+    for episode in episodes:
+        out.append(
+            {
+                "frames": frame_norm.transform(episode["frames"]),
+                "actions": action_norm.transform(episode["actions"]),
+                "raw_frames": episode["frames"],
+                "raw_actions": episode["actions"],
+            }
+        )
+    return out
+
+
+def train_phase6_representation(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "encoder.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 6 representation exists: {checkpoint_path}")
+        return checkpoint_path
+
+    train_episodes, val_episodes, data_metadata = _load_phase6_train_episodes(config)
+    frame_norm, action_norm = _phase4_fit_standardizers(train_episodes)
+    train_norm = _phase6_normalize_episodes(train_episodes, frame_norm, action_norm)
+    val_norm = _phase6_normalize_episodes(val_episodes, frame_norm, action_norm)
+    input_dim = int(data_metadata["frame_dim"])
+    action_dim = int(data_metadata["action_dim"])
+    hidden_dim = int(config.get("incremental.phase6.hidden_dim", 512))
+    horizons = [int(h) for h in config.get("incremental.phase6.horizons_steps", [1, 2, 4, 8])]
+    max_horizon = max(horizons)
+    prediction_weight, sigreg_weight, reconstruction_weight = _phase6_variant_weights(
+        config, variant
+    )
+
+    device = default_device()
+    encoder = ObservationEncoder(input_dim, latent_dim, hidden_dim).to(device)
+    world_model = RepresentationWorldModel(latent_dim, action_dim, hidden_dim).to(device)
+    decoder = (
+        MLP(latent_dim, input_dim, hidden_dim, depth=3).to(device)
+        if reconstruction_weight > 0.0
+        else None
+    )
+    params = list(encoder.parameters())
+    if prediction_weight > 0.0:
+        params += list(world_model.parameters())
+    if decoder is not None:
+        params += list(decoder.parameters())
+    optimizer = torch.optim.AdamW(params, lr=float(config.get("incremental.phase6.lr", 3e-4)))
+    dataset = _Phase6RepresentationDataset(
+        train_norm,
+        horizons,
+        max_horizon,
+        length=int(config.get("incremental.phase6.batch_size", 512))
+        * int(config.get("incremental.phase6.batches_per_epoch", 400)),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase6.batch_size", 512)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    epochs = int(config.get("incremental.phase6.epochs", 60))
+    history = []
+    timer = Timer()
+    best_state = None
+    best_val = float("inf")
+    validation_samples = int(config.get("incremental.phase6.validation_samples", 8192))
+    proprio_dim = int(config.get("incremental.phase6.proprio_dim", 21))
+    proprio_reconstruction_weight = float(
+        config.get("incremental.phase6.proprio_reconstruction_weight", 1.0)
+    )
+
+    def reconstruction_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if proprio_dim <= 0 or proprio_reconstruction_weight <= 0.0:
+            return torch.mean((pred - target) ** 2)
+        dino_loss = torch.mean((pred[:, :-proprio_dim] - target[:, :-proprio_dim]) ** 2)
+        proprio_loss = torch.mean((pred[:, -proprio_dim:] - target[:, -proprio_dim:]) ** 2)
+        return dino_loss + proprio_reconstruction_weight * proprio_loss
+
+    def validation_metrics() -> dict[str, float]:
+        probe_dataset = _Phase6RepresentationDataset(
+            val_norm,
+            horizons,
+            max_horizon,
+            length=validation_samples,
+        )
+        probe_loader = DataLoader(
+            probe_dataset,
+            batch_size=int(config.get("incremental.phase6.batch_size", 512)),
+            shuffle=False,
+            num_workers=0,
+        )
+        pred_losses = []
+        recon_losses = []
+        dino_recon_losses = []
+        proprio_recon_losses = []
+        with torch.inference_mode():
+            for batch in probe_loader:
+                x_t = batch["x_t"].to(device).float()
+                x_future = batch["x_future"].to(device).float()
+                actions = batch["actions"].to(device).float()
+                horizon = batch["horizon"].to(device)
+                z_t = encoder(x_t)
+                z_future = encoder(x_future)
+                if prediction_weight > 0.0:
+                    pred = world_model(z_t, actions, horizon)
+                    pred_losses.append(float(torch.mean((pred - z_future) ** 2).cpu()))
+                if decoder is not None:
+                    recon_t = decoder(z_t)
+                    recon_future = decoder(z_future)
+                    recon = 0.5 * (
+                        reconstruction_loss(recon_t, x_t)
+                        + reconstruction_loss(recon_future, x_future)
+                    )
+                    recon_losses.append(float(recon.cpu()))
+                    dino_recon_losses.append(
+                        float(
+                            0.5
+                            * (
+                                torch.mean((recon_t[:, :-proprio_dim] - x_t[:, :-proprio_dim]) ** 2)
+                                + torch.mean(
+                                    (
+                                        recon_future[:, :-proprio_dim]
+                                        - x_future[:, :-proprio_dim]
+                                    )
+                                    ** 2
+                                )
+                            ).cpu()
+                        )
+                    )
+                    proprio_recon_losses.append(
+                        float(
+                            0.5
+                            * (
+                                torch.mean((recon_t[:, -proprio_dim:] - x_t[:, -proprio_dim:]) ** 2)
+                                + torch.mean(
+                                    (
+                                        recon_future[:, -proprio_dim:]
+                                        - x_future[:, -proprio_dim:]
+                                    )
+                                    ** 2
+                                )
+                            ).cpu()
+                        )
+                    )
+        return {
+            "prediction_mse": float(np.mean(pred_losses)) if pred_losses else 0.0,
+            "reconstruction_mse": float(np.mean(recon_losses)) if recon_losses else 0.0,
+            "dino_reconstruction_mse": (
+                float(np.mean(dino_recon_losses)) if dino_recon_losses else 0.0
+            ),
+            "proprio_reconstruction_mse": (
+                float(np.mean(proprio_recon_losses)) if proprio_recon_losses else 0.0
+            ),
+        }
+
+    for epoch in trange(1, epochs + 1, desc=f"train phase6 {variant} z={latent_dim}"):
+        encoder.train()
+        world_model.train()
+        if decoder is not None:
+            decoder.train()
+        loss_sum = 0.0
+        pred_sum = 0.0
+        sig_sum = 0.0
+        recon_sum = 0.0
+        count = 0
+        for batch in loader:
+            x_t = batch["x_t"].to(device, non_blocking=True).float()
+            x_future = batch["x_future"].to(device, non_blocking=True).float()
+            actions = batch["actions"].to(device, non_blocking=True).float()
+            horizon = batch["horizon"].to(device, non_blocking=True)
+            z_t = encoder(x_t)
+            z_future = encoder(x_future)
+            pred_loss = torch.zeros((), device=device)
+            if prediction_weight > 0.0:
+                pred = world_model(z_t, actions, horizon)
+                pred_loss = torch.mean((pred - z_future) ** 2)
+            std = torch.sqrt(z_t.var(dim=0) + 1e-4)
+            sigreg = torch.mean(torch.relu(1.0 - std))
+            recon_loss = torch.zeros((), device=device)
+            if decoder is not None:
+                recon_t = decoder(z_t)
+                recon_future = decoder(z_future)
+                recon_loss = 0.5 * (
+                    reconstruction_loss(recon_t, x_t)
+                    + reconstruction_loss(recon_future, x_future)
+                )
+            loss = (
+                prediction_weight * pred_loss
+                + sigreg_weight * sigreg
+                + reconstruction_weight * recon_loss
+            )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            batch_count = len(x_t)
+            loss_sum += float(loss.detach().cpu()) * batch_count
+            pred_sum += float(pred_loss.detach().cpu()) * batch_count
+            sig_sum += float(sigreg.detach().cpu()) * batch_count
+            recon_sum += float(recon_loss.detach().cpu()) * batch_count
+            count += batch_count
+        encoder.eval()
+        world_model.eval()
+        if decoder is not None:
+            decoder.eval()
+        val = validation_metrics()
+        selection = val["prediction_mse"] + val["reconstruction_mse"]
+        row = {
+            "epoch": epoch,
+            "train_loss": loss_sum / count,
+            "train_prediction_mse": pred_sum / count,
+            "train_sigreg": sig_sum / count,
+            "train_reconstruction_mse": recon_sum / count,
+            **{f"validation_{key}": value for key, value in val.items()},
+        }
+        history.append(row)
+        if selection < best_val:
+            best_val = selection
+            best_state = {
+                "encoder": copy.deepcopy(encoder.state_dict()),
+                "world_model": copy.deepcopy(world_model.state_dict()),
+                "decoder": copy.deepcopy(decoder.state_dict()) if decoder is not None else None,
+            }
+    if best_state is None:
+        raise RuntimeError("Phase 6 representation training produced no checkpoint")
+    encoder.load_state_dict(best_state["encoder"])
+    world_model.load_state_dict(best_state["world_model"])
+    if decoder is not None and best_state["decoder"] is not None:
+        decoder.load_state_dict(best_state["decoder"])
+    final_val = validation_metrics()
+    payload = {
+        "encoder": encoder.state_dict(),
+        "world_model": world_model.state_dict(),
+        "decoder": decoder.state_dict() if decoder is not None else None,
+        "variant": variant,
+        "input_dim": input_dim,
+        "action_dim": action_dim,
+        "latent_dim": latent_dim,
+        "hidden_dim": hidden_dim,
+        "horizons_steps": horizons,
+        "max_horizon": max_horizon,
+        "frame_norm": frame_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "prediction_weight": prediction_weight,
+        "sigreg_weight": sigreg_weight,
+        "reconstruction_weight": reconstruction_weight,
+        "validation_metrics": final_val,
+        "history": history,
+        "data": data_metadata,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "encoder_metrics.json",
+        {
+            "variant": variant,
+            "latent_dim": latent_dim,
+            "validation_metrics": final_val,
+            "elapsed_s": timer.elapsed(),
+            "data": data_metadata,
+        },
+    )
+    console.print(f"Wrote Phase 6 representation: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_phase6_encoder(path: Path, device: torch.device) -> tuple[ObservationEncoder, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    encoder = ObservationEncoder(
+        int(checkpoint["input_dim"]),
+        int(checkpoint["latent_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).to(device)
+    encoder.load_state_dict(checkpoint["encoder"])
+    encoder.eval()
+    return encoder, checkpoint
+
+
+def _phase6_probe_dataset_path(config: Config) -> Path:
+    return config.path_value("paths.incremental_data_dir") / "phase6_probe_dataset.npz"
+
+
+@torch.inference_mode()
+def collect_phase6_probe_dataset(config: Config, force: bool = False) -> Path:
+    output_path = _phase6_probe_dataset_path(config)
+    required = int(config.get("incremental.phase6.probe_samples", 12000))
+    if output_path.exists() and not force:
+        with np.load(output_path) as data:
+            if len(data["inputs"]) >= required:
+                console.print(f"Phase 6 probe dataset exists: {output_path}")
+                return output_path
+    device = default_device()
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = min(int(config.get("incremental.phase6.eval_num_envs", 64)), required)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase6.probe_seed", 720000)))
+    inputs = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+    _rgb, state = _phase4_rgb_state(obs)
+    prev_motion_state = np.concatenate(
+        [state[:, 24:26], _phase4_obj_yaw(state)[:, None], state[:, 14:16]],
+        axis=-1,
+    )
+    input_rows = []
+    next_input_rows = []
+    action_rows = []
+    label_rows = []
+    next_label_rows = []
+    contact_rows = []
+    next_contact_rows = []
+    reward_rows = []
+    progress = trange(required, desc="collect phase6 causal probe")
+    collected = 0
+    while collected < required:
+        state_t = torch.from_numpy(state).to(device).float()
+        raw_action = teacher.actor_mean(state_t)
+        action = torch.clamp(raw_action, action_low, action_high)
+        labels, contact, current_motion_state = _phase4_probe_labels(
+            state,
+            prev_motion_state,
+            config,
+        )
+        next_obs, reward, _terminated, _truncated, info = env.step(action)
+        next_inputs = _phase4_frame_inputs(next_obs, dino, int(config.get("dino.batch_size", 64)))
+        _next_rgb, next_state = _phase4_rgb_state(next_obs)
+        next_motion_state = np.concatenate(
+            [next_state[:, 24:26], _phase4_obj_yaw(next_state)[:, None], next_state[:, 14:16]],
+            axis=-1,
+        )
+        next_labels, next_contact, _ = _phase4_probe_labels(
+            next_state,
+            current_motion_state,
+            config,
+        )
+        take = min(num_envs, required - collected)
+        input_rows.append(inputs[:take])
+        next_input_rows.append(next_inputs[:take])
+        action_rows.append(action.detach().cpu().numpy().astype(np.float32)[:take])
+        label_rows.append(labels[:take])
+        next_label_rows.append(next_labels[:take])
+        contact_rows.append(contact[:take])
+        next_contact_rows.append(next_contact[:take])
+        reward_rows.append(_numpy(reward).reshape(-1, 1).astype(np.float32)[:take])
+        collected += take
+        progress.update(take)
+        inputs = next_inputs
+        state = next_state
+        prev_motion_state = current_motion_state
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            prev_motion_state[mask] = next_motion_state[mask]
+    progress.close()
+    env.close()
+    ensure_dir(output_path.parent)
+    np.savez_compressed(
+        output_path,
+        inputs=np.concatenate(input_rows, axis=0)[:required].astype(np.float32),
+        next_inputs=np.concatenate(next_input_rows, axis=0)[:required].astype(np.float32),
+        actions=np.concatenate(action_rows, axis=0)[:required].astype(np.float32),
+        labels=np.concatenate(label_rows, axis=0)[:required].astype(np.float32),
+        next_labels=np.concatenate(next_label_rows, axis=0)[:required].astype(np.float32),
+        contact=np.concatenate(contact_rows, axis=0)[:required].astype(np.float32),
+        next_contact=np.concatenate(next_contact_rows, axis=0)[:required].astype(np.float32),
+        reward=np.concatenate(reward_rows, axis=0)[:required].astype(np.float32),
+        dataset_type=np.asarray("causal_dataset"),
+        semantics=np.asarray("teacher-executed visual/state/action/next-visual transitions"),
+    )
+    console.print(f"Wrote Phase 6 probe dataset: {output_path}")
+    return output_path
+
+
+def _phase6_representations(
+    config: Config,
+    inputs: np.ndarray,
+    next_inputs: np.ndarray,
+    representation: str,
+    latent_dim: int | None,
+    variant: str | None,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    if representation == "raw":
+        train_episodes, _val_episodes, _metadata = _load_phase6_train_episodes(config)
+        frame_norm, _action_norm = _phase4_fit_standardizers(train_episodes)
+        return frame_norm.transform(inputs), frame_norm.transform(next_inputs), {
+            "representation": "raw_spatial_dino_proprio",
+            "dim": int(inputs.shape[-1]),
+        }
+    if representation != "latent":
+        raise ValueError(f"Unknown Phase 6 representation: {representation}")
+    if latent_dim is None:
+        raise ValueError("Latent Phase 6 probe requires --latent-dim")
+    path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    encoder, checkpoint = _load_phase6_encoder(path, device)
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    reps = []
+    next_reps = []
+    x = frame_norm.transform(inputs)
+    x_next = frame_norm.transform(next_inputs)
+    for start in range(0, len(x), 4096):
+        with torch.inference_mode():
+            reps.append(
+                encoder(torch.from_numpy(x[start : start + 4096]).to(device).float()).cpu().numpy()
+            )
+            next_reps.append(
+                encoder(torch.from_numpy(x_next[start : start + 4096]).to(device).float())
+                .cpu()
+                .numpy()
+            )
+    return np.concatenate(reps).astype(np.float32), np.concatenate(next_reps).astype(np.float32), {
+        "representation": "latent",
+        "variant": checkpoint["variant"],
+        "latent_dim": int(checkpoint["latent_dim"]),
+        "checkpoint": str(path),
+    }
+
+
+def _phase6_train_probe_heads(
+    config: Config,
+    reps: np.ndarray,
+    next_reps: np.ndarray,
+    actions: np.ndarray,
+    labels: np.ndarray,
+    next_labels: np.ndarray,
+    contact: np.ndarray,
+    reward: np.ndarray,
+    seed: int,
+) -> dict[str, Any]:
+    set_seed(seed)
+    device = default_device()
+    rng = np.random.default_rng(seed)
+    def encode_probe_labels(raw_labels: np.ndarray) -> np.ndarray:
+        yaw = raw_labels[:, 2]
+        return np.concatenate(
+            [
+                raw_labels[:, :2],
+                np.sin(yaw)[:, None],
+                np.cos(yaw)[:, None],
+                raw_labels[:, 3:],
+            ],
+            axis=-1,
+        ).astype(np.float32)
+
+    probe_labels = encode_probe_labels(labels)
+    probe_next_labels = encode_probe_labels(next_labels)
+    order = rng.permutation(len(reps))
+    split = int(0.8 * len(order))
+    train_idx = order[:split]
+    val_idx = order[split:]
+    rep_norm = Standardizer.fit(reps[train_idx])
+    action_norm = Standardizer.fit(actions[train_idx])
+    label_norm = Standardizer.fit(probe_labels[train_idx])
+    reward_norm = Standardizer.fit(reward[train_idx])
+    x_train = rep_norm.transform(reps[train_idx])
+    x_next_train = rep_norm.transform(next_reps[train_idx])
+    action_train = action_norm.transform(actions[train_idx])
+    label_train = label_norm.transform(probe_labels[train_idx])
+    next_label_train = label_norm.transform(probe_next_labels[train_idx])
+    reward_train = reward_norm.transform(reward[train_idx])
+    contact_train = contact[train_idx]
+    dataset = TensorDataset(
+        torch.from_numpy(x_train),
+        torch.from_numpy(x_next_train),
+        torch.from_numpy(action_train),
+        torch.from_numpy(label_train),
+        torch.from_numpy(next_label_train),
+        torch.from_numpy(contact_train),
+        torch.from_numpy(reward_train),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase6.probe_batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    hidden_dim = int(config.get("incremental.phase6.probe_hidden_dim", 512))
+    label_head = MLP(reps.shape[-1], probe_labels.shape[-1], hidden_dim, depth=3).to(device)
+    contact_head = MLP(reps.shape[-1], 1, hidden_dim, depth=3).to(device)
+    reward_head = MLP(reps.shape[-1], 1, hidden_dim, depth=3).to(device)
+    inverse_head = MLP(2 * reps.shape[-1], actions.shape[-1], hidden_dim, depth=3).to(device)
+    forward_head = MLP(
+        reps.shape[-1] + actions.shape[-1],
+        probe_labels.shape[-1],
+        hidden_dim,
+        depth=3,
+    ).to(device)
+    params = (
+        list(label_head.parameters())
+        + list(contact_head.parameters())
+        + list(reward_head.parameters())
+        + list(inverse_head.parameters())
+        + list(forward_head.parameters())
+    )
+    optimizer = torch.optim.AdamW(params, lr=float(config.get("incremental.phase6.probe_lr", 1e-3)))
+    epochs = int(config.get("incremental.phase6.probe_epochs", 120))
+    timer = Timer()
+    for _epoch in trange(epochs, desc="train phase6 probes"):
+        for x, x_next, action, label, next_label, contact_y, reward_y in loader:
+            x = x.to(device).float()
+            x_next = x_next.to(device).float()
+            action = action.to(device).float()
+            label = label.to(device).float()
+            next_label = next_label.to(device).float()
+            contact_y = contact_y.to(device).float()
+            reward_y = reward_y.to(device).float()
+            pred_label = label_head(x)
+            pred_contact = contact_head(x)
+            pred_reward = reward_head(x)
+            pred_action = inverse_head(torch.cat([x, x_next], dim=-1))
+            pred_next_label = forward_head(torch.cat([x, action], dim=-1))
+            loss = (
+                torch.mean((pred_label - label) ** 2)
+                + torch.nn.functional.binary_cross_entropy_with_logits(pred_contact, contact_y)
+                + torch.mean((pred_reward - reward_y) ** 2)
+                + torch.mean((pred_action - action) ** 2)
+                + torch.mean((pred_next_label - next_label) ** 2)
+            )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+    x_val = rep_norm.transform(reps[val_idx])
+    x_next_val = rep_norm.transform(next_reps[val_idx])
+    action_val = action_norm.transform(actions[val_idx])
+    with torch.inference_mode():
+        x_val_t = torch.from_numpy(x_val).to(device).float()
+        x_next_val_t = torch.from_numpy(x_next_val).to(device).float()
+        action_val_t = torch.from_numpy(action_val).to(device).float()
+        pred_label_encoded = label_norm.inverse(label_head(x_val_t).cpu().numpy())
+        pred_contact_logit = contact_head(x_val_t).cpu().numpy()[:, 0]
+        pred_reward = reward_norm.inverse(reward_head(x_val_t).cpu().numpy())
+        pred_action = action_norm.inverse(
+            inverse_head(torch.cat([x_val_t, x_next_val_t], dim=-1)).cpu().numpy()
+        )
+        pred_next_label_encoded = label_norm.inverse(
+            forward_head(torch.cat([x_val_t, action_val_t], dim=-1)).cpu().numpy()
+        )
+    target_label = labels[val_idx]
+    target_next_label = next_labels[val_idx]
+    target_label_encoded = probe_labels[val_idx]
+    target_next_label_encoded = probe_next_labels[val_idx]
+    target_contact = contact[val_idx, 0]
+    target_reward = reward[val_idx]
+    target_action = actions[val_idx]
+    label_mean_encoded = np.broadcast_to(
+        probe_labels[train_idx].mean(axis=0, keepdims=True),
+        target_label_encoded.shape,
+    )
+    next_label_mean = np.broadcast_to(
+        probe_next_labels[train_idx].mean(axis=0, keepdims=True),
+        target_next_label_encoded.shape,
+    )
+    reward_mean = np.broadcast_to(reward[train_idx].mean(axis=0, keepdims=True), target_reward.shape)
+    action_mean = np.broadcast_to(actions[train_idx].mean(axis=0, keepdims=True), target_action.shape)
+    names = [
+        "obj_x_m",
+        "obj_y_m",
+        "obj_yaw_rad",
+        "obj_vx_mps",
+        "obj_vy_mps",
+        "obj_yaw_rate_rps",
+        "tcp_x_m",
+        "tcp_y_m",
+        "tcp_vx_mps",
+        "tcp_vy_mps",
+    ]
+    def structured_errors(pred_encoded: np.ndarray, target_raw: np.ndarray) -> np.ndarray:
+        pred_yaw = np.arctan2(pred_encoded[:, 2], pred_encoded[:, 3])
+        yaw_err = np.abs(
+            np.arctan2(
+                np.sin(pred_yaw - target_raw[:, 2]),
+                np.cos(pred_yaw - target_raw[:, 2]),
+            )
+        )
+        return np.stack(
+            [
+                np.abs(pred_encoded[:, 0] - target_raw[:, 0]),
+                np.abs(pred_encoded[:, 1] - target_raw[:, 1]),
+                yaw_err,
+                np.abs(pred_encoded[:, 4] - target_raw[:, 3]),
+                np.abs(pred_encoded[:, 5] - target_raw[:, 4]),
+                np.abs(pred_encoded[:, 6] - target_raw[:, 5]),
+                np.abs(pred_encoded[:, 7] - target_raw[:, 6]),
+                np.abs(pred_encoded[:, 8] - target_raw[:, 7]),
+                np.abs(pred_encoded[:, 9] - target_raw[:, 8]),
+                np.abs(pred_encoded[:, 10] - target_raw[:, 9]),
+            ],
+            axis=-1,
+        )
+
+    label_mae = structured_errors(pred_label_encoded, target_label).mean(axis=0)
+    baseline_label_mae = structured_errors(label_mean_encoded, target_label).mean(axis=0)
+    next_label_mae = structured_errors(pred_next_label_encoded, target_next_label).mean(axis=0)
+    baseline_next_label_mae = structured_errors(next_label_mean, target_next_label).mean(axis=0)
+    contact_pred = pred_contact_logit >= 0.0
+    contact_prior = float(contact[train_idx].mean())
+    contact_baseline = np.full_like(target_contact.astype(bool), contact_prior >= 0.5)
+    inverse_metrics = _action_regression_metrics(pred_action, target_action)
+    inverse_baseline = _action_regression_metrics(action_mean, target_action)
+    reward_mae = float(np.mean(np.abs(pred_reward - target_reward)))
+    reward_baseline_mae = float(np.mean(np.abs(reward_mean - target_reward)))
+    return {
+        "samples": int(len(reps)),
+        "train_samples": int(len(train_idx)),
+        "validation_samples": int(len(val_idx)),
+        "representation_dim": int(reps.shape[-1]),
+        "continuous_mae": {name: float(value) for name, value in zip(names, label_mae, strict=True)},
+        "mean_baseline_mae": {
+            name: float(value) for name, value in zip(names, baseline_label_mae, strict=True)
+        },
+        "forward_next_label_mae": {
+            name: float(value) for name, value in zip(names, next_label_mae, strict=True)
+        },
+        "forward_mean_baseline_mae": {
+            name: float(value) for name, value in zip(names, baseline_next_label_mae, strict=True)
+        },
+        "contact": {
+            "positive_fraction_train": contact_prior,
+            "positive_fraction_val": float(target_contact.mean()),
+            "accuracy": float(np.mean(contact_pred == target_contact.astype(bool))),
+            "majority_baseline_accuracy": float(
+                np.mean(contact_baseline == target_contact.astype(bool))
+            ),
+            "auroc": _binary_auc(pred_contact_logit, target_contact),
+        },
+        "reward": {
+            "mae": reward_mae,
+            "mean_baseline_mae": reward_baseline_mae,
+        },
+        "inverse_dynamics": {
+            "action_mae": inverse_metrics["mae"],
+            "mean_baseline_action_mae": inverse_baseline["mae"],
+            "action_rmse": inverse_metrics["rmse"],
+            "mean_baseline_action_rmse": inverse_baseline["rmse"],
+        },
+        "gate_support": {
+            "pose_under_1cm": bool(label_mae[0] <= 0.01 and label_mae[1] <= 0.01),
+            "yaw_under_10deg": bool(np.degrees(label_mae[2]) <= 10.0),
+            "velocity_better_than_mean": bool(
+                label_mae[3] < baseline_label_mae[3]
+                and label_mae[4] < baseline_label_mae[4]
+                and label_mae[5] < baseline_label_mae[5]
+            ),
+            "contact_auroc_over_0_80": bool(_binary_auc(pred_contact_logit, target_contact) >= 0.80),
+            "inverse_better_than_mean": bool(inverse_metrics["mae"] < inverse_baseline["mae"]),
+            "reward_better_than_mean": bool(reward_mae < reward_baseline_mae),
+            "forward_better_than_mean": bool(np.mean(next_label_mae) < np.mean(baseline_next_label_mae)),
+        },
+        "elapsed_s": timer.elapsed(),
+    }
+
+
+def probe_phase6_representation(
+    config: Config,
+    representation: str = "raw",
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    variant_tag = "raw" if representation == "raw" else f"{variant or config.get('incremental.phase6.default_variant', 'wm_recon')}_z{latent_dim}"
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase6"
+        / variant_tag
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "representation_probe.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 6 representation probe exists: {output_path}")
+        return output_path
+    dataset_path = collect_phase6_probe_dataset(config, force=False)
+    with np.load(dataset_path) as data:
+        inputs = np.asarray(data["inputs"], dtype=np.float32)
+        next_inputs = np.asarray(data["next_inputs"], dtype=np.float32)
+        actions = np.asarray(data["actions"], dtype=np.float32)
+        labels = np.asarray(data["labels"], dtype=np.float32)
+        next_labels = np.asarray(data["next_labels"], dtype=np.float32)
+        contact = np.asarray(data["contact"], dtype=np.float32)
+        reward = np.asarray(data["reward"], dtype=np.float32)
+    reps, next_reps, rep_metadata = _phase6_representations(
+        config,
+        inputs,
+        next_inputs,
+        representation,
+        latent_dim,
+        variant,
+        seed,
+    )
+    metrics = _phase6_train_probe_heads(
+        config,
+        reps,
+        next_reps,
+        actions,
+        labels,
+        next_labels,
+        contact,
+        reward,
+        seed,
+    )
+    payload = {
+        "phase": 6,
+        "method": "representation_probe",
+        "representation": rep_metadata,
+        "probe_dataset": str(dataset_path),
+        **metrics,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def _phase6_encode_control_episodes(
+    encoder: ObservationEncoder,
+    frame_norm: Standardizer,
+    action_norm: Standardizer,
+    episodes: list[dict[str, np.ndarray]],
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    encoder.eval()
+    conds = []
+    actions = []
+    with torch.inference_mode():
+        for episode in episodes:
+            x = frame_norm.transform(episode["frames"])
+            chunks = []
+            for start in range(0, len(x), 4096):
+                chunks.append(
+                    encoder(torch.from_numpy(x[start : start + 4096]).to(device).float())
+                    .cpu()
+                    .numpy()
+                )
+            latents = np.concatenate(chunks, axis=0)
+            zero_action = np.zeros((1, episode["actions"].shape[-1]), dtype=np.float32)
+            prev_action = np.concatenate([zero_action, episode["actions"][:-1]], axis=0)
+            prev_action_norm = action_norm.transform(prev_action)
+            conds.append(np.concatenate([latents, prev_action_norm], axis=-1))
+            actions.append(episode["actions"])
+    return np.concatenate(conds).astype(np.float32), np.concatenate(actions).astype(np.float32)
+
+
+def _phase6_latent_flow_action_metrics(
+    model: FlowModel,
+    cond: np.ndarray,
+    target_actions: np.ndarray,
+    cond_norm: Standardizer,
+    action_norm: Standardizer,
+    flow_steps: int,
+    max_queries: int,
+) -> dict[str, Any]:
+    device = next(model.parameters()).device
+    rng = np.random.default_rng(60_000 + model.cond_dim)
+    if len(cond) > max_queries:
+        chosen = rng.choice(len(cond), size=max_queries, replace=False)
+        cond = cond[chosen]
+        target_actions = target_actions[chosen]
+    cond = cond_norm.transform(cond)
+    predictions = []
+    batch_size = 2048
+    with torch.inference_mode():
+        for start in range(0, len(cond), batch_size):
+            cond_t = torch.from_numpy(cond[start : start + batch_size]).to(device).float()
+            zero = torch.zeros(cond_t.shape[0], model.sample_dim, device=device, dtype=cond_t.dtype)
+            pred_norm = sample_flow(
+                model,
+                cond_t,
+                flow_steps,
+                model.sample_dim,
+                initial_noise=zero,
+            )
+            predictions.append(action_norm.inverse(pred_norm.cpu().numpy()))
+    metrics = _action_regression_metrics(np.concatenate(predictions), target_actions)
+    metrics["mode"] = "zero_noise"
+    return metrics
+
+
+def train_phase6_latent_bc(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    encoder_path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "latent_bc.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 6 latent BC exists: {checkpoint_path}")
+        return checkpoint_path
+    device = default_device()
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    encoder.eval()
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(encoder_checkpoint["action_norm"])
+    train_episodes, val_episodes, _data_metadata = _load_phase6_train_episodes(config)
+    train_latents, train_actions = _phase6_encode_control_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        train_episodes,
+        device,
+    )
+    val_latents, val_actions = _phase6_encode_control_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        val_episodes,
+        device,
+    )
+    train_dataset = TensorDataset(
+        torch.from_numpy(train_latents).float(),
+        torch.from_numpy(action_norm.transform(train_actions)).float(),
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase6.control_batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    cond_dim = train_latents.shape[-1]
+    model = MLP(
+        cond_dim,
+        train_actions.shape[-1],
+        int(config.get("incremental.phase6.hidden_dim", 512)),
+        depth=4,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase6.control_lr", 3e-4)),
+    )
+    epochs = int(config.get("incremental.phase6.control_epochs", 80))
+    best_state = None
+    best_val = float("inf")
+    history = []
+    timer = Timer()
+    x_val = torch.from_numpy(val_latents).to(device).float()
+    y_val = torch.from_numpy(action_norm.transform(val_actions)).to(device).float()
+    for epoch in trange(1, epochs + 1, desc=f"train phase6 latent BC {variant} z={latent_dim}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            pred = model(x)
+            loss = torch.mean((pred - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            val_mse = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+        history.append({"epoch": epoch, "train_mse": loss_sum / count, "validation_mse": val_mse})
+        if val_mse < best_val:
+            best_val = val_mse
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 6 latent BC training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.inference_mode():
+        pred_action = action_norm.inverse(model(x_val).cpu().numpy())
+    validation_metrics = _action_regression_metrics(pred_action, val_actions)
+    payload = {
+        "model": model.state_dict(),
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "cond_dim": cond_dim,
+        "hidden_dim": int(config.get("incremental.phase6.hidden_dim", 512)),
+        "action_dim": train_actions.shape[-1],
+        "encoder_checkpoint": str(encoder_path),
+        "action_norm": action_norm.state_dict(),
+        "validation_metrics": validation_metrics,
+        "best_validation_mse": best_val,
+        "history": history,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "latent_bc_metrics.json",
+        {
+            "variant": variant,
+            "latent_dim": latent_dim,
+            "validation_metrics": validation_metrics,
+            "best_validation_mse": best_val,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 6 latent BC: {checkpoint_path}")
+    return checkpoint_path
+
+
+def evaluate_phase6_latent_bc(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    checkpoint_path = train_phase6_latent_bc(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=force,
+    )
+    device = default_device()
+    bc_checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    encoder_path = Path(bc_checkpoint["encoder_checkpoint"])
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    model = MLP(
+        int(bc_checkpoint["cond_dim"]),
+        int(bc_checkpoint["action_dim"]),
+        int(bc_checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(bc_checkpoint["model"])
+    model.eval()
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(bc_checkpoint["action_norm"])
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, int(bc_checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    dino = _phase4_dino_from_config(config, device)
+    action_low = None
+    action_high = None
+    eval_episodes = int(episodes or config.get("incremental.phase6.eval_episodes", 100))
+    num_envs = min(int(config.get("incremental.phase6.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase6.eval_seed", 10000)))
+    prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    latencies: list[float] = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    while len(successes) < eval_episodes:
+        timer = Timer()
+        frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        with torch.inference_mode():
+            z = encoder(torch.from_numpy(frames).to(device).float())
+            prev_action_t = torch.from_numpy(prev_action_norm).to(device).float()
+            pred_norm = model(torch.cat([z, prev_action_t], dim=-1))
+            raw_action = action_norm.inverse(
+                pred_norm.cpu().numpy()
+            )
+        latencies.append(timer.elapsed() / num_envs)
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        prev_action_norm = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    prev_action_norm[env_idx] = zero_action_norm
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    metrics = {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "seed_start": int(config.get("incremental.phase6.eval_seed", 10000)),
+        "num_envs": num_envs,
+    }
+    visual_flow_path = (
+        config.path_value("paths.incremental_results_dir")
+        / "phase5"
+        / "concat_h1"
+        / f"seed{seed}"
+        / "visual_flow.json"
+    )
+    import json
+
+    with visual_flow_path.open("r", encoding="utf-8") as f:
+        visual_flow = json.load(f)
+    visual_success = float(visual_flow["closed_loop"]["success"])
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "latent_bc_control.json"
+    payload = {
+        "phase": 6,
+        "method": "latent_deterministic_bc_control",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "seed": seed,
+        "closed_loop": metrics,
+        "direct_visual_flow_success": visual_success,
+        "control_gate_80pct": metrics["success"] >= 0.8 * visual_success,
+        "control_gate_90pct": metrics["success"] >= 0.9 * visual_success,
+        "held_out_action_metrics": bc_checkpoint["validation_metrics"],
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def train_phase6_latent_flow(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    encoder_path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "latent_flow.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 6 latent flow exists: {checkpoint_path}")
+        return checkpoint_path
+    device = default_device()
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(encoder_checkpoint["action_norm"])
+    train_episodes, val_episodes, _data_metadata = _load_phase6_train_episodes(config)
+    train_cond_raw, train_actions = _phase6_encode_control_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        train_episodes,
+        device,
+    )
+    val_cond_raw, val_actions = _phase6_encode_control_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        val_episodes,
+        device,
+    )
+    cond_norm = Standardizer.fit(train_cond_raw)
+    train_cond = cond_norm.transform(train_cond_raw)
+    train_target = action_norm.transform(train_actions)
+    train_dataset = TensorDataset(
+        torch.from_numpy(train_cond).float(),
+        torch.from_numpy(train_target).float(),
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase6.control_batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    action_dim = train_actions.shape[-1]
+    model = FlowModel(
+        sample_dim=action_dim,
+        cond_dim=train_cond.shape[-1],
+        hidden_dim=int(config.get("incremental.phase6.control_flow_hidden_dim", 512)),
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase6.control_flow_lr", 3e-4)),
+    )
+    epochs = int(config.get("incremental.phase6.control_flow_epochs", 80))
+    flow_steps = int(config.get("incremental.phase6.control_flow_steps", 24))
+    validation_queries = int(config.get("incremental.phase6.validation_queries", 10000))
+    validation_interval = int(config.get("incremental.phase6.control_flow_validation_interval", 5))
+    endpoint_weight = float(config.get("incremental.phase6.control_flow_endpoint_weight", 20.0))
+    endpoint_steps = int(config.get("incremental.phase6.control_flow_endpoint_steps", 4))
+    endpoint_batch = int(config.get("incremental.phase6.control_flow_endpoint_batch", 256))
+    best_state = None
+    best_mae = float("inf")
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc=f"train phase6 latent flow {variant} z={latent_dim}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for cond, target in loader:
+            cond = cond.to(device, non_blocking=True).float()
+            target = target.to(device, non_blocking=True).float()
+            loss = flow_matching_loss(model, target, cond)
+            if endpoint_weight > 0.0:
+                consistency_count = min(endpoint_batch, len(cond))
+                zero = torch.zeros(
+                    consistency_count,
+                    model.sample_dim,
+                    device=device,
+                    dtype=cond.dtype,
+                )
+                endpoint = _integrate_flow_train(
+                    model,
+                    cond[:consistency_count],
+                    endpoint_steps,
+                    model.sample_dim,
+                    zero,
+                )
+                loss = loss + endpoint_weight * torch.mean(
+                    (endpoint - target[:consistency_count]) ** 2
+                )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(cond)
+            count += len(cond)
+        row = {"epoch": epoch, "train_loss": loss_sum / count}
+        if epoch % validation_interval == 0:
+            model.eval()
+            metrics = _phase6_latent_flow_action_metrics(
+                model,
+                val_cond_raw,
+                val_actions,
+                cond_norm,
+                action_norm,
+                flow_steps,
+                validation_queries,
+            )
+            row["validation_action_mae"] = metrics["mae"]
+            row["validation_action_rmse"] = metrics["rmse"]
+            if metrics["mae"] < best_mae:
+                best_mae = metrics["mae"]
+                best_state = copy.deepcopy(model.state_dict())
+        history.append(row)
+    if best_state is None:
+        raise RuntimeError("Phase 6 latent flow training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    validation_metrics = _phase6_latent_flow_action_metrics(
+        model,
+        val_cond_raw,
+        val_actions,
+        cond_norm,
+        action_norm,
+        flow_steps,
+        validation_queries,
+    )
+    payload = {
+        "model": model.state_dict(),
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "cond_dim": train_cond.shape[-1],
+        "sample_dim": action_dim,
+        "hidden_dim": int(config.get("incremental.phase6.control_flow_hidden_dim", 512)),
+        "flow_steps": flow_steps,
+        "encoder_checkpoint": str(encoder_path),
+        "cond_norm": cond_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "validation_metrics": validation_metrics,
+        "best_validation_mae": best_mae,
+        "history": history,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "latent_flow_metrics.json",
+        {
+            "variant": variant,
+            "latent_dim": latent_dim,
+            "validation_metrics": validation_metrics,
+            "best_validation_mae": best_mae,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 6 latent flow: {checkpoint_path}")
+    return checkpoint_path
+
+
+def evaluate_phase6_latent_flow(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    checkpoint_path = train_phase6_latent_flow(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=force,
+    )
+    device = default_device()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    encoder_path = Path(checkpoint["encoder_checkpoint"])
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    model = FlowModel(
+        sample_dim=int(checkpoint["sample_dim"]),
+        cond_dim=int(checkpoint["cond_dim"]),
+        hidden_dim=int(checkpoint["hidden_dim"]),
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    cond_norm = Standardizer.from_state_dict(checkpoint["cond_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, int(checkpoint["sample_dim"])), dtype=np.float32)
+    )[0]
+    dino = _phase4_dino_from_config(config, device)
+    flow_steps = int(checkpoint["flow_steps"])
+    eval_episodes = int(episodes or config.get("incremental.phase6.eval_episodes", 100))
+    num_envs = min(int(config.get("incremental.phase6.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase6.eval_seed", 10000)))
+    prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    latencies: list[float] = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    while len(successes) < eval_episodes:
+        timer = Timer()
+        frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        with torch.inference_mode():
+            z = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy()
+            cond_np = cond_norm.transform(np.concatenate([z, prev_action_norm], axis=-1))
+            cond = torch.from_numpy(cond_np).to(device).float()
+            zero = torch.zeros(cond.shape[0], model.sample_dim, device=device, dtype=cond.dtype)
+            pred_norm = sample_flow(
+                model,
+                cond,
+                flow_steps,
+                model.sample_dim,
+                initial_noise=zero,
+            )
+            raw_action = action_norm.inverse(pred_norm.cpu().numpy())
+        latencies.append(timer.elapsed() / num_envs)
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        prev_action_norm = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    prev_action_norm[env_idx] = zero_action_norm
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    metrics = {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "seed_start": int(config.get("incremental.phase6.eval_seed", 10000)),
+        "num_envs": num_envs,
+    }
+    visual_flow_path = (
+        config.path_value("paths.incremental_results_dir")
+        / "phase5"
+        / "concat_h1"
+        / f"seed{seed}"
+        / "visual_flow.json"
+    )
+    import json
+
+    with visual_flow_path.open("r", encoding="utf-8") as f:
+        visual_flow = json.load(f)
+    visual_success = float(visual_flow["closed_loop"]["success"])
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "latent_flow_control.json"
+    payload = {
+        "phase": 6,
+        "method": "latent_zero_noise_flow_control",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "seed": seed,
+        "closed_loop": metrics,
+        "direct_visual_flow_success": visual_success,
+        "control_gate_80pct": metrics["success"] >= 0.8 * visual_success,
+        "control_gate_90pct": metrics["success"] >= 0.9 * visual_success,
+        "held_out_action_metrics": checkpoint["validation_metrics"],
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def collect_phase6_latent_dagger_queries(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    iteration: int = 1,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    output_path = artifact_dir / f"latent_dagger_iter{iteration}.npz"
+    if output_path.exists() and not force:
+        console.print(f"Phase 6 latent DAgger queries exist: {output_path}")
+        return output_path
+
+    checkpoint_path = train_phase6_latent_bc(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    bc_checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    encoder_path = Path(bc_checkpoint["encoder_checkpoint"])
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    model = MLP(
+        int(bc_checkpoint["cond_dim"]),
+        int(bc_checkpoint["action_dim"]),
+        int(bc_checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(bc_checkpoint["model"])
+    model.eval()
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(bc_checkpoint["action_norm"])
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, int(bc_checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    dino = _phase4_dino_from_config(config, device)
+    eval_episodes = int(episodes or config.get("incremental.phase6.dagger_episodes", 200))
+    num_envs = min(int(config.get("incremental.phase6.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(
+        seed=int(config.get("incremental.phase6.dagger_seed", 730000)) + 1000 * iteration
+    )
+    prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
+    frames_rows = []
+    prev_action_rows = []
+    teacher_action_rows = []
+    successes: list[float] = []
+    while len(successes) < eval_episodes:
+        frames_raw = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        _rgb, state = _phase4_rgb_state(obs)
+        with torch.inference_mode():
+            teacher_action = torch.clamp(
+                teacher.actor_mean(torch.from_numpy(state).to(device).float()),
+                action_low,
+                action_high,
+            )
+            frames_norm = frame_norm.transform(frames_raw)
+            z = encoder(torch.from_numpy(frames_norm).to(device).float())
+            prev_action_t = torch.from_numpy(prev_action_norm).to(device).float()
+            pred_norm = model(torch.cat([z, prev_action_t], dim=-1))
+            raw_action = action_norm.inverse(pred_norm.cpu().numpy())
+        frames_rows.append(frames_raw.astype(np.float32))
+        prev_action_rows.append(prev_action_norm.copy())
+        teacher_action_rows.append(teacher_action.cpu().numpy().astype(np.float32))
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        prev_action_norm = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+        obs, _reward, _terminated, _truncated, info = env.step(action)
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    prev_action_norm[env_idx] = zero_action_norm
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    np.savez_compressed(
+        output_path,
+        frames=np.concatenate(frames_rows, axis=0).astype(np.float32),
+        prev_action_norm=np.concatenate(prev_action_rows, axis=0).astype(np.float32),
+        teacher_actions=np.concatenate(teacher_action_rows, axis=0).astype(np.float32),
+        dataset_type=np.asarray("state_query_dataset"),
+        semantics=np.asarray("latent-policy visited visual states relabeled by privileged teacher"),
+        collection_success=np.asarray(successes, dtype=np.float32),
+    )
+    console.print(f"Wrote Phase 6 latent DAgger queries: {output_path}")
+    return output_path
+
+
+def train_phase6_latent_dagger_bc(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    iteration: int = 1,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    query_path = collect_phase6_latent_dagger_queries(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        iteration=iteration,
+        seed=seed,
+        force=False,
+    )
+    encoder_path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / f"latent_dagger_bc_iter{iteration}.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 6 latent DAgger BC exists: {checkpoint_path}")
+        return checkpoint_path
+    device = default_device()
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(encoder_checkpoint["action_norm"])
+    train_episodes, val_episodes, _data_metadata = _load_phase6_train_episodes(config)
+    train_cond, train_actions = _phase6_encode_control_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        train_episodes,
+        device,
+    )
+    val_cond, val_actions = _phase6_encode_control_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        val_episodes,
+        device,
+    )
+    with np.load(query_path) as data:
+        query_frames = np.asarray(data["frames"], dtype=np.float32)
+        query_prev_actions = np.asarray(data["prev_action_norm"], dtype=np.float32)
+        query_actions = np.asarray(data["teacher_actions"], dtype=np.float32)
+    with torch.inference_mode():
+        encoded_chunks = []
+        query_norm = frame_norm.transform(query_frames)
+        for start in range(0, len(query_norm), 4096):
+            encoded_chunks.append(
+                encoder(torch.from_numpy(query_norm[start : start + 4096]).to(device).float())
+                .cpu()
+                .numpy()
+            )
+    query_cond = np.concatenate([np.concatenate(encoded_chunks), query_prev_actions], axis=-1)
+    rng = np.random.default_rng(seed + iteration)
+    order = rng.permutation(len(query_cond))
+    split = int(0.8 * len(order))
+    query_train = order[:split]
+    query_val = order[split:]
+    repeats = int(config.get("incremental.phase6.dagger_query_repeats", 4))
+    repeated_query_train = np.repeat(query_train, repeats)
+    train_cond = np.concatenate([train_cond, query_cond[repeated_query_train]], axis=0)
+    train_actions = np.concatenate([train_actions, query_actions[repeated_query_train]], axis=0)
+    val_cond = np.concatenate([val_cond, query_cond[query_val]], axis=0)
+    val_actions = np.concatenate([val_actions, query_actions[query_val]], axis=0)
+    train_dataset = TensorDataset(
+        torch.from_numpy(train_cond).float(),
+        torch.from_numpy(action_norm.transform(train_actions)).float(),
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase6.control_batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    model = MLP(
+        train_cond.shape[-1],
+        train_actions.shape[-1],
+        int(config.get("incremental.phase6.hidden_dim", 1024)),
+        depth=4,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase6.control_lr", 3e-4)),
+    )
+    epochs = int(config.get("incremental.phase6.control_epochs", 80))
+    x_val = torch.from_numpy(val_cond).to(device).float()
+    y_val = torch.from_numpy(action_norm.transform(val_actions)).to(device).float()
+    best_state = None
+    best_val = float("inf")
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc=f"train phase6 latent DAgger BC {iteration}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            val_mse = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+        history.append({"epoch": epoch, "train_mse": loss_sum / count, "validation_mse": val_mse})
+        if val_mse < best_val:
+            best_val = val_mse
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 6 latent DAgger BC training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.inference_mode():
+        pred_action = action_norm.inverse(model(x_val).cpu().numpy())
+    validation_metrics = _action_regression_metrics(pred_action, val_actions)
+    payload = {
+        "model": model.state_dict(),
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "iteration": iteration,
+        "cond_dim": train_cond.shape[-1],
+        "hidden_dim": int(config.get("incremental.phase6.hidden_dim", 1024)),
+        "action_dim": train_actions.shape[-1],
+        "encoder_checkpoint": str(encoder_path),
+        "action_norm": action_norm.state_dict(),
+        "query_path": str(query_path),
+        "query_train_samples": int(len(query_train)),
+        "query_validation_samples": int(len(query_val)),
+        "query_repeats": repeats,
+        "validation_metrics": validation_metrics,
+        "best_validation_mse": best_val,
+        "history": history,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / f"latent_dagger_bc_iter{iteration}_metrics.json",
+        {
+            "variant": variant,
+            "latent_dim": latent_dim,
+            "iteration": iteration,
+            "validation_metrics": validation_metrics,
+            "best_validation_mse": best_val,
+            "query_path": str(query_path),
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 6 latent DAgger BC: {checkpoint_path}")
+    return checkpoint_path
+
+
+def evaluate_phase6_latent_dagger_bc(
+    config: Config,
+    latent_dim: int,
+    variant: str | None = None,
+    iteration: int = 1,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    variant = variant or str(config.get("incremental.phase6.default_variant", "wm_recon"))
+    checkpoint_path = train_phase6_latent_dagger_bc(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        iteration=iteration,
+        seed=seed,
+        force=force,
+    )
+    device = default_device()
+    bc_checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    encoder_path = Path(bc_checkpoint["encoder_checkpoint"])
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    model = MLP(
+        int(bc_checkpoint["cond_dim"]),
+        int(bc_checkpoint["action_dim"]),
+        int(bc_checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(bc_checkpoint["model"])
+    model.eval()
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(bc_checkpoint["action_norm"])
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, int(bc_checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    dino = _phase4_dino_from_config(config, device)
+    eval_episodes = int(episodes or config.get("incremental.phase6.eval_episodes", 100))
+    num_envs = min(int(config.get("incremental.phase6.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase6.eval_seed", 10000)))
+    prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    latencies: list[float] = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    while len(successes) < eval_episodes:
+        timer = Timer()
+        frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        with torch.inference_mode():
+            z = encoder(torch.from_numpy(frames).to(device).float())
+            prev_action_t = torch.from_numpy(prev_action_norm).to(device).float()
+            pred_norm = model(torch.cat([z, prev_action_t], dim=-1))
+            raw_action = action_norm.inverse(pred_norm.cpu().numpy())
+        latencies.append(timer.elapsed() / num_envs)
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        prev_action_norm = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    prev_action_norm[env_idx] = zero_action_norm
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    metrics = {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "seed_start": int(config.get("incremental.phase6.eval_seed", 10000)),
+        "num_envs": num_envs,
+    }
+    visual_flow_path = (
+        config.path_value("paths.incremental_results_dir")
+        / "phase5"
+        / "concat_h1"
+        / f"seed{seed}"
+        / "visual_flow.json"
+    )
+    import json
+
+    with visual_flow_path.open("r", encoding="utf-8") as f:
+        visual_flow = json.load(f)
+    visual_success = float(visual_flow["closed_loop"]["success"])
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase6"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / f"latent_dagger_bc_iter{iteration}_control.json"
+    payload = {
+        "phase": 6,
+        "method": "latent_dagger_deterministic_bc_control",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "iteration": iteration,
+        "seed": seed,
+        "closed_loop": metrics,
+        "direct_visual_flow_success": visual_success,
+        "control_gate_80pct": metrics["success"] >= 0.8 * visual_success,
+        "control_gate_90pct": metrics["success"] >= 0.9 * visual_success,
+        "held_out_action_metrics": bc_checkpoint["validation_metrics"],
+        "query_path": bc_checkpoint["query_path"],
+        "metadata": _runtime_metadata(config),
     }
     write_json(output_path, payload)
     console.print(payload)

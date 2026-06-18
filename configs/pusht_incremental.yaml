@@ -127,3 +127,46 @@ incremental:
     endpoint_consistency_weight: 20.0
     endpoint_consistency_steps: 4
     endpoint_consistency_batch: 256
+  phase6:
+    train_episodes: 1800
+    validation_episodes: 200
+    latent_dims: [128, 256, 512]
+    default_variant: wm_recon
+    hidden_dim: 1024
+    batch_size: 512
+    batches_per_epoch: 400
+    epochs: 60
+    lr: 0.0003
+    horizons_steps: [1, 2, 4, 8]
+    sigreg_weight: 0.05
+    prediction_weight: 1.0
+    reconstruction_weight: 0.1
+    proprio_dim: 21
+    proprio_reconstruction_weight: 1.0
+    validation_samples: 8192
+    probe_samples: 12000
+    probe_seed: 720000
+    probe_batch_size: 512
+    probe_epochs: 120
+    probe_hidden_dim: 512
+    probe_lr: 0.001
+    probe_contact_distance_m: 0.08
+    control_epochs: 80
+    control_batch_size: 512
+    control_batches_per_epoch: 300
+    control_lr: 0.0003
+    control_flow_hidden_dim: 512
+    control_flow_epochs: 80
+    control_flow_lr: 0.0003
+    control_flow_steps: 24
+    control_flow_validation_interval: 5
+    control_flow_endpoint_weight: 20.0
+    control_flow_endpoint_steps: 4
+    control_flow_endpoint_batch: 256
+    validation_queries: 10000
+    dagger_episodes: 200
+    dagger_seed: 730000
+    dagger_query_repeats: 4
+    eval_episodes: 100
+    eval_seed: 10000
+    eval_num_envs: 64
