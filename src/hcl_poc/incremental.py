@@ -13,10 +13,11 @@ import numpy as np
 import torch
 from rich.console import Console
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import trange
 
 from hcl_poc.config import Config
-from hcl_poc.rl import PPOAgent, _rl_paths, evaluate_ppo, load_ppo_agent
+from hcl_poc.rl import PPOAgent, _make_state_env, _rl_paths, evaluate_ppo, load_ppo_agent
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
 
 console = Console()
@@ -638,6 +639,376 @@ def run_phase0(config: Config, episodes: int | None = None, force: bool = False)
         "overfit_ladder": overfit,
         "gate_checks": gate_checks,
         "gate_passed": all(gate_checks.values()),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+@torch.inference_mode()
+def collect_phase1_query_dataset(config: Config, force: bool = False) -> Path:
+    output_path = config.path_value("paths.incremental_data_dir") / "phase1_query_dataset.h5"
+    required_episodes = int(config.get("incremental.phase1.query_episodes", 2600))
+    if output_path.exists() and not force:
+        with h5py.File(output_path, "r") as h5:
+            existing = int(h5["meta"].attrs["episodes"])
+        if existing >= required_episodes:
+            console.print(f"Phase 1 query dataset exists: {output_path}")
+            return output_path
+
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = int(config.get("incremental.phase1.query_num_envs", 256))
+    env = _make_state_env(
+        config,
+        num_envs,
+        record_metrics=True,
+        ignore_terminations=False,
+        reconfiguration_freq=0,
+    )
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase1.query_seed", 30000)))
+    obs = obs.to(device).float()
+    state_buffers: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
+    raw_action_buffers: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
+    clipped_action_buffers: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
+    episodes: list[tuple[np.ndarray, np.ndarray, np.ndarray, bool]] = []
+    progress = trange(required_episodes, desc="collect phase1 query episodes")
+    while len(episodes) < required_episodes:
+        raw_action = teacher.actor_mean(obs)
+        clipped_action = torch.clamp(raw_action, action_low, action_high)
+        states_np = obs.detach().cpu().numpy().astype(np.float32)
+        raw_np = raw_action.detach().cpu().numpy().astype(np.float32)
+        clipped_np = clipped_action.detach().cpu().numpy().astype(np.float32)
+        for env_idx in range(num_envs):
+            state_buffers[env_idx].append(states_np[env_idx])
+            raw_action_buffers[env_idx].append(raw_np[env_idx])
+            clipped_action_buffers[env_idx].append(clipped_np[env_idx])
+        obs, _reward, _terminated, _truncated, info = env.step(clipped_action)
+        obs = obs.to(device).float()
+        if "final_info" not in info:
+            continue
+        final_mask = info["_final_info"].detach().cpu().numpy().astype(bool)
+        success_once = (
+            info["final_info"]["episode"]["success_once"].detach().cpu().numpy().astype(bool)
+        )
+        for env_idx in np.flatnonzero(final_mask):
+            episodes.append(
+                (
+                    np.stack(state_buffers[env_idx]),
+                    np.stack(raw_action_buffers[env_idx]),
+                    np.stack(clipped_action_buffers[env_idx]),
+                    bool(success_once[env_idx]),
+                )
+            )
+            state_buffers[env_idx].clear()
+            raw_action_buffers[env_idx].clear()
+            clipped_action_buffers[env_idx].clear()
+            progress.update(1)
+            if len(episodes) >= required_episodes:
+                break
+    progress.close()
+    env.close()
+
+    ensure_dir(output_path.parent)
+    tmp_path = output_path.with_suffix(".tmp.h5")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    with h5py.File(tmp_path, "w") as h5:
+        meta = h5.create_group("meta")
+        for key, value in _runtime_metadata(config).items():
+            meta.attrs[key] = value
+        meta.attrs["dataset_type"] = "query_dataset"
+        meta.attrs["episodes"] = len(episodes)
+        meta.attrs["successful_episodes"] = sum(int(ep[3]) for ep in episodes)
+        meta.attrs["checkpoint"] = str(_rl_paths(config).best)
+        meta.attrs["semantics"] = (
+            "independent privileged state and deterministic teacher action pairs; "
+            "no next-state claim"
+        )
+        for episode_idx, (states, raw_actions, clipped_actions, success) in enumerate(episodes):
+            group = h5.create_group(f"episode_{episode_idx:05d}")
+            group.attrs["success"] = success
+            group.create_dataset("states", data=states, compression="gzip")
+            group.create_dataset("teacher_raw_actions", data=raw_actions, compression="gzip")
+            group.create_dataset(
+                "teacher_clipped_actions", data=clipped_actions, compression="gzip"
+            )
+    tmp_path.replace(output_path)
+    console.print(f"Wrote Phase 1 query dataset: {output_path}")
+    return output_path
+
+
+def _phase1_episode_keys(
+    h5: h5py.File,
+    subset: str,
+) -> list[str]:
+    keys = sorted(key for key in h5 if key.startswith("episode_"))
+    if subset == "all":
+        return keys
+    if subset == "successful":
+        return [key for key in keys if bool(h5[key].attrs["success"])]
+    raise ValueError(f"Unknown Phase 1 subset: {subset}")
+
+
+def _load_phase1_queries(
+    dataset_path: Path,
+    subset: str,
+    train_episodes: int,
+    validation_episodes: int,
+    label_kind: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    label_dataset = {
+        "deterministic_clipped": "teacher_clipped_actions",
+        "deterministic_raw": "teacher_raw_actions",
+    }.get(label_kind)
+    if label_dataset is None:
+        raise ValueError(f"Unknown Phase 1 label kind: {label_kind}")
+    with h5py.File(dataset_path, "r") as h5:
+        keys = _phase1_episode_keys(h5, subset)
+        required = train_episodes + validation_episodes
+        if len(keys) < required:
+            raise ValueError(
+                f"Phase 1 subset '{subset}' has {len(keys)} episodes, requires {required}"
+            )
+        train_keys = keys[:train_episodes]
+        validation_keys = keys[-validation_episodes:]
+        train_states = np.concatenate(
+            [np.asarray(h5[key]["states"], dtype=np.float32) for key in train_keys]
+        )
+        train_actions = np.concatenate(
+            [np.asarray(h5[key][label_dataset], dtype=np.float32) for key in train_keys]
+        )
+        validation_states = np.concatenate(
+            [np.asarray(h5[key]["states"], dtype=np.float32) for key in validation_keys]
+        )
+        validation_actions = np.concatenate(
+            [np.asarray(h5[key][label_dataset], dtype=np.float32) for key in validation_keys]
+        )
+    metadata = {
+        "dataset_type": "query_dataset",
+        "subset": subset,
+        "label_kind": label_kind,
+        "train_episodes": train_episodes,
+        "validation_episodes": validation_episodes,
+        "train_queries": int(len(train_states)),
+        "validation_queries": int(len(validation_states)),
+    }
+    return train_states, train_actions, validation_states, validation_actions, metadata
+
+
+def _identity_standardizer(dim: int) -> Standardizer:
+    return Standardizer(np.zeros(dim, dtype=np.float32), np.ones(dim, dtype=np.float32))
+
+
+def _action_regression_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, Any]:
+    correlations = []
+    for dim in range(target.shape[-1]):
+        if np.std(prediction[:, dim]) < 1e-8 or np.std(target[:, dim]) < 1e-8:
+            correlations.append(float("nan"))
+        else:
+            correlations.append(float(np.corrcoef(prediction[:, dim], target[:, dim])[0, 1]))
+    return {
+        "mae": float(np.mean(np.abs(prediction - target))),
+        "rmse": float(np.sqrt(np.mean((prediction - target) ** 2))),
+        "max_abs_error": float(np.max(np.abs(prediction - target))),
+        "correlation_per_dim": correlations,
+        "prediction_out_of_bounds_fraction": float(
+            np.mean(np.any((prediction < -1.0) | (prediction > 1.0), axis=-1))
+        ),
+        "target_near_bounds_fraction": float(
+            np.mean(np.any(np.abs(target) >= 0.99, axis=-1))
+        ),
+    }
+
+
+def train_phase1_bc(
+    config: Config,
+    n_episodes: int | None = None,
+    seed: int = 0,
+    subset: str = "all",
+    label_kind: str = "deterministic_clipped",
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    dataset_path = collect_phase1_query_dataset(config, force=False)
+    n_episodes = int(n_episodes or config.get("incremental.phase1.train_episodes", 2000))
+    validation_episodes = int(config.get("incremental.phase1.validation_episodes", 200))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase1"
+        / f"n{n_episodes}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / f"bc_{subset}_{label_kind}.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 1 BC exists: {checkpoint_path}")
+        return checkpoint_path
+    train_states, train_actions, val_states, val_actions, data_metadata = (
+        _load_phase1_queries(
+            dataset_path,
+            subset,
+            n_episodes,
+            validation_episodes,
+            label_kind,
+        )
+    )
+    normalize_inputs = bool(config.get("incremental.phase1.normalize_inputs", False))
+    input_norm = (
+        Standardizer.fit(train_states)
+        if normalize_inputs
+        else _identity_standardizer(train_states.shape[-1])
+    )
+    x_train = torch.from_numpy(input_norm.transform(train_states)).float()
+    y_train = torch.from_numpy(train_actions).float()
+    x_val = torch.from_numpy(input_norm.transform(val_states)).float()
+    y_val = torch.from_numpy(val_actions).float()
+    loader = DataLoader(
+        TensorDataset(x_train, y_train),
+        batch_size=int(config.get("incremental.phase1.batch_size", 4096)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    device = default_device()
+    model = PPOAgent(
+        train_states.shape[-1],
+        train_actions.shape[-1],
+        int(config.get("incremental.phase1.hidden_dim", 256)),
+    ).actor_mean.to(device)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=float(config.get("incremental.phase1.lr", 3e-4)),
+    )
+    epochs = int(config.get("incremental.phase1.epochs", 100))
+    timer = Timer()
+    best_val_loss = float("inf")
+    best_state = None
+    history: list[dict[str, float]] = []
+    x_val_device = x_val.to(device)
+    y_val_device = y_val.to(device)
+    for epoch in trange(1, epochs + 1, desc=f"train phase1 BC {subset} n={n_episodes}"):
+        model.train()
+        train_loss_sum = 0.0
+        train_count = 0
+        for states, actions in loader:
+            states = states.to(device, non_blocking=True)
+            actions = actions.to(device, non_blocking=True)
+            prediction = model(states)
+            loss = torch.mean((prediction - actions) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            train_loss_sum += float(loss.detach().cpu()) * len(states)
+            train_count += len(states)
+        model.eval()
+        with torch.inference_mode():
+            val_loss = float(torch.mean((model(x_val_device) - y_val_device) ** 2).cpu())
+        train_loss = train_loss_sum / train_count
+        history.append({"epoch": epoch, "train_mse": train_loss, "validation_mse": val_loss})
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 1 BC training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.inference_mode():
+        val_prediction = model(x_val_device).detach().cpu().numpy()
+    validation_metrics = _action_regression_metrics(val_prediction, val_actions)
+    payload = {
+        "model": model.state_dict(),
+        "obs_dim": train_states.shape[-1],
+        "action_dim": train_actions.shape[-1],
+        "hidden_dim": int(config.get("incremental.phase1.hidden_dim", 256)),
+        "input_norm": input_norm.state_dict(),
+        "normalize_inputs": normalize_inputs,
+        "data": data_metadata,
+        "validation_metrics": validation_metrics,
+        "best_validation_mse": best_val_loss,
+        "history": history,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / f"bc_{subset}_{label_kind}_metrics.json",
+        {
+            "data": data_metadata,
+            "validation_metrics": validation_metrics,
+            "best_validation_mse": best_val_loss,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 1 BC: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_phase1_bc(checkpoint_path: Path, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model = PPOAgent(
+        int(checkpoint["obs_dim"]),
+        int(checkpoint["action_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).actor_mean.to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    return model, checkpoint
+
+
+def evaluate_phase1_bc(
+    config: Config,
+    n_episodes: int | None = None,
+    seed: int = 0,
+    subset: str = "all",
+    label_kind: str = "deterministic_clipped",
+    episodes: int | None = None,
+) -> Path:
+    n_episodes = int(n_episodes or config.get("incremental.phase1.train_episodes", 2000))
+    checkpoint_path = train_phase1_bc(
+        config,
+        n_episodes=n_episodes,
+        seed=seed,
+        subset=subset,
+        label_kind=label_kind,
+        force=False,
+    )
+    device = default_device()
+    model, checkpoint = _load_phase1_bc(checkpoint_path, device)
+    input_norm = Standardizer.from_state_dict(checkpoint["input_norm"])
+
+    @torch.inference_mode()
+    def policy(state: np.ndarray) -> np.ndarray:
+        state_t = torch.from_numpy(input_norm.transform(state[None])).to(device).float()
+        return model(state_t).detach().cpu().numpy()[0].astype(np.float32)
+
+    eval_episodes = int(episodes or config.get("incremental.phase1.eval_episodes", 100))
+    metrics = _evaluate_scalar_policy(
+        config,
+        policy,
+        eval_episodes,
+        int(config.get("incremental.phase1.eval_seed", 10000)),
+    )
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase1"
+        / f"n{n_episodes}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / f"bc_{subset}_{label_kind}.json"
+    payload = {
+        "phase": 1,
+        "method": "privileged_bc",
+        "subset": subset,
+        "label_kind": label_kind,
+        "n_episodes": n_episodes,
+        "seed": seed,
+        "closed_loop": metrics,
+        "held_out_action_metrics": checkpoint["validation_metrics"],
+        "data": checkpoint["data"],
+        "metadata": _runtime_metadata(config),
+        "gate_passed": metrics["success"] >= 0.70,
     }
     write_json(output_path, payload)
     console.print(payload)

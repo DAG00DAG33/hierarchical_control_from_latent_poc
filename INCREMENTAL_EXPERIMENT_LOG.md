@@ -27,9 +27,9 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 1: deterministic privileged-state BC |
-| Gate | Privileged one-step BC reaches at least 70% success |
-| Gate state | Phase 0 passed; Phase 1 not yet evaluated |
+| Active phase | Phase 2: privileged DAgger and recovery data |
+| Gate | Privileged DAgger reaches at least 80% success |
+| Gate state | Phases 0-1 passed; Phase 2 not yet evaluated |
 | Current blocker | None |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
@@ -203,3 +203,77 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Next action:** Build separate all-state and successful-only
   `query_dataset` files using deterministic teacher labels, then train
   same-architecture one-step privileged BC.
+
+### 2026-06-18 - P1-D01: All-state clipped-label BC
+
+- **Dataset type:** `query_dataset`.
+- **Data:** 2,600 teacher episodes, 127,517 state queries; 2,190 successful
+  episodes; 41,000 queries from failed episodes.
+- **Training subset:** First 2,000 episodes, 97,546 queries.
+- **Validation:** Disjoint 200 episodes, 9,966 queries.
+- **Model:** Teacher-sized 3x256 Tanh MLP, raw privileged state input.
+- **Labels:** Clipped deterministic teacher actions.
+- **Training:** 100 epochs, Adam `3e-4`.
+- **Results:**
+  - held-out action MAE: `0.0471`;
+  - held-out action RMSE: `0.0708`;
+  - per-dimension correlations: `0.980`, `0.990`, `0.975`;
+  - closed-loop success: 9/100;
+  - final/max normalized reward: `0.291` / `0.312`.
+- **Gate decision:** Failed.
+- **Diagnosis:** High action correlation is insufficient; absolute errors are
+  still large for contact control. Validation loss is still decreasing at the
+  final epoch.
+
+### 2026-06-18 - P1-D02: All-state raw-label BC
+
+- **Change:** Replaced clipped labels with smooth raw deterministic actor
+  outputs; clipping remained in the environment execution path.
+- **Results:**
+  - held-out action MAE: `0.0503`;
+  - closed-loop success: 10/100;
+  - final/max normalized reward: `0.311` / `0.330`.
+- **Gate decision:** Failed.
+- **Diagnosis:** Clipping-label nonsmoothness is not the primary bottleneck.
+  Optimization remains underfit after 100 epochs.
+- **Next action:** Normalize privileged inputs, raise learning rate to `1e-3`,
+  and train for 300 epochs before changing architecture or data.
+
+### 2026-06-18 - P1-G01: Normalized all-state privileged BC
+
+- **Dataset type:** `query_dataset`.
+- **Data:** First 2,000 teacher episodes, 97,546 state queries, including
+  states from both successful and failed teacher episodes.
+- **Model:** Teacher-sized 3x256 Tanh MLP.
+- **Input:** Standardized 31D privileged state.
+- **Labels:** Raw deterministic PPO actor output; actions clipped only when
+  executed in the environment.
+- **Training:** 300 epochs, Adam `1e-3`, batch size 4096.
+- **Results:**
+  - best validation MSE: `0.00118`;
+  - held-out action MAE/RMSE: `0.0204` / `0.0344`;
+  - per-dimension correlations: `0.997`, `0.998`, `0.994`;
+  - closed-loop success: 78/100;
+  - final/max normalized reward: `0.848` / `0.849`;
+  - teacher success on the same downstream protocol: 83/100.
+- **Gate decision:** Passed. This exceeds the 70% minimum and is within five
+  percentage points of the teacher on the development evaluation.
+- **Key finding:** Input normalization and sufficient optimization changed
+  success from 10% to 78% without changing the architecture or dataset.
+
+### 2026-06-18 - P1-A01: Successful-only state queries
+
+- **Dataset type:** `query_dataset`.
+- **Data:** 1,900 successful episodes, 75,022 state queries; disjoint 200
+  successful validation episodes.
+- **Recipe:** Same normalized raw-label model as P1-G01.
+- **Results:**
+  - held-out action MAE: `0.0208`;
+  - closed-loop success: 72/100;
+  - final/max normalized reward: `0.807` / `0.810`.
+- **Interpretation:** Successful-only and all-state validation MAE are nearly
+  identical, but all-state training is six percentage points better in closed
+  loop. Failed teacher episodes add behaviorally useful coverage not captured
+  by aggregate one-step MAE.
+- **Phase 1 conclusion:** Use all teacher states and raw deterministic labels
+  as the privileged BC baseline. Proceed to learner-visited DAgger queries.

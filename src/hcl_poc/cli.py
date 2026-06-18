@@ -11,7 +11,12 @@ from rich.console import Console
 from hcl_poc.config import load_config
 from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps, record_videos
-from hcl_poc.incremental import run_phase0
+from hcl_poc.incremental import (
+    collect_phase1_query_dataset,
+    evaluate_phase1_bc,
+    run_phase0,
+    train_phase1_bc,
+)
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.train import (
@@ -188,6 +193,26 @@ def incremental_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.incremental_command == "phase0":
         run_phase0(config, episodes=args.episodes, force=args.force)
+    elif args.incremental_command == "phase1-collect":
+        collect_phase1_query_dataset(config, force=args.force)
+    elif args.incremental_command == "phase1-train":
+        train_phase1_bc(
+            config,
+            n_episodes=args.n_episodes,
+            seed=args.seed,
+            subset=args.subset,
+            label_kind=args.label_kind,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase1-eval":
+        evaluate_phase1_bc(
+            config,
+            n_episodes=args.n_episodes,
+            seed=args.seed,
+            subset=args.subset,
+            label_kind=args.label_kind,
+            episodes=args.episodes,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -242,6 +267,25 @@ def build_parser() -> argparse.ArgumentParser:
     phase0.add_argument("--episodes", type=int)
     phase0.add_argument("--force", action="store_true")
     phase0.set_defaults(func=incremental_cmd)
+    phase1_collect = incremental_sub.add_parser("phase1-collect")
+    add_config_arg(phase1_collect)
+    phase1_collect.add_argument("--force", action="store_true")
+    phase1_collect.set_defaults(func=incremental_cmd)
+    for command in ["phase1-train", "phase1-eval"]:
+        phase1 = incremental_sub.add_parser(command)
+        add_config_arg(phase1)
+        phase1.add_argument("--n-episodes", type=int)
+        phase1.add_argument("--seed", type=int, default=0)
+        phase1.add_argument("--subset", choices=["all", "successful"], default="all")
+        phase1.add_argument(
+            "--label-kind",
+            choices=["deterministic_clipped", "deterministic_raw"],
+            default="deterministic_clipped",
+        )
+        phase1.add_argument("--force", action="store_true")
+        if command == "phase1-eval":
+            phase1.add_argument("--episodes", type=int)
+        phase1.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

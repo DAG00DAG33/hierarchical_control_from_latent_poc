@@ -36,3 +36,16 @@ incremental:
     overfit_lr: 0.001
     overfit_target_normalized_mae: 0.00001
     transition_replay_tolerance: 0.00001
+  phase1:
+    query_episodes: 2600
+    query_num_envs: 256
+    query_seed: 30000
+    train_episodes: 2000
+    validation_episodes: 200
+    hidden_dim: 256
+    batch_size: 4096
+    epochs: 300
+    lr: 0.001
+    eval_episodes: 100
+    eval_seed: 10000
+    normalize_inputs: true
