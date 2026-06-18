@@ -13,9 +13,13 @@ from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps, record_videos
 from hcl_poc.incremental import (
     collect_phase1_query_dataset,
+    collect_phase2_dagger_queries,
     evaluate_phase1_bc,
+    evaluate_phase2_dagger_bc,
+    evaluate_phase2_recovery,
     run_phase0,
     train_phase1_bc,
+    train_phase2_dagger_bc,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -213,6 +217,35 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             label_kind=args.label_kind,
             episodes=args.episodes,
         )
+    elif args.incremental_command == "phase2-collect":
+        collect_phase2_dagger_queries(
+            config,
+            iteration=args.iteration,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase2-train":
+        train_phase2_dagger_bc(
+            config,
+            iteration=args.iteration,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase2-eval":
+        evaluate_phase2_dagger_bc(
+            config,
+            iteration=args.iteration,
+            seed=args.seed,
+            episodes=args.episodes,
+        )
+    elif args.incremental_command == "phase2-recovery":
+        evaluate_phase2_recovery(
+            config,
+            iteration=args.iteration,
+            seed=args.seed,
+            samples=args.samples,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -286,6 +319,22 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "phase1-eval":
             phase1.add_argument("--episodes", type=int)
         phase1.set_defaults(func=incremental_cmd)
+    for command in ["phase2-collect", "phase2-train", "phase2-eval"]:
+        phase2 = incremental_sub.add_parser(command)
+        add_config_arg(phase2)
+        phase2.add_argument("--iteration", type=int, required=True)
+        phase2.add_argument("--seed", type=int, default=0)
+        phase2.add_argument("--force", action="store_true")
+        if command == "phase2-eval":
+            phase2.add_argument("--episodes", type=int)
+        phase2.set_defaults(func=incremental_cmd)
+    phase2_recovery = incremental_sub.add_parser("phase2-recovery")
+    add_config_arg(phase2_recovery)
+    phase2_recovery.add_argument("--iteration", type=int, default=3)
+    phase2_recovery.add_argument("--seed", type=int, default=0)
+    phase2_recovery.add_argument("--samples", type=int)
+    phase2_recovery.add_argument("--force", action="store_true")
+    phase2_recovery.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

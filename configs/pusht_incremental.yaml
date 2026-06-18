@@ -49,3 +49,17 @@ incremental:
     eval_episodes: 100
     eval_seed: 10000
     normalize_inputs: true
+  phase2:
+    dagger_queries_per_iteration: 50000
+    dagger_num_envs: 256
+    dagger_seed: 40000
+    epochs: 100
+    batch_size: 4096
+    lr: 0.0001
+    eval_episodes: 100
+    eval_seed: 10000
+    recovery_samples: 128
+    recovery_seed: 50000
+    recovery_xy_std_m: 0.01
+    recovery_yaw_std_deg: 5.0
+    recovery_max_steps: 100

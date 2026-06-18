@@ -27,9 +27,9 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 2: privileged DAgger and recovery data |
-| Gate | Privileged DAgger reaches at least 80% success |
-| Gate state | Phases 0-1 passed; Phase 2 not yet evaluated |
+| Active phase | Phase 3: privileged flow-matching policy |
+| Gate | One-step privileged flow within 5 percentage points of privileged BC |
+| Gate state | Phases 0-2 passed; Phase 3 not yet evaluated |
 | Current blocker | None |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
@@ -277,3 +277,58 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   by aggregate one-step MAE.
 - **Phase 1 conclusion:** Use all teacher states and raw deterministic labels
   as the privileged BC baseline. Proceed to learner-visited DAgger queries.
+
+### 2026-06-18 - P2-D01: DAgger iteration 1, random restart
+
+- **Dataset type:** 50,000 new learner-visited `query_dataset` samples.
+- **Learner rollout diagnostic:** 882 completed vector episodes, 85.9%
+  success on the collector distribution; teacher-versus-learner action MAE
+  `0.0232`.
+- **Training:** Aggregated 147,546 queries, but restarted the student from
+  random weights.
+- **Result:** 75/100 success; held-out base action MAE `0.0248`.
+- **Gate decision:** Failed.
+- **Diagnosis:** Random-restart aggregation forgot part of the Phase 1
+  function and worsened the original held-out distribution.
+
+### 2026-06-18 - P2-D02: DAgger fine-tuning without forgetting
+
+- **Change:** Initialize each iteration from the preceding policy, preserve its
+  input normalizer, lower learning rate to `1e-4`, and keep the pre-update
+  checkpoint unless base validation improves.
+- **Iteration 1 result:** 77% success, held-out action MAE `0.0191`.
+- **Iteration 2 result:** 77% success, held-out action MAE `0.0180`.
+- **Gate decision:** Still below the 80% target, but learner-state teacher
+  disagreement continued decreasing.
+
+### 2026-06-18 - P2-G01: DAgger iteration 3
+
+- **Dataset type:** Three cumulative 50,000-query DAgger sets plus 97,546 base
+  queries; 247,546 total training queries.
+- **Learner-state teacher disagreement by iteration:** `0.0232`, `0.0205`,
+  `0.0189` action MAE.
+- **Results:**
+  - held-out base action MAE: `0.0170`;
+  - closed-loop success: 82/100;
+  - final/max normalized reward: `0.877` / `0.878`.
+- **Policy gate decision:** Passed.
+
+### 2026-06-18 - P2-G02: Controlled perturbation recovery
+
+- **Perturbations:** T-block x/y Gaussian noise with 1 cm standard deviation
+  and yaw noise with 5 degree standard deviation, each clipped at 2 standard
+  deviations.
+- **Samples:** 128 perturbed simulator states drawn from valid causal teacher
+  trajectories.
+- **Results:**
+  - deterministic teacher recovery: 106/128, 82.8%;
+  - learner recovery over all perturbations: 75.0%;
+  - learner recovery conditional on teacher recoverability: 87/106, 82.1%.
+- **Causal output:** 106 fresh teacher recovery trajectories in
+  `data/incremental/phase2_recovery/iteration_03_seed0.h5`.
+- **Causal audit:** Every stored episode has one more simulator state than
+  action, and each action was actually executed to produce the stored next
+  state.
+- **Recovery gate decision:** Passed.
+- **Phase 2 conclusion:** Freeze iteration 3 as the privileged deterministic
+  baseline and proceed to one-step privileged flow matching.

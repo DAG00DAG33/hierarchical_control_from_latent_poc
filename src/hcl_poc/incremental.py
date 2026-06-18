@@ -1013,3 +1013,588 @@ def evaluate_phase1_bc(
     write_json(output_path, payload)
     console.print(payload)
     return output_path
+
+
+def _phase2_query_path(config: Config, iteration: int, seed: int) -> Path:
+    return (
+        config.path_value("paths.incremental_data_dir")
+        / "phase2_dagger"
+        / f"seed{seed}"
+        / f"iteration_{iteration:02d}.npz"
+    )
+
+
+@torch.inference_mode()
+def collect_phase2_dagger_queries(
+    config: Config,
+    iteration: int,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    if iteration < 1:
+        raise ValueError("DAgger iteration must be at least 1")
+    output_path = _phase2_query_path(config, iteration, seed)
+    required_queries = int(config.get("incremental.phase2.dagger_queries_per_iteration", 50000))
+    if output_path.exists() and not force:
+        with np.load(output_path) as data:
+            existing = len(data["states"])
+        if existing >= required_queries:
+            console.print(f"Phase 2 DAgger queries exist: {output_path}")
+            return output_path
+
+    if iteration == 1:
+        learner_path = (
+            config.path_value("paths.incremental_artifact_dir")
+            / "phase1"
+            / f"n{int(config.get('incremental.phase1.train_episodes', 2000))}"
+            / f"seed{seed}"
+            / "bc_all_deterministic_raw.pt"
+        )
+    else:
+        learner_path = (
+            config.path_value("paths.incremental_artifact_dir")
+            / "phase2"
+            / f"iteration_{iteration - 1:02d}"
+            / f"seed{seed}"
+            / "bc_dagger.pt"
+        )
+    device = default_device()
+    learner, learner_checkpoint = _load_phase1_bc(learner_path, device)
+    learner_input_norm = Standardizer.from_state_dict(learner_checkpoint["input_norm"])
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = int(config.get("incremental.phase2.dagger_num_envs", 256))
+    env = _make_state_env(
+        config,
+        num_envs,
+        record_metrics=True,
+        ignore_terminations=False,
+        reconfiguration_freq=0,
+    )
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(
+        seed=int(config.get("incremental.phase2.dagger_seed", 40000)) + seed * 1000 + iteration
+    )
+    obs = obs.to(device).float()
+    states: list[np.ndarray] = []
+    teacher_raw_actions: list[np.ndarray] = []
+    learner_raw_actions: list[np.ndarray] = []
+    completed_successes: list[float] = []
+    progress = trange(required_queries, desc=f"collect phase2 DAgger iteration {iteration}")
+    collected = 0
+    while collected < required_queries:
+        normalized = learner_input_norm.transform(obs.detach().cpu().numpy().astype(np.float32))
+        learner_raw = learner(torch.from_numpy(normalized).to(device).float())
+        learner_executed = torch.clamp(learner_raw, action_low, action_high)
+        teacher_raw = teacher.actor_mean(obs)
+        take = min(num_envs, required_queries - collected)
+        states.append(obs[:take].detach().cpu().numpy().astype(np.float32))
+        teacher_raw_actions.append(
+            teacher_raw[:take].detach().cpu().numpy().astype(np.float32)
+        )
+        learner_raw_actions.append(
+            learner_raw[:take].detach().cpu().numpy().astype(np.float32)
+        )
+        collected += take
+        progress.update(take)
+        obs, _reward, _terminated, _truncated, info = env.step(learner_executed)
+        obs = obs.to(device).float()
+        if "final_info" in info:
+            mask = info["_final_info"]
+            if bool(mask.any()):
+                success = info["final_info"]["episode"]["success_once"][mask]
+                completed_successes.extend(
+                    float(value) for value in success.detach().float().cpu().numpy()
+                )
+    progress.close()
+    env.close()
+    states_array = np.concatenate(states, axis=0)
+    teacher_array = np.concatenate(teacher_raw_actions, axis=0)
+    learner_array = np.concatenate(learner_raw_actions, axis=0)
+    ensure_dir(output_path.parent)
+    np.savez_compressed(
+        output_path,
+        states=states_array,
+        teacher_raw_actions=teacher_array,
+        learner_raw_actions=learner_array,
+        dataset_type=np.asarray("query_dataset"),
+        iteration=np.asarray(iteration),
+        seed=np.asarray(seed),
+        rollout_episodes=np.asarray(len(completed_successes)),
+        rollout_success=np.asarray(
+            float(np.mean(completed_successes)) if completed_successes else float("nan")
+        ),
+        git_commit=np.asarray(_git_metadata()["git_commit"]),
+    )
+    console.print(
+        {
+            "path": str(output_path),
+            "queries": len(states_array),
+            "rollout_episodes": len(completed_successes),
+            "rollout_success": (
+                float(np.mean(completed_successes)) if completed_successes else float("nan")
+            ),
+        }
+    )
+    return output_path
+
+
+def train_phase2_dagger_bc(
+    config: Config,
+    iteration: int,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    if iteration < 1:
+        raise ValueError("DAgger iteration must be at least 1")
+    for current_iteration in range(1, iteration + 1):
+        collect_phase2_dagger_queries(config, current_iteration, seed=seed, force=False)
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase2"
+        / f"iteration_{iteration:02d}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "bc_dagger.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 2 DAgger BC exists: {checkpoint_path}")
+        return checkpoint_path
+
+    dataset_path = collect_phase1_query_dataset(config, force=False)
+    train_states, train_actions, val_states, val_actions, base_metadata = (
+        _load_phase1_queries(
+            dataset_path,
+            "all",
+            int(config.get("incremental.phase1.train_episodes", 2000)),
+            int(config.get("incremental.phase1.validation_episodes", 200)),
+            "deterministic_raw",
+        )
+    )
+    dagger_states = []
+    dagger_actions = []
+    iteration_metadata = []
+    for current_iteration in range(1, iteration + 1):
+        path = _phase2_query_path(config, current_iteration, seed)
+        with np.load(path) as data:
+            dagger_states.append(np.asarray(data["states"], dtype=np.float32))
+            dagger_actions.append(np.asarray(data["teacher_raw_actions"], dtype=np.float32))
+            iteration_metadata.append(
+                {
+                    "iteration": current_iteration,
+                    "queries": int(len(data["states"])),
+                    "rollout_episodes": int(data["rollout_episodes"]),
+                    "rollout_success": float(data["rollout_success"]),
+                }
+            )
+    all_train_states = np.concatenate([train_states, *dagger_states])
+    all_train_actions = np.concatenate([train_actions, *dagger_actions])
+    if iteration == 1:
+        previous_path = (
+            config.path_value("paths.incremental_artifact_dir")
+            / "phase1"
+            / f"n{int(config.get('incremental.phase1.train_episodes', 2000))}"
+            / f"seed{seed}"
+            / "bc_all_deterministic_raw.pt"
+        )
+    else:
+        previous_path = (
+            config.path_value("paths.incremental_artifact_dir")
+            / "phase2"
+            / f"iteration_{iteration - 1:02d}"
+            / f"seed{seed}"
+            / "bc_dagger.pt"
+        )
+    previous_model, previous_checkpoint = _load_phase1_bc(previous_path, default_device())
+    input_norm = Standardizer.from_state_dict(previous_checkpoint["input_norm"])
+    train_dataset = TensorDataset(
+        torch.from_numpy(input_norm.transform(all_train_states)).float(),
+        torch.from_numpy(all_train_actions).float(),
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase2.batch_size", 4096)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    device = default_device()
+    model = previous_model.to(device)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=float(config.get("incremental.phase2.lr", 5e-4)),
+    )
+    x_val = torch.from_numpy(input_norm.transform(val_states)).to(device).float()
+    y_val = torch.from_numpy(val_actions).to(device).float()
+    epochs = int(config.get("incremental.phase2.epochs", 100))
+    model.eval()
+    with torch.inference_mode():
+        best_val_loss = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+    best_state = copy.deepcopy(model.state_dict())
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc=f"train phase2 DAgger iteration {iteration}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for states, actions in loader:
+            states = states.to(device, non_blocking=True)
+            actions = actions.to(device, non_blocking=True)
+            prediction = model(states)
+            loss = torch.mean((prediction - actions) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(states)
+            count += len(states)
+        model.eval()
+        with torch.inference_mode():
+            val_loss = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+        history.append(
+            {
+                "epoch": epoch,
+                "train_mse": loss_sum / count,
+            "base_validation_mse": val_loss,
+        }
+    )
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 2 DAgger training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.inference_mode():
+        base_val_prediction = model(x_val).detach().cpu().numpy()
+    payload = {
+        "model": model.state_dict(),
+        "obs_dim": all_train_states.shape[-1],
+        "action_dim": all_train_actions.shape[-1],
+        "hidden_dim": int(config.get("incremental.phase1.hidden_dim", 256)),
+        "input_norm": input_norm.state_dict(),
+        "normalize_inputs": True,
+        "data": {
+            "dataset_type": "query_dataset",
+            "base": base_metadata,
+            "dagger_iterations": iteration_metadata,
+            "total_train_queries": int(len(all_train_states)),
+        },
+        "validation_metrics": _action_regression_metrics(base_val_prediction, val_actions),
+        "best_validation_mse": best_val_loss,
+        "history": history,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "bc_dagger_metrics.json",
+        {
+            "data": payload["data"],
+            "validation_metrics": payload["validation_metrics"],
+            "best_validation_mse": best_val_loss,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 2 DAgger BC: {checkpoint_path}")
+    return checkpoint_path
+
+
+def evaluate_phase2_dagger_bc(
+    config: Config,
+    iteration: int,
+    seed: int = 0,
+    episodes: int | None = None,
+) -> Path:
+    checkpoint_path = train_phase2_dagger_bc(config, iteration, seed=seed, force=False)
+    device = default_device()
+    model, checkpoint = _load_phase1_bc(checkpoint_path, device)
+    input_norm = Standardizer.from_state_dict(checkpoint["input_norm"])
+
+    @torch.inference_mode()
+    def policy(state: np.ndarray) -> np.ndarray:
+        state_t = torch.from_numpy(input_norm.transform(state[None])).to(device).float()
+        return model(state_t).detach().cpu().numpy()[0].astype(np.float32)
+
+    eval_episodes = int(episodes or config.get("incremental.phase2.eval_episodes", 100))
+    metrics = _evaluate_scalar_policy(
+        config,
+        policy,
+        eval_episodes,
+        int(config.get("incremental.phase2.eval_seed", 10000)),
+    )
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase2"
+        / f"iteration_{iteration:02d}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "bc_dagger.json"
+    payload = {
+        "phase": 2,
+        "method": "privileged_bc_dagger",
+        "iteration": iteration,
+        "seed": seed,
+        "closed_loop": metrics,
+        "held_out_action_metrics": checkpoint["validation_metrics"],
+        "data": checkpoint["data"],
+        "metadata": _runtime_metadata(config),
+        "gate_passed": metrics["success"] >= 0.80,
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def _load_phase0_simulator_states(config: Config) -> list[np.ndarray]:
+    path = config.path_value("paths.incremental_data_dir") / "phase0_causal_audit.h5"
+    states = []
+    with h5py.File(path, "r") as h5:
+        for key in sorted(k for k in h5 if k.startswith("episode_")):
+            episode_states = np.asarray(h5[key]["simulator_states"], dtype=np.float32)
+            if len(episode_states) > 6:
+                states.extend(episode_states[:-5])
+    if not states:
+        raise ValueError(f"No usable simulator states in {path}")
+    return states
+
+
+def _perturbed_recovery_states(
+    config: Config,
+    samples: int,
+) -> tuple[torch.Tensor, np.ndarray]:
+    rng = np.random.default_rng(int(config.get("incremental.phase2.recovery_seed", 50000)))
+    source_states = _load_phase0_simulator_states(config)
+    chosen = np.stack(
+        [source_states[index] for index in rng.integers(0, len(source_states), size=samples)]
+    )
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode="state",
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        sim_backend="physx_cuda",
+        num_envs=samples,
+        reconfiguration_freq=0,
+    )
+    env.reset(seed=int(config.get("incremental.phase2.recovery_seed", 50000)))
+    device = default_device()
+    env.unwrapped.set_state(torch.from_numpy(chosen).to(device).float())
+    state_dict = env.unwrapped.get_state_dict()
+    tee = state_dict["actors"]["Tee"].clone()
+    xy_std = float(config.get("incremental.phase2.recovery_xy_std_m", 0.01))
+    yaw_std = np.deg2rad(float(config.get("incremental.phase2.recovery_yaw_std_deg", 5.0)))
+    perturbations = np.zeros((samples, 3), dtype=np.float32)
+    perturbations[:, :2] = np.clip(
+        rng.normal(0.0, xy_std, size=(samples, 2)),
+        -2.0 * xy_std,
+        2.0 * xy_std,
+    )
+    perturbations[:, 2] = np.clip(
+        rng.normal(0.0, yaw_std, size=samples),
+        -2.0 * yaw_std,
+        2.0 * yaw_std,
+    )
+    tee[:, :2] += torch.from_numpy(perturbations[:, :2]).to(tee.device)
+    current_yaw = 2.0 * torch.atan2(tee[:, 6], tee[:, 3])
+    perturbed_yaw = current_yaw + torch.from_numpy(perturbations[:, 2]).to(tee.device)
+    tee[:, 3] = torch.cos(0.5 * perturbed_yaw)
+    tee[:, 4:6] = 0.0
+    tee[:, 6] = torch.sin(0.5 * perturbed_yaw)
+    state_dict["actors"]["Tee"] = tee
+    env.unwrapped.set_state_dict(state_dict)
+    perturbed_states = env.unwrapped.get_state().detach().clone()
+    env.close()
+    return perturbed_states, perturbations
+
+
+@torch.inference_mode()
+def _rollout_recovery_batch(
+    config: Config,
+    initial_states: torch.Tensor,
+    policy: Callable[[torch.Tensor], torch.Tensor],
+    collect_trajectories: bool,
+) -> tuple[np.ndarray, list[dict[str, np.ndarray]]]:
+    samples = len(initial_states)
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode="state",
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        sim_backend="physx_cuda",
+        num_envs=samples,
+        reconfiguration_freq=0,
+    )
+    env.reset(seed=int(config.get("incremental.phase2.recovery_seed", 50000)))
+    env.unwrapped.set_state(initial_states)
+    obs = env.unwrapped.get_obs().to(default_device()).float()
+    action_low = torch.as_tensor(env.action_space.low, device=obs.device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.action_space.high, device=obs.device, dtype=torch.float32)
+    active = np.ones(samples, dtype=bool)
+    success = np.zeros(samples, dtype=bool)
+    state_buffers: list[list[np.ndarray]] = [[] for _ in range(samples)]
+    simulator_state_buffers: list[list[np.ndarray]] = [[] for _ in range(samples)]
+    action_buffers: list[list[np.ndarray]] = [[] for _ in range(samples)]
+    final_simulator_states: list[np.ndarray | None] = [None for _ in range(samples)]
+    max_steps = int(config.get("incremental.phase2.recovery_max_steps", 100))
+    for _step in range(max_steps):
+        if not active.any():
+            break
+        raw_action = policy(obs)
+        executed_action = torch.clamp(raw_action, action_low, action_high)
+        if collect_trajectories:
+            obs_np = obs.detach().cpu().numpy().astype(np.float32)
+            sim_np = (
+                env.unwrapped.get_state().detach().cpu().numpy().astype(np.float32)
+            )
+            action_np = executed_action.detach().cpu().numpy().astype(np.float32)
+            for index in np.flatnonzero(active):
+                state_buffers[index].append(obs_np[index])
+                simulator_state_buffers[index].append(sim_np[index])
+                action_buffers[index].append(action_np[index])
+        obs, _reward, terminated, truncated, info = env.step(executed_action)
+        obs = obs.to(default_device()).float()
+        next_simulator_states = (
+            env.unwrapped.get_state().detach().cpu().numpy().astype(np.float32)
+        )
+        step_success = _numpy(info.get("success", np.zeros(samples))).reshape(-1).astype(bool)
+        success |= step_success
+        done = (
+            _numpy(terminated).reshape(-1).astype(bool)
+            | _numpy(truncated).reshape(-1).astype(bool)
+            | step_success
+        )
+        for index in np.flatnonzero(active & done):
+            final_simulator_states[index] = next_simulator_states[index]
+        active &= ~done
+    for index in np.flatnonzero(active):
+        final_simulator_states[index] = next_simulator_states[index]
+    env.close()
+    trajectories = []
+    if collect_trajectories:
+        for index in range(samples):
+            if not state_buffers[index]:
+                continue
+            trajectories.append(
+                {
+                    "sample_index": np.asarray(index),
+                    "states": np.stack(state_buffers[index]),
+                    "simulator_states": np.concatenate(
+                        [
+                            np.stack(simulator_state_buffers[index]),
+                            np.asarray(final_simulator_states[index], dtype=np.float32)[None],
+                        ],
+                        axis=0,
+                    ),
+                    "actions": np.stack(action_buffers[index]),
+                    "success": np.asarray(success[index]),
+                }
+            )
+    return success, trajectories
+
+
+def evaluate_phase2_recovery(
+    config: Config,
+    iteration: int = 3,
+    seed: int = 0,
+    samples: int | None = None,
+    force: bool = False,
+) -> Path:
+    samples = int(samples or config.get("incremental.phase2.recovery_samples", 128))
+    results_dir = ensure_dir(config.path_value("paths.incremental_results_dir") / "phase2")
+    output_path = results_dir / f"recovery_iteration_{iteration:02d}_seed{seed}.json"
+    causal_path = (
+        config.path_value("paths.incremental_data_dir")
+        / "phase2_recovery"
+        / f"iteration_{iteration:02d}_seed{seed}.h5"
+    )
+    if output_path.exists() and causal_path.exists() and not force:
+        console.print(f"Phase 2 recovery result exists: {output_path}")
+        return output_path
+    initial_states, perturbations = _perturbed_recovery_states(config, samples)
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    learner_path = train_phase2_dagger_bc(config, iteration, seed=seed, force=False)
+    learner, learner_checkpoint = _load_phase1_bc(learner_path, device)
+    learner_input_norm = Standardizer.from_state_dict(learner_checkpoint["input_norm"])
+
+    def teacher_policy(obs: torch.Tensor) -> torch.Tensor:
+        return teacher.actor_mean(obs)
+
+    def learner_policy(obs: torch.Tensor) -> torch.Tensor:
+        normalized = learner_input_norm.transform(obs.detach().cpu().numpy().astype(np.float32))
+        return learner(torch.from_numpy(normalized).to(device).float())
+
+    teacher_success, teacher_trajectories = _rollout_recovery_batch(
+        config,
+        initial_states,
+        teacher_policy,
+        collect_trajectories=True,
+    )
+    learner_success, _ = _rollout_recovery_batch(
+        config,
+        initial_states,
+        learner_policy,
+        collect_trajectories=False,
+    )
+    teacher_recoverable = teacher_success
+    paired_learner_success = learner_success[teacher_recoverable]
+    ensure_dir(causal_path.parent)
+    tmp_path = causal_path.with_suffix(".tmp.h5")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    with h5py.File(tmp_path, "w") as h5:
+        meta = h5.create_group("meta")
+        for key, value in _runtime_metadata(config).items():
+            meta.attrs[key] = value
+        meta.attrs["dataset_type"] = "causal_dataset"
+        meta.attrs["source"] = "perturbed_state_then_deterministic_teacher_rollout"
+        meta.attrs["samples"] = samples
+        meta.attrs["teacher_recoverable"] = int(teacher_recoverable.sum())
+        saved = 0
+        for trajectory in teacher_trajectories:
+            index = int(trajectory["sample_index"])
+            if not bool(trajectory["success"]):
+                continue
+            group = h5.create_group(f"episode_{saved:04d}")
+            group.attrs["source_sample_index"] = index
+            group.attrs["success"] = True
+            group.create_dataset("perturbation_xy_yaw", data=perturbations[index])
+            group.create_dataset("states", data=trajectory["states"], compression="gzip")
+            group.create_dataset(
+                "simulator_states",
+                data=trajectory["simulator_states"],
+                compression="gzip",
+            )
+            group.create_dataset("actions", data=trajectory["actions"], compression="gzip")
+            saved += 1
+    tmp_path.replace(causal_path)
+    payload = {
+        "phase": 2,
+        "iteration": iteration,
+        "seed": seed,
+        "samples": samples,
+        "perturbation": {
+            "xy_std_m": float(config.get("incremental.phase2.recovery_xy_std_m", 0.01)),
+            "yaw_std_deg": float(
+                config.get("incremental.phase2.recovery_yaw_std_deg", 5.0)
+            ),
+        },
+        "teacher_recovery_success": float(np.mean(teacher_success)),
+        "teacher_recoverable_samples": int(teacher_recoverable.sum()),
+        "learner_recovery_success_all": float(np.mean(learner_success)),
+        "learner_recovery_success_when_teacher_recovers": (
+            float(np.mean(paired_learner_success))
+            if len(paired_learner_success)
+            else float("nan")
+        ),
+        "causal_dataset": str(causal_path),
+        "gate_passed": bool(
+            len(paired_learner_success)
+            and float(np.mean(paired_learner_success)) >= 0.80
+        ),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
