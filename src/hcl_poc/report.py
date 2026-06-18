@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import PercentFormatter
 
 from hcl_poc.config import Config
 from hcl_poc.utils import ensure_dir, read_json
@@ -55,8 +56,25 @@ def build_report(config: Config) -> Path:
     ]
     aggregate.to_csv(results_dir / "summary_by_method.csv", index=False)
 
+    seed_counts = (
+        plot_df.groupby("n_traj")["seed"].nunique().sort_index()
+        if "seed" in plot_df
+        else pd.Series(dtype=int)
+    )
+    seed_note = ", ".join(
+        f"{int(n_traj)}: {int(count)}" for n_traj, count in seed_counts.items()
+    )
+    x_ticks = sorted(int(value) for value in plot_df["n_traj"].unique())
+    metric_labels = {
+        "success": "success rate",
+        "final_reward": "final normalized reward",
+        "max_reward": "maximum normalized reward",
+        "inference_latency_s": "inference latency (s/action)",
+    }
+
     for metric in metrics:
         fig, ax = plt.subplots(figsize=(7, 4))
+        upper_values = []
         for label, group in plot_df.groupby("label"):
             agg = (
                 group.groupby("n_traj")[metric]
@@ -68,14 +86,27 @@ def build_report(config: Config) -> Path:
             mean = agg["mean"].to_numpy()
             std = np.nan_to_num(agg["std"].to_numpy(), nan=0.0)
             ax.plot(x, mean, marker="o", label=label)
-            ax.fill_between(x, mean - std, mean + std, alpha=0.16)
+            lower = np.maximum(0.0, mean - std)
+            upper = mean + std
+            if metric == "success":
+                upper = np.minimum(1.0, upper)
+            upper_values.extend(upper)
+            ax.fill_between(x, lower, upper, alpha=0.16)
+        ax.set_xscale("log")
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels([str(value) for value in x_ticks])
         ax.set_xlabel("training trajectories")
-        ax.set_ylabel("final-state success" if metric == "success" else metric)
+        ax.set_ylabel(metric_labels[metric])
         if metric == "success":
-            ax.set_ylim(-0.02, 1.02)
+            upper_limit = max(0.05, 1.2 * max(upper_values))
+            ax.set_ylim(0.0, min(1.0, upper_limit))
+            ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
         ax.grid(True, alpha=0.3)
         ax.legend()
-        fig.tight_layout()
+        fig.suptitle("Mean +/- sample SD across policy seeds", fontsize=10)
+        if seed_note:
+            fig.text(0.5, 0.015, f"Seeds per trajectory count: {seed_note}", ha="center", fontsize=8)
+        fig.tight_layout(rect=(0, 0.055, 1, 0.96))
         fig.savefig(results_dir / f"{metric}_vs_trajectories.png", dpi=180)
         plt.close(fig)
     return csv_path
