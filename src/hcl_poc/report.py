@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from hcl_poc.config import Config
@@ -40,26 +41,38 @@ def build_report(config: Config) -> Path:
 
     plot_df = df.copy()
     plot_df["label"] = plot_df.apply(_label, axis=1)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    for label, group in plot_df.groupby("label"):
-        agg = group.groupby("n_traj", as_index=False)["success"].mean().sort_values("n_traj")
-        ax.plot(agg["n_traj"], agg["success"], marker="o", label=label)
-    ax.set_xlabel("training trajectories")
-    ax.set_ylabel("final-state success")
-    ax.set_ylim(-0.02, 1.02)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(results_dir / "success_vs_trajectories.png", dpi=180)
-    plt.close(fig)
+    metrics = ["success", "final_reward", "max_reward", "inference_latency_s"]
+    aggregate = (
+        plot_df.groupby(["label", "method", "horizon_s", "n_traj"], dropna=False)[metrics]
+        .agg(["mean", "std", "count"])
+        .reset_index()
+    )
+    aggregate.columns = [
+        "_".join(str(part) for part in column if part).rstrip("_")
+        if isinstance(column, tuple)
+        else str(column)
+        for column in aggregate.columns
+    ]
+    aggregate.to_csv(results_dir / "summary_by_method.csv", index=False)
 
-    for metric in ["final_reward", "max_reward", "inference_latency_s"]:
+    for metric in metrics:
         fig, ax = plt.subplots(figsize=(7, 4))
         for label, group in plot_df.groupby("label"):
-            agg = group.groupby("n_traj", as_index=False)[metric].mean().sort_values("n_traj")
-            ax.plot(agg["n_traj"], agg[metric], marker="o", label=label)
+            agg = (
+                group.groupby("n_traj")[metric]
+                .agg(["mean", "std", "count"])
+                .reset_index()
+                .sort_values("n_traj")
+            )
+            x = agg["n_traj"].to_numpy()
+            mean = agg["mean"].to_numpy()
+            std = np.nan_to_num(agg["std"].to_numpy(), nan=0.0)
+            ax.plot(x, mean, marker="o", label=label)
+            ax.fill_between(x, mean - std, mean + std, alpha=0.16)
         ax.set_xlabel("training trajectories")
-        ax.set_ylabel(metric)
+        ax.set_ylabel("final-state success" if metric == "success" else metric)
+        if metric == "success":
+            ax.set_ylim(-0.02, 1.02)
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()

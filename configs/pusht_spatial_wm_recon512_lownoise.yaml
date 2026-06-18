@@ -15,11 +15,11 @@ paths:
 
 data:
   source: privileged_ppo
-  max_trajectories: 1000
+  max_trajectories: 2000
   replay_count: 240
   replay_num_envs: 8
-  train_trajectories: [1000]
-  eval_episodes: 50
+  train_trajectories: [50, 100, 200, 1000, 2000]
+  eval_episodes: 500
   eval_seed: 10000
   batch_size_features: 32
 

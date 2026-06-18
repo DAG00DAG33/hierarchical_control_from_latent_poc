@@ -100,7 +100,7 @@ def train_cmd(args: argparse.Namespace) -> None:
 
 def eval_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    evaluate(config, args.n_traj, args.seed, args.method, args.horizon_s)
+    evaluate(config, args.n_traj, args.seed, args.method, args.horizon_s, episodes=args.episodes)
 
 
 def video_cmd(args: argparse.Namespace) -> None:
@@ -267,11 +267,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-traj", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon-s", type=float)
+    p.add_argument("--episodes", type=int)
     p.set_defaults(func=eval_cmd)
 
     p = sub.add_parser("video")
     add_config_arg(p)
-    p.add_argument("method", choices=["flat_obs"])
+    p.add_argument("method", choices=["flat", "flat_obs", "hier"])
     p.add_argument("--n-traj", type=int, default=200)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--episodes", type=int, default=4)

@@ -20,7 +20,9 @@ from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_s
 console = Console()
 
 
-def _dino_from_checkpoint(config: Config, ckpt: dict[str, Any] | None, device: torch.device) -> DinoExtractor:
+def _dino_from_checkpoint(
+    config: Config, ckpt: dict[str, Any] | None, device: torch.device
+) -> DinoExtractor:
     ckpt = ckpt or {}
     return DinoExtractor(
         str(ckpt.get("dino_model", config.get("dino.model_name"))),
@@ -153,7 +155,9 @@ def _load_encoder(
 ) -> tuple[ObservationEncoder, Standardizer, dict[str, Any]]:
     ckpt_path = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}" / "encoder.pt"
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(device)
+    encoder = ObservationEncoder(ckpt["input_dim"], ckpt["latent_dim"], ckpt["hidden_dim"]).to(
+        device
+    )
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
     return encoder, Standardizer.from_state_dict(ckpt["input_norm"]), ckpt
@@ -215,8 +219,12 @@ def _sample_action(
         action_chunk = bc(cond_obs).cpu().numpy()[0]
     elif method == "bc_pose":
         assert bc is not None and dino is not None
-        assert pose_model is not None and pose_input_norm is not None and pose_label_norm is not None
-        cond_pose = encode_pose_direct(obs, dino, input_norm, pose_model, pose_input_norm, pose_label_norm, device)
+        assert (
+            pose_model is not None and pose_input_norm is not None and pose_label_norm is not None
+        )
+        cond_pose = encode_pose_direct(
+            obs, dino, input_norm, pose_model, pose_input_norm, pose_label_norm, device
+        )
         action_chunk = bc(cond_pose).cpu().numpy()[0]
     elif method == "bc_state":
         assert bc is not None
@@ -229,7 +237,12 @@ def _sample_action(
             assert flat is not None
             action_chunk = sample_flow(flat, z, steps, flat.sample_dim).cpu().numpy()[0]
         elif method == "hier":
-            assert high is not None and low is not None and high_ckpt is not None and subgoal is not None
+            assert (
+                high is not None
+                and low is not None
+                and high_ckpt is not None
+                and subgoal is not None
+            )
             cond = torch.cat([z, subgoal], dim=-1)
             action_chunk = sample_flow(low, cond, steps, low.sample_dim).cpu().numpy()[0]
         else:
@@ -238,7 +251,14 @@ def _sample_action(
     return action, subgoal
 
 
-def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: float | None = None) -> Path:
+def evaluate(
+    config: Config,
+    n_traj: int,
+    seed: int,
+    method: str,
+    horizon_s: float | None = None,
+    episodes: int | None = None,
+) -> Path:
     set_seed(seed)
     device = default_device()
     artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
@@ -321,7 +341,7 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
     )
     action_low = np.asarray(env.action_space.low, dtype=np.float32)
     action_high = np.asarray(env.action_space.high, dtype=np.float32)
-    eval_episodes = int(config.get("data.eval_episodes", 50))
+    eval_episodes = int(episodes or config.get("data.eval_episodes", 50))
     eval_seed = int(config.get("data.eval_seed", 10000))
     successes: list[float] = []
     final_rewards: list[float] = []
@@ -337,7 +357,15 @@ def evaluate(config: Config, n_traj: int, seed: int, method: str, horizon_s: flo
         subgoal = None
         refresh = 1
         if method == "hier":
-            refresh = max(1, int(round(horizon_steps(config, float(horizon_s)) * float(config.get("policy.high_level_refresh_fraction")))))
+            refresh = max(
+                1,
+                int(
+                    round(
+                        horizon_steps(config, float(horizon_s))
+                        * float(config.get("policy.high_level_refresh_fraction"))
+                    )
+                ),
+            )
         step_idx = 0
         success = False
         while not (done or truncated):
@@ -406,17 +434,36 @@ def record_videos(
     episodes: int,
     horizon_s: float | None = None,
 ) -> list[Path]:
-    if method != "flat_obs":
-        raise ValueError("Video recording currently supports flat_obs only")
     set_seed(seed)
     device = default_device()
     artifact_dir = Path(config.get("paths.artifact_dir")) / f"n{n_traj}" / f"seed{seed}"
-    flat, flat_ckpt = _load_flow(artifact_dir / "flat_obs.pt", device)
-    dino = _dino_from_checkpoint(config, flat_ckpt, device)
-    action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
-    input_norm = Standardizer.from_state_dict(flat_ckpt["input_norm"])
-    steps = int(flat_ckpt["flow_steps"])
-    out_dir = ensure_dir(Path(config.get("paths.results_dir")).parent / "videos")
+    encoder = high = low = None
+    high_ckpt = None
+    if method == "flat_obs":
+        flat, flat_ckpt = _load_flow(artifact_dir / "flat_obs.pt", device)
+        dino_ckpt = flat_ckpt
+        action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
+        input_norm = Standardizer.from_state_dict(flat_ckpt["input_norm"])
+        steps = int(flat_ckpt["flow_steps"])
+    elif method == "flat":
+        encoder, input_norm, dino_ckpt = _load_encoder(config, n_traj, seed, device)
+        flat, flat_ckpt = _load_flow(artifact_dir / "flat.pt", device)
+        action_norm = Standardizer.from_state_dict(flat_ckpt["action_norm"])
+        steps = int(flat_ckpt["flow_steps"])
+    elif method == "hier":
+        if horizon_s is None:
+            raise ValueError("Hierarchy video recording requires horizon_s")
+        encoder, input_norm, dino_ckpt = _load_encoder(config, n_traj, seed, device)
+        h_steps = horizon_steps(config, horizon_s)
+        high, high_ckpt = _load_flow(artifact_dir / f"high_h{h_steps}.pt", device)
+        low, low_ckpt = _load_flow(artifact_dir / f"low_h{h_steps}.pt", device)
+        action_norm = Standardizer.from_state_dict(low_ckpt["action_norm"])
+        steps = int(low_ckpt["flow_steps"])
+        flat = None
+    else:
+        raise ValueError(method)
+    dino = _dino_from_checkpoint(config, dino_ckpt, device)
+    out_dir = ensure_dir(Path(config.get("paths.results_dir")) / "videos")
 
     env = gym.make(
         config.get("env_id"),
@@ -437,8 +484,25 @@ def record_videos(
         success = False
         max_reward = -float("inf")
         final_reward = 0.0
+        subgoal = None
+        refresh = 1
+        if method == "hier":
+            refresh = max(
+                1,
+                int(
+                    round(
+                        horizon_steps(config, float(horizon_s))
+                        * float(config.get("policy.high_level_refresh_fraction"))
+                    )
+                ),
+            )
+        step_idx = 0
         while not (done or truncated):
-            action, _subgoal = _sample_action(
+            if method == "hier" and (subgoal is None or step_idx % refresh == 0):
+                assert high is not None and high_ckpt is not None and encoder is not None
+                z = encode_obs(obs, dino, encoder, input_norm, device)
+                subgoal = sample_flow(high, z, int(high_ckpt["flow_steps"]), high.sample_dim)
+            action, subgoal = _sample_action(
                 obs,
                 method,
                 dino,
@@ -447,6 +511,11 @@ def record_videos(
                 steps,
                 flat,
                 input_norm,
+                encoder=encoder,
+                high=high,
+                high_ckpt=high_ckpt,
+                low=low,
+                subgoal=subgoal,
             )
             if bool(config.get("policy.clip_actions_to_env_space", False)):
                 action = np.clip(action, action_low, action_high).astype(np.float32)
@@ -456,8 +525,10 @@ def record_videos(
             final_reward = reward_f
             max_reward = max(max_reward, reward_f)
             success = success or bool(np.asarray(info.get("success", False)).reshape(-1)[0])
+            step_idx += 1
+        horizon_tag = "" if horizon_s is None else f"_h{horizon_s:g}s"
         path = out_dir / (
-            f"{method}_n{n_traj}_seed{seed}_evalseed{rollout_seed}_"
+            f"{method}{horizon_tag}_n{n_traj}_seed{seed}_evalseed{rollout_seed}_"
             f"success{int(success)}_final{final_reward:.3f}_max{max_reward:.3f}.mp4"
         )
         imageio.mimsave(path, frames, fps=int(config.get("control_freq", 20)), macro_block_size=1)
