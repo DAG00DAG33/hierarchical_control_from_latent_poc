@@ -109,3 +109,21 @@ incremental:
     probe_hidden_dim: 512
     probe_lr: 0.001
     probe_contact_distance_m: 0.08
+  phase5:
+    history: 1
+    architecture: concat
+    hidden_dim: 512
+    batch_size: 512
+    batches_per_epoch: 500
+    epochs: 80
+    lr: 0.0003
+    flow_steps: 24
+    eval_mode: zero_noise
+    eval_episodes: 100
+    eval_seed: 10000
+    eval_num_envs: 64
+    validation_queries: 10000
+    validation_action_interval: 5
+    endpoint_consistency_weight: 20.0
+    endpoint_consistency_steps: 4
+    endpoint_consistency_batch: 256

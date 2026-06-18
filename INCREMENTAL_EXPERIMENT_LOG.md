@@ -27,9 +27,9 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 5: visual flow matching |
-| Gate | Visual flow reaches at least visual deterministic BC minus 5 percentage points |
-| Gate state | Phases 0-4 passed; Phase 5 not yet evaluated |
+| Active phase | Phase 6: learned latent representation validation |
+| Gate | Latent probes approach raw spatial-DINO probes and latent flat policy keeps most visual-flow performance |
+| Gate state | Phases 0-5 passed; Phase 6 not yet evaluated |
 | Current blocker | None |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
@@ -468,3 +468,31 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   meaningfully above baseline.
 - **Phase 4 conclusion:** Freeze `concat_h1/seed0` as the current visual
   deterministic BC baseline and proceed to visual flow matching.
+
+### 2026-06-18 - P5-I01: Visual one-step flow implementation
+
+- **Input representation:** Same as best Phase 4 policy, `concat_h1`: current
+  spatial-DINO/proprio frame plus previous-action slot.
+- **Dataset:** Same 1,800/200 successful PPO causal split as Phase 4.
+- **Training:** Conditional flow matching over one-step 3D actions with the
+  Phase 3 deterministic endpoint recipe:
+  - clipped executed teacher actions;
+  - endpoint-consistency weight `20.0`;
+  - 4-step differentiable endpoint loss during training;
+  - 24-step zero-noise deterministic endpoint evaluation.
+- **Reference:** Phase 4 `concat_h1/seed0` visual BC, 65/100 success.
+
+### 2026-06-18 - P5-G01: Visual flow gate
+
+- **Closed-loop result:** 66/100 success.
+- **Gate threshold:** Visual BC minus 5 percentage points = 60%.
+- **Final/max normalized reward:** `0.631` / `0.758`.
+- **Held-out zero-noise action MAE/RMSE:** `0.0375` / `0.0566`.
+- **Action correlation per dimension:** `0.990`, `0.994`, `0.986`.
+- **Comparison:** Flow is 1 percentage point above the deterministic visual BC
+  reference on the same 100 evaluation seeds.
+- **Gate decision:** Passed.
+- **Phase 5 conclusion:** Freeze `phase5/concat_h1/seed0` as the current flat
+  visual flow baseline and proceed to Phase 6 representation validation. The
+  Phase 6 plan already includes the requested reconstruction-only autoencoder
+  ablation with no world-model prediction loss.

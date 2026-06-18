@@ -19,12 +19,14 @@ from hcl_poc.incremental import (
     evaluate_phase2_recovery,
     evaluate_phase3_flow,
     evaluate_phase4_visual_bc,
+    evaluate_phase5_visual_flow,
     probe_phase4_visual_history,
     run_phase0,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
     train_phase4_visual_bc,
+    train_phase5_visual_flow,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -280,6 +282,22 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             samples=args.samples,
             force=args.force,
         )
+    elif args.incremental_command == "phase5-train":
+        train_phase5_visual_flow(
+            config,
+            history=args.history,
+            architecture=args.architecture,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase5-eval":
+        evaluate_phase5_visual_flow(
+            config,
+            history=args.history,
+            architecture=args.architecture,
+            seed=args.seed,
+            episodes=args.episodes,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -389,6 +407,16 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "phase4-probe":
             phase4.add_argument("--samples", type=int)
         phase4.set_defaults(func=incremental_cmd)
+    for command in ["phase5-train", "phase5-eval"]:
+        phase5 = incremental_sub.add_parser(command)
+        add_config_arg(phase5)
+        phase5.add_argument("--history", type=int)
+        phase5.add_argument("--architecture", default=None)
+        phase5.add_argument("--seed", type=int, default=0)
+        phase5.add_argument("--force", action="store_true")
+        if command == "phase5-eval":
+            phase5.add_argument("--episodes", type=int)
+        phase5.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

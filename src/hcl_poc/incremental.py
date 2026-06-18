@@ -2901,3 +2901,402 @@ def probe_phase4_visual_history(
     write_json(output_path, metrics)
     console.print(metrics)
     return output_path
+
+
+def _phase5_flow_action_metrics(
+    model: FlowModel,
+    episodes: list[dict[str, np.ndarray]],
+    history: int,
+    action_norm: Standardizer,
+    zero_action_norm: np.ndarray,
+    flow_steps: int,
+    max_queries: int,
+) -> dict[str, Any]:
+    device = next(model.parameters()).device
+    rng = np.random.default_rng(50_000 + history)
+    candidates = [(ep_i, t) for ep_i, ep in enumerate(episodes) for t in range(len(ep["actions"]))]
+    if len(candidates) > max_queries:
+        chosen = rng.choice(len(candidates), size=max_queries, replace=False)
+        candidates = [candidates[int(index)] for index in chosen]
+    predictions = []
+    targets = []
+    batch = []
+    batch_targets = []
+    batch_size = 2048
+    with torch.inference_mode():
+        for ep_i, t in candidates:
+            episode = episodes[ep_i]
+            batch.append(
+                _phase4_history(
+                    episode["frames"],
+                    episode["actions"],
+                    t,
+                    history,
+                    zero_action_norm,
+                ).reshape(-1)
+            )
+            batch_targets.append(episode["raw_actions"][t])
+            if len(batch) == batch_size:
+                cond = torch.from_numpy(np.stack(batch)).to(device).float()
+                zero = torch.zeros(cond.shape[0], model.sample_dim, device=device, dtype=cond.dtype)
+                pred_norm = sample_flow(
+                    model,
+                    cond,
+                    flow_steps,
+                    model.sample_dim,
+                    initial_noise=zero,
+                )
+                predictions.append(action_norm.inverse(pred_norm.detach().cpu().numpy()))
+                targets.append(np.stack(batch_targets))
+                batch.clear()
+                batch_targets.clear()
+        if batch:
+            cond = torch.from_numpy(np.stack(batch)).to(device).float()
+            zero = torch.zeros(cond.shape[0], model.sample_dim, device=device, dtype=cond.dtype)
+            pred_norm = sample_flow(
+                model,
+                cond,
+                flow_steps,
+                model.sample_dim,
+                initial_noise=zero,
+            )
+            predictions.append(action_norm.inverse(pred_norm.detach().cpu().numpy()))
+            targets.append(np.stack(batch_targets))
+    metrics = _action_regression_metrics(np.concatenate(predictions), np.concatenate(targets))
+    metrics["mode"] = "zero_noise"
+    return metrics
+
+
+def train_phase5_visual_flow(
+    config: Config,
+    history: int | None = None,
+    architecture: str | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    history = int(history or config.get("incremental.phase5.history", 1))
+    architecture = architecture or str(config.get("incremental.phase5.architecture", "concat"))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase5"
+        / f"{architecture}_h{history}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "visual_flow.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 5 visual flow exists: {checkpoint_path}")
+        return checkpoint_path
+    train_episodes, val_episodes, data_metadata = _load_phase4_episodes(config)
+    bc_path = train_phase4_visual_bc(
+        config,
+        history=history,
+        architecture=architecture,
+        seed=seed,
+        force=False,
+    )
+    _bc_model, bc_checkpoint = _load_phase4_visual_bc(bc_path, default_device())
+    frame_norm = Standardizer.from_state_dict(bc_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(bc_checkpoint["action_norm"])
+    zero_action_norm = np.asarray(bc_checkpoint["zero_action_norm"], dtype=np.float32)
+    train_norm = _phase4_normalize_episodes(train_episodes, frame_norm, action_norm)
+    val_norm = _phase4_normalize_episodes(val_episodes, frame_norm, action_norm)
+    dataset = _Phase4HistoryDataset(
+        train_norm,
+        history,
+        zero_action_norm,
+        length=int(config.get("incremental.phase5.batch_size", 512))
+        * int(config.get("incremental.phase5.batches_per_epoch", 500)),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase5.batch_size", 512)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    cond_dim = int((data_metadata["frame_dim"] + data_metadata["action_dim"]) * history)
+    action_dim = int(data_metadata["action_dim"])
+    model = FlowModel(
+        sample_dim=action_dim,
+        cond_dim=cond_dim,
+        hidden_dim=int(config.get("incremental.phase5.hidden_dim", 512)),
+    ).to(default_device())
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase5.lr", 3e-4)),
+    )
+    epochs = int(config.get("incremental.phase5.epochs", 80))
+    flow_steps = int(config.get("incremental.phase5.flow_steps", 24))
+    best_state = None
+    best_mae = float("inf")
+    history_rows = []
+    timer = Timer()
+    device = next(model.parameters()).device
+    for epoch in trange(1, epochs + 1, desc=f"train phase5 flow {architecture} h={history}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for x, y in loader:
+            cond = x.flatten(start_dim=1).to(device, non_blocking=True).float()
+            target = y.to(device, non_blocking=True).float()
+            loss = flow_matching_loss(model, target, cond)
+            consistency_weight = float(
+                config.get("incremental.phase5.endpoint_consistency_weight", 0.0)
+            )
+            if consistency_weight > 0.0:
+                consistency_count = min(
+                    int(config.get("incremental.phase5.endpoint_consistency_batch", 256)),
+                    len(cond),
+                )
+                consistency_steps = int(
+                    config.get("incremental.phase5.endpoint_consistency_steps", 4)
+                )
+                zero = torch.zeros(
+                    consistency_count,
+                    model.sample_dim,
+                    device=device,
+                    dtype=cond.dtype,
+                )
+                endpoint = _integrate_flow_train(
+                    model,
+                    cond[:consistency_count],
+                    consistency_steps,
+                    model.sample_dim,
+                    zero,
+                )
+                loss = loss + consistency_weight * torch.mean(
+                    (endpoint - target[:consistency_count]) ** 2
+                )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(cond)
+            count += len(cond)
+        row = {"epoch": epoch, "train_loss": loss_sum / count}
+        if epoch % int(config.get("incremental.phase5.validation_action_interval", 5)) == 0:
+            model.eval()
+            metrics = _phase5_flow_action_metrics(
+                model,
+                val_norm,
+                history,
+                action_norm,
+                zero_action_norm,
+                flow_steps,
+                int(config.get("incremental.phase5.validation_queries", 10000)),
+            )
+            row["validation_action_mae"] = metrics["mae"]
+            row["validation_action_rmse"] = metrics["rmse"]
+            if metrics["mae"] < best_mae:
+                best_mae = metrics["mae"]
+                best_state = copy.deepcopy(model.state_dict())
+        history_rows.append(row)
+    if best_state is None:
+        raise RuntimeError("Phase 5 visual flow training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    validation_metrics = _phase5_flow_action_metrics(
+        model,
+        val_norm,
+        history,
+        action_norm,
+        zero_action_norm,
+        flow_steps,
+        int(config.get("incremental.phase5.validation_queries", 10000)),
+    )
+    payload = {
+        "model": model.state_dict(),
+        "architecture": architecture,
+        "history": history,
+        "cond_dim": cond_dim,
+        "sample_dim": action_dim,
+        "hidden_dim": int(config.get("incremental.phase5.hidden_dim", 512)),
+        "flow_steps": flow_steps,
+        "frame_norm": frame_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "zero_action_norm": zero_action_norm,
+        "validation_metrics": validation_metrics,
+        "data": data_metadata,
+        "history_rows": history_rows,
+        "bc_reference_checkpoint": str(bc_path),
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "visual_flow_metrics.json",
+        {
+            "architecture": architecture,
+            "history": history,
+            "validation_metrics": validation_metrics,
+            "data": data_metadata,
+            "elapsed_s": timer.elapsed(),
+            "bc_reference_checkpoint": str(bc_path),
+        },
+    )
+    console.print(f"Wrote Phase 5 visual flow: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_phase5_visual_flow(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model = FlowModel(
+        sample_dim=int(checkpoint["sample_dim"]),
+        cond_dim=int(checkpoint["cond_dim"]),
+        hidden_dim=int(checkpoint["hidden_dim"]),
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    return model, checkpoint
+
+
+def evaluate_phase5_visual_flow(
+    config: Config,
+    history: int | None = None,
+    architecture: str | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+) -> Path:
+    history = int(history or config.get("incremental.phase5.history", 1))
+    architecture = architecture or str(config.get("incremental.phase5.architecture", "concat"))
+    checkpoint_path = train_phase5_visual_flow(
+        config,
+        history=history,
+        architecture=architecture,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    model, checkpoint = _load_phase5_visual_flow(checkpoint_path, device)
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    zero_action_norm = np.asarray(checkpoint["zero_action_norm"], dtype=np.float32)
+    dino = _phase4_dino_from_config(config, device)
+    flow_steps = int(checkpoint["flow_steps"])
+    eval_episodes = int(episodes or config.get("incremental.phase5.eval_episodes", 100))
+    num_envs = min(int(config.get("incremental.phase5.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=int(config.get("incremental.phase5.eval_seed", 10000)))
+    frames = frame_norm.transform(
+        _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+    )
+    frame_history = np.repeat(frames[:, None, :], history, axis=1).astype(np.float32)
+    action_history = np.repeat(zero_action_norm[None, None, :], num_envs, axis=0)
+    action_history = np.repeat(action_history, history, axis=1).astype(np.float32)
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    latencies: list[float] = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    while len(successes) < eval_episodes:
+        policy_input = np.concatenate([frame_history, action_history], axis=-1).reshape(num_envs, -1)
+        timer = Timer()
+        with torch.inference_mode():
+            cond = torch.from_numpy(policy_input).to(device).float()
+            zero = torch.zeros(cond.shape[0], model.sample_dim, device=device, dtype=cond.dtype)
+            pred_norm = sample_flow(
+                model,
+                cond,
+                flow_steps,
+                model.sample_dim,
+                initial_noise=zero,
+            )
+            raw_action = action_norm.inverse(pred_norm.detach().cpu().numpy())
+        latencies.append(timer.elapsed() / num_envs)
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        executed_norm = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+        next_frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        frame_history = np.roll(frame_history, shift=-1, axis=1)
+        frame_history[:, -1] = next_frames
+        action_history = np.roll(action_history, shift=-1, axis=1)
+        action_history[:, -1] = executed_norm
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    frame_history[env_idx] = np.repeat(
+                        next_frames[env_idx][None, :], history, axis=0
+                    )
+                    action_history[env_idx] = np.repeat(
+                        zero_action_norm[None, :], history, axis=0
+                    )
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    metrics = {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(
+            np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)
+        ),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "seed_start": int(config.get("incremental.phase5.eval_seed", 10000)),
+        "num_envs": num_envs,
+    }
+    bc_result_path = (
+        config.path_value("paths.incremental_results_dir")
+        / "phase4"
+        / f"{architecture}_h{history}"
+        / f"seed{seed}"
+        / "visual_bc.json"
+    )
+    if not bc_result_path.exists():
+        evaluate_phase4_visual_bc(
+            config,
+            history=history,
+            architecture=architecture,
+            seed=seed,
+            episodes=eval_episodes,
+        )
+    import json
+
+    with bc_result_path.open("r", encoding="utf-8") as f:
+        bc_result = json.load(f)
+    bc_success = float(bc_result["closed_loop"]["success"])
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase5"
+        / f"{architecture}_h{history}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "visual_flow.json"
+    payload = {
+        "phase": 5,
+        "method": "visual_one_step_flow",
+        "architecture": architecture,
+        "history": history,
+        "seed": seed,
+        "closed_loop": metrics,
+        "eval_mode": "zero_noise",
+        "bc_reference_success": bc_success,
+        "held_out_action_metrics": checkpoint["validation_metrics"],
+        "data": checkpoint["data"],
+        "metadata": _runtime_metadata(config),
+        "gate_passed": metrics["success"] >= bc_success - 0.05,
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
