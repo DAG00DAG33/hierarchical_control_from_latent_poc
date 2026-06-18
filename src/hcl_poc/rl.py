@@ -407,10 +407,14 @@ def evaluate_ppo(config: Config, checkpoint: str | Path | None = None, episodes:
     )
     obs, _info = env.reset(seed=int(config.get("rl.eval_seed", 50_000)))
     obs = obs.to(device).float()
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
     successes: list[float] = []
     returns: list[float] = []
     while len(successes) < episodes:
         action, _logprob, _entropy, _value = agent.get_action_and_value(obs, deterministic=True)
+        if bool(config.get("policy.clip_actions_to_env_space", False)):
+            action = torch.clamp(action, action_low, action_high)
         obs, _reward, _terminated, _truncated, info = env.step(action)
         obs = obs.to(device).float()
         if "final_info" in info:

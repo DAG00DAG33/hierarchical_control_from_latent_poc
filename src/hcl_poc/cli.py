@@ -11,6 +11,7 @@ from rich.console import Console
 from hcl_poc.config import load_config
 from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps, record_videos
+from hcl_poc.incremental import run_phase0
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.train import (
@@ -183,6 +184,14 @@ def rl_cmd(args: argparse.Namespace) -> None:
         raise ValueError(args.rl_command)
 
 
+def incremental_cmd(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    if args.incremental_command == "phase0":
+        run_phase0(config, episodes=args.episodes, force=args.force)
+    else:
+        raise ValueError(args.incremental_command)
+
+
 def commit_cmd(args: argparse.Namespace) -> None:
     subprocess.run(["git", "add", "."], check=True)
     subprocess.run(["git", "commit", "-m", args.message], check=True)
@@ -225,6 +234,14 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--episodes", type=int)
     rc.add_argument("--force", action="store_true")
     rc.set_defaults(func=rl_cmd)
+
+    p = sub.add_parser("incremental")
+    incremental_sub = p.add_subparsers(dest="incremental_command", required=True)
+    phase0 = incremental_sub.add_parser("phase0")
+    add_config_arg(phase0)
+    phase0.add_argument("--episodes", type=int)
+    phase0.add_argument("--force", action="store_true")
+    phase0.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

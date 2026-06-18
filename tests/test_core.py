@@ -6,6 +6,7 @@ import torch
 from hcl_poc.config import Config
 from hcl_poc.eval import horizon_steps
 from hcl_poc.flow import flow_matching_loss, sample_flow
+from hcl_poc.incremental import action_alignment_metrics, copied_actor_student
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
@@ -54,3 +55,20 @@ def test_ppo_agent_shapes() -> None:
     assert logprob.shape == (4,)
     assert entropy.shape == (4,)
     assert value.shape == (4,)
+
+
+def test_copied_actor_student_is_exact() -> None:
+    teacher = PPOAgent(obs_dim=31, action_dim=3, hidden_dim=16)
+    student = copied_actor_student(teacher, torch.device("cpu"))
+    obs = torch.randn(32, 31)
+    torch.testing.assert_close(teacher.actor_mean(obs), student(obs), rtol=0, atol=0)
+
+
+def test_action_alignment_favors_unshifted_actions() -> None:
+    observations = np.zeros((5, 2), dtype=np.float32)
+    teacher_actions = np.arange(8, dtype=np.float32).reshape(4, 2)
+    stored_actions = teacher_actions.copy()
+    metrics = action_alignment_metrics(observations, stored_actions, teacher_actions)
+    assert metrics["shift_0_mae"] == 0.0
+    assert metrics["shift_0_mae"] < metrics["shift_minus_1_mae"]
+    assert metrics["shift_0_mae"] < metrics["shift_plus_1_mae"]

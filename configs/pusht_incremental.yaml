@@ -1,0 +1,38 @@
+seed: 0
+env_id: PushT-v1
+obs_mode: state
+control_mode: pd_ee_delta_pos
+control_freq: 20
+
+paths:
+  rl_dir: artifacts/rl_pusht_official
+  incremental_data_dir: data/incremental
+  incremental_artifact_dir: artifacts/incremental
+  incremental_results_dir: results/incremental
+
+policy:
+  clip_actions_to_env_space: true
+  action_low: [-1.0, -1.0, -1.0]
+  action_high: [1.0, 1.0, 1.0]
+
+rl:
+  sim_backend: physx_cuda
+  eval_num_envs: 256
+  eval_episodes: 500
+  eval_seed: 10000
+  eval_reconfiguration_freq: 1
+  eval_partial_reset: false
+
+incremental:
+  phase0:
+    scalar_sim_backend: physx_cuda
+    eval_episodes: 500
+    eval_seed: 10000
+    audit_successful_trajectories: 10
+    audit_max_attempts: 100
+    audit_seed: 20000
+    overfit_hidden_dim: 256
+    overfit_max_steps: 100000
+    overfit_lr: 0.001
+    overfit_target_normalized_mae: 0.00001
+    transition_replay_tolerance: 0.00001
