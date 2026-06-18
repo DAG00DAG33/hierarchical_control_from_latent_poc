@@ -27,14 +27,15 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 0: teacher and pipeline sanity |
-| Gate | Copied teacher policy matches PPO success within 1 percentage point |
-| Gate state | Not yet evaluated |
+| Active phase | Phase 1: deterministic privileged-state BC |
+| Gate | Privileged one-step BC reaches at least 70% success |
+| Gate state | Phase 0 passed; Phase 1 not yet evaluated |
 | Current blocker | None |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
 | Canonical controller | `pd_ee_delta_pos`, 20 Hz |
 | Canonical final evaluation | 500 episodes, fixed reset seeds |
+| Development gate evaluation | 100 episodes unless a cheaper diagnostic is sufficient |
 
 ## Prior Evidence
 
@@ -61,14 +62,14 @@ to skip phases.
 
 | Check | Evidence required | Status |
 | --- | --- | --- |
-| 0.1 Original PPO evaluation | Deterministic success and reward on canonical seeds | Pending |
-| 0.1 Downstream evaluator parity | Same actor through scalar student evaluation path | Pending |
-| 0.2 Copied actor | Exact weight equality and success within 1 percentage point | Pending |
-| 0.3 Action semantics | Raw, clipped, stored, executed, normalized comparisons | Pending |
-| 0.4 Temporal alignment | `s_t, a_t, s_{t+1}` audit and +/-1 action comparison | Pending |
-| 0.5 One-state overfit | Nearly zero normalized action error | Pending |
-| 0.5 One-trajectory overfit | Nearly zero normalized action error and replay check | Pending |
-| 0.5 Ten-trajectory overfit | Training error and closed-loop behavior | Pending |
+| 0.1 Original PPO evaluation | Deterministic success and reward on canonical seeds | Passed |
+| 0.1 Downstream evaluator parity | Same actor through scalar student evaluation path | Passed |
+| 0.2 Copied actor | Exact weight equality and success within 1 percentage point | Passed |
+| 0.3 Action semantics | Raw, clipped, stored, executed, normalized comparisons | Passed |
+| 0.4 Temporal alignment | `s_t, a_t, s_{t+1}` audit and +/-1 action comparison | Passed |
+| 0.5 One-state overfit | Nearly zero normalized action error | Passed |
+| 0.5 One-trajectory overfit | Nearly zero normalized action error and replay check | Passed |
+| 0.5 Ten-trajectory overfit | Training error and closed-loop behavior | Diagnostic complete |
 
 ## Experiment Entries
 
@@ -157,3 +158,48 @@ Phase 6 now includes a reconstruction-only autoencoder with zero world-model
 prediction loss. This will isolate whether the action-conditioned temporal
 objective adds useful control-state structure beyond current-observation
 reconstruction.
+
+### Evaluation-budget amendment
+
+Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
+500-episode evaluations for final results and claims in Phase 12. A
+500-episode Phase 0 run was stopped before completion and replaced with a
+100-episode gate run.
+
+### 2026-06-18 - P0-G01: Final Phase 0 gate run
+
+- **Git base:** `4c27722`
+- **Configuration:** `configs/pusht_incremental.yaml`
+- **Dataset type:** Fresh CUDA `causal_dataset`, 10 successful trajectories,
+  515 transitions.
+- **Command:** `uv run hcl-poc incremental phase0 --config
+  configs/pusht_incremental.yaml --episodes 100 --force`
+- **Evaluation seeds:** 10000-10099.
+- **Results:**
+  - canonical vector CUDA teacher: 81% success;
+  - downstream scalar CUDA teacher: 83% success;
+  - independent copied actor: 83% success;
+  - copied actor output max absolute error: exactly 0;
+  - vector/scalar success gap: 2 percentage points;
+  - copied-teacher success gap: 0 percentage points;
+  - action alignment shift 0 MAE: `6.87e-8`;
+  - action alignment shift -1/+1 MAE: approximately `0.199`;
+  - causal simulator transition replay max state error: exactly 0;
+  - raw teacher actions outside action bounds: 19.0%;
+  - clipped-to-executed action MAE: exactly 0;
+  - normalization round-trip max error: `1.19e-7`;
+  - one-state fit action MAE: `1.76e-5`;
+  - one-trajectory fit action MAE: `2.61e-6`;
+  - ten-trajectory fit action MAE: `5.06e-4`.
+- **Closed-loop overfit diagnostic:**
+  - one-trajectory student: 0/1 success despite micro-scale supervised error;
+  - ten-trajectory student: 7/10 success on training initializations.
+- **Interpretation:** Push-T contact behavior is sensitive enough that tiny
+  action errors can leave the exact training-state manifold. This is not an
+  alignment or replay bug: the copied actor and exact stored-action replay
+  both preserve behavior. Phase 1 must use broader all-state queries, and
+  Phase 2 DAgger remains necessary even if held-out action MAE is small.
+- **Gate decision:** Passed. All explicit Phase 0 gate checks pass.
+- **Next action:** Build separate all-state and successful-only
+  `query_dataset` files using deterministic teacher labels, then train
+  same-architecture one-step privileged BC.

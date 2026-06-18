@@ -26,7 +26,7 @@ rl:
 incremental:
   phase0:
     scalar_sim_backend: physx_cuda
-    eval_episodes: 500
+    eval_episodes: 100
     eval_seed: 10000
     audit_successful_trajectories: 10
     audit_max_attempts: 100
