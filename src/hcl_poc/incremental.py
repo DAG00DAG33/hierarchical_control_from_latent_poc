@@ -2543,6 +2543,7 @@ def evaluate_phase4_visual_bc(
     architecture: str | None = None,
     seed: int = 0,
     episodes: int | None = None,
+    eval_seed_start: int | None = None,
 ) -> Path:
     architecture = architecture or str(config.get("incremental.phase4.architecture", "concat"))
     checkpoint_path = train_phase4_visual_bc(
@@ -2563,7 +2564,12 @@ def evaluate_phase4_visual_bc(
     env = _phase4_make_visual_env(config, num_envs)
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
-    obs, _info = env.reset(seed=int(config.get("incremental.phase4.eval_seed", 10000)))
+    eval_seed_start = int(
+        eval_seed_start
+        if eval_seed_start is not None
+        else config.get("incremental.phase4.eval_seed", 10000)
+    )
+    obs, _info = env.reset(seed=eval_seed_start)
     frames = frame_norm.transform(
         _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
     )
@@ -2626,7 +2632,7 @@ def evaluate_phase4_visual_bc(
         "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
         "inference_latency_s": float(np.mean(latencies)),
         "episodes": eval_episodes,
-        "seed_start": int(config.get("incremental.phase4.eval_seed", 10000)),
+        "seed_start": eval_seed_start,
         "num_envs": num_envs,
     }
     results_dir = ensure_dir(
@@ -2635,7 +2641,12 @@ def evaluate_phase4_visual_bc(
         / f"{architecture}_h{history}"
         / f"seed{seed}"
     )
-    output_path = results_dir / "visual_bc.json"
+    default_seed = int(config.get("incremental.phase4.eval_seed", 10000))
+    output_path = results_dir / (
+        "visual_bc.json"
+        if eval_seed_start == default_seed
+        else f"visual_bc_eval_seed{eval_seed_start}_{eval_episodes}.json"
+    )
     payload = {
         "phase": 4,
         "method": "visual_deterministic_bc",
@@ -3154,6 +3165,7 @@ def evaluate_phase5_visual_flow(
     architecture: str | None = None,
     seed: int = 0,
     episodes: int | None = None,
+    eval_seed_start: int | None = None,
 ) -> Path:
     history = int(history or config.get("incremental.phase5.history", 1))
     architecture = architecture or str(config.get("incremental.phase5.architecture", "concat"))
@@ -3176,7 +3188,12 @@ def evaluate_phase5_visual_flow(
     env = _phase4_make_visual_env(config, num_envs)
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
-    obs, _info = env.reset(seed=int(config.get("incremental.phase5.eval_seed", 10000)))
+    eval_seed_start = int(
+        eval_seed_start
+        if eval_seed_start is not None
+        else config.get("incremental.phase5.eval_seed", 10000)
+    )
+    obs, _info = env.reset(seed=eval_seed_start)
     frames = frame_norm.transform(
         _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
     )
@@ -3249,7 +3266,7 @@ def evaluate_phase5_visual_flow(
         "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
         "inference_latency_s": float(np.mean(latencies)),
         "episodes": eval_episodes,
-        "seed_start": int(config.get("incremental.phase5.eval_seed", 10000)),
+        "seed_start": eval_seed_start,
         "num_envs": num_envs,
     }
     bc_result_path = (
@@ -3257,7 +3274,11 @@ def evaluate_phase5_visual_flow(
         / "phase4"
         / f"{architecture}_h{history}"
         / f"seed{seed}"
-        / "visual_bc.json"
+        / (
+            "visual_bc.json"
+            if eval_seed_start == int(config.get("incremental.phase4.eval_seed", 10000))
+            else f"visual_bc_eval_seed{eval_seed_start}_{eval_episodes}.json"
+        )
     )
     if not bc_result_path.exists():
         evaluate_phase4_visual_bc(
@@ -3266,6 +3287,7 @@ def evaluate_phase5_visual_flow(
             architecture=architecture,
             seed=seed,
             episodes=eval_episodes,
+            eval_seed_start=eval_seed_start,
         )
     import json
 
@@ -3278,7 +3300,12 @@ def evaluate_phase5_visual_flow(
         / f"{architecture}_h{history}"
         / f"seed{seed}"
     )
-    output_path = results_dir / "visual_flow.json"
+    default_seed = int(config.get("incremental.phase5.eval_seed", 10000))
+    output_path = results_dir / (
+        "visual_flow.json"
+        if eval_seed_start == default_seed
+        else f"visual_flow_eval_seed{eval_seed_start}_{eval_episodes}.json"
+    )
     payload = {
         "phase": 5,
         "method": "visual_one_step_flow",
@@ -11356,6 +11383,176 @@ def train_phase10_robust_low_level(
         },
     )
     console.print(f"Wrote Phase 10 robust low level: {output_path}")
+    return output_path
+
+
+def run_phase11_comparison(
+    config: Config,
+    seed: int = 0,
+    episodes: int = 100,
+    eval_seed_start: int = 1_200_000,
+) -> Path:
+    """Build the matched complete-hierarchy comparison and summary plot."""
+    visual_bc_path = evaluate_phase4_visual_bc(
+        config,
+        history=1,
+        architecture="concat",
+        seed=seed,
+        episodes=episodes,
+        eval_seed_start=eval_seed_start,
+    )
+    visual_flow_path = evaluate_phase5_visual_flow(
+        config,
+        history=1,
+        architecture="concat",
+        seed=seed,
+        episodes=episodes,
+        eval_seed_start=eval_seed_start,
+    )
+    root = config.path_value("paths.incremental_results_dir")
+    paths = {
+        "privileged_bc": root
+        / "phase1"
+        / "n2000"
+        / f"seed{seed}"
+        / "bc_all_deterministic_clipped.json",
+        "privileged_flow": root / "phase3" / f"seed{seed}" / "one_step_flow.json",
+        "visual_bc": visual_bc_path,
+        "visual_flat_flow": visual_flow_path,
+        "flat_latent": root
+        / "phase7"
+        / "matched_flat"
+        / "ae_recon_z256"
+        / f"seed{seed}"
+        / "matched_flat_latent_eval_100.json",
+        "oracle_latent_hierarchy": root
+        / "phase7"
+        / "ae_recon_z256_k2_h1_delta"
+        / f"seed{seed}"
+        / "replay_branch_oracle_eval_branch_dagger_iter1_e10_100.json",
+        "structured_predicted_hierarchy": root
+        / "phase8"
+        / "structured_k2"
+        / f"seed{seed}"
+        / "deterministic_hierarchy_100.json",
+        "deterministic_latent_hierarchy": root
+        / "phase8"
+        / "ae_recon_z256_k2_l1"
+        / f"seed{seed}"
+        / "deterministic_hierarchy_100.json",
+        "generative_latent_hierarchy": root
+        / "phase9"
+        / "ae_recon_z256_k2_l1"
+        / f"seed{seed}"
+        / "future_flow_zero_100.json",
+    }
+    import json
+
+    rows = []
+    for method, path in paths.items():
+        if not path.exists():
+            raise FileNotFoundError(f"Missing Phase 11 input for {method}: {path}")
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        closed = payload["closed_loop"]
+        if "correct" in closed:
+            closed = closed["correct"]
+        rows.append(
+            {
+                "method": method,
+                "source": str(path),
+                "success": float(closed["success"]),
+                "success_stderr": float(closed["success_stderr"]),
+                "final_reward": float(closed["final_reward"]),
+                "max_reward": float(closed["max_reward"]),
+                "inference_latency_s": float(
+                    closed.get("inference_latency_s", closed.get("policy_latency_s", 0.0))
+                ),
+                "episodes": int(closed["episodes"]),
+                "eval_seed_start": int(closed["seed_start"]),
+                "paired_visual_seed_range": int(closed["seed_start"]) == eval_seed_start,
+            }
+        )
+    by_method = {row["method"]: row for row in rows}
+    learned_best = max(
+        by_method["deterministic_latent_hierarchy"]["success"],
+        by_method["generative_latent_hierarchy"]["success"],
+    )
+    flat_visual = by_method["visual_flat_flow"]["success"]
+    output_dir = ensure_dir(root / "phase11")
+    output_path = output_dir / "complete_hierarchy_comparison.json"
+    plot_path = output_dir / "complete_hierarchy_comparison.png"
+    payload = {
+        "phase": 11,
+        "method": "complete_hierarchy_comparison",
+        "episodes": episodes,
+        "policy_seed": seed,
+        "paired_eval_seed_start": eval_seed_start,
+        "rows": rows,
+        "fairness": {
+            "visual_methods_paired": all(
+                row["paired_visual_seed_range"]
+                for row in rows
+                if row["method"]
+                in {
+                    "visual_bc",
+                    "visual_flat_flow",
+                    "flat_latent",
+                    "oracle_latent_hierarchy",
+                    "deterministic_latent_hierarchy",
+                    "generative_latent_hierarchy",
+                }
+            ),
+            "privileged_reference_seed_caveat": (
+                "privileged_bc and privileged_flow retain their original seed-10000 evaluations"
+            ),
+        },
+        "gate": {
+            "best_learned_hierarchy_success": learned_best,
+            "visual_flat_flow_success": flat_visual,
+            "higher_success_than_flat_flow": learned_best > flat_visual,
+            "oracle_advantage_over_flat_flow": (
+                by_method["oracle_latent_hierarchy"]["success"] > flat_visual
+            ),
+            "passed": learned_best > flat_visual,
+        },
+        "plot": str(plot_path),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+
+    import matplotlib.pyplot as plt
+
+    labels = [row["method"].replace("_", " ") for row in rows]
+    success = [row["success"] for row in rows]
+    stderr = [row["success_stderr"] for row in rows]
+    final_reward = [row["final_reward"] for row in rows]
+    max_reward = [row["max_reward"] for row in rows]
+    colors = ["#6b7280" if row["method"].startswith("privileged") else "#2563eb" for row in rows]
+    for index, row in enumerate(rows):
+        if "hierarchy" in row["method"]:
+            colors[index] = "#d97706" if "oracle" not in row["method"] else "#059669"
+    figure, axes = plt.subplots(1, 2, figsize=(15, 6))
+    x = np.arange(len(rows))
+    axes[0].bar(x, success, yerr=stderr, capsize=3, color=colors)
+    axes[0].set_ylabel("Success rate")
+    axes[0].set_ylim(0.0, 1.0)
+    axes[0].set_title("Push-T success (100 fixed episodes)")
+    width = 0.38
+    axes[1].bar(x - width / 2, final_reward, width, label="Final reward", color="#2563eb")
+    axes[1].bar(x + width / 2, max_reward, width, label="Maximum reward", color="#d97706")
+    axes[1].set_ylabel("Normalized reward")
+    axes[1].set_ylim(0.0, 1.0)
+    axes[1].set_title("Reward comparison")
+    axes[1].legend()
+    for axis in axes:
+        axis.set_xticks(x)
+        axis.set_xticklabels(labels, rotation=35, ha="right")
+        axis.grid(axis="y", alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+    console.print(payload)
     return output_path
 
 

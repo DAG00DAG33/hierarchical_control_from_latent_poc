@@ -42,6 +42,7 @@ from hcl_poc.incremental import (
     probe_phase8_predicted_latents,
     run_phase0,
     run_phase7_branch_audit,
+    run_phase11_comparison,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -742,6 +743,13 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             interpolation_alpha=args.interpolation_alpha,
             force=args.force,
         )
+    elif args.incremental_command == "phase11-eval":
+        run_phase11_comparison(
+            config,
+            seed=args.seed,
+            episodes=args.episodes,
+            eval_seed_start=args.eval_seed_start,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1163,6 +1171,12 @@ def build_parser() -> argparse.ArgumentParser:
             phase10.add_argument("--episodes", type=int)
         phase10.add_argument("--force", action="store_true")
         phase10.set_defaults(func=incremental_cmd)
+    phase11 = incremental_sub.add_parser("phase11-eval")
+    add_config_arg(phase11)
+    phase11.add_argument("--seed", type=int, default=0)
+    phase11.add_argument("--episodes", type=int, default=100)
+    phase11.add_argument("--eval-seed-start", type=int, default=1_200_000)
+    phase11.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

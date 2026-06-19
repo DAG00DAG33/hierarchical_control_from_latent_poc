@@ -1706,3 +1706,49 @@ The unregularized flow successfully memorizes one and ten trajectories:
   flow at `0.42` (`58.3%` of oracle). Proceed to Phase 11 with the unadapted
   deterministic and flow hierarchies as the selected learned-high-level
   methods and report robustness training as a negative ablation.
+
+### 2026-06-19 - P11-D01: Complete matched hierarchy comparison
+
+- **Fair evaluation correction:** Re-evaluated visual deterministic BC and
+  visual flat flow on the hierarchy's fixed 100 seeds beginning at `1200000`.
+  New seed-specific result files preserve the older seed-10000 evaluations.
+  All non-privileged visual rows below now use the paired range. Privileged BC
+  and privileged flow remain system-level references on seed 10000 and are
+  explicitly marked as unpaired.
+- **Data:** Visual BC, visual flat flow, and learned high-level models use the
+  same 1,800/200 successful causal visual teacher split. The oracle hierarchy
+  additionally uses separately reported coherent state queries for low-level
+  DAgger; these are not counted as causal trajectories.
+
+| method | access / role | success | stderr | final reward | max reward |
+| --- | --- | ---: | ---: | ---: | ---: |
+| privileged deterministic BC | privileged reference, unpaired seeds | `0.09` | `0.029` | `0.291` | `0.312` |
+| privileged one-step flow | privileged reference, unpaired seeds | `0.79` | `0.041` | `0.855` | `0.855` |
+| visual deterministic BC | direct visual baseline | `0.60` | `0.049` | `0.582` | `0.707` |
+| visual flat flow | direct visual baseline | `0.58` | `0.049` | `0.568` | `0.706` |
+| matched flat AE-256 latent | latent baseline | `0.47` | `0.050` | `0.588` | `0.611` |
+| oracle latent hierarchy | local teacher branch | `0.73` | `0.044` | `0.811` | `0.813` |
+| predicted structured hierarchy | privileged high/low diagnostic | `0.54` | `0.050` | `0.681` | `0.685` |
+| deterministic latent hierarchy | learned high level | `0.46` | `0.050` | `0.440` | `0.590` |
+| generative latent hierarchy | zero-noise flow high level | `0.42` | `0.049` | `0.389` | `0.567` |
+
+- **Interpretation:** The local future-state interface is useful: the oracle
+  hierarchy beats paired visual flat flow by 15 percentage points. That
+  advantage disappears when the future latent must be predicted. The best
+  deployable learned hierarchy is 12 points below flat flow and 14 below visual
+  deterministic BC. The privileged structured result confirms that future
+  prediction can work when the goal representation is compact and physically
+  aligned.
+- **Failure attribution:** Exact replay and local-goal intervention tests rule
+  out branch-copy and low-level interface correctness as the primary selected-
+  method failure. The dominant categories are wrong/ambiguous high-level
+  latent subgoal followed by compounding low-level error and timeout. Random
+  flow sampling additionally exhibits sampler/off-manifold failure. This is an
+  aggregate evidence-based attribution; per-episode labels were not recorded
+  for legacy baseline rollouts and are not fabricated.
+- **Phase 11 gate:** Fail. The learned hierarchy has no success, recovery,
+  robustness, or horizon advantage over the paired flat visual methods. The
+  oracle hierarchy provides a positive interface result, but it is not a
+  deployable learned high level.
+- **Artifact:** `results/incremental/phase11/complete_hierarchy_comparison.png`
+  plots success with binomial error bars and final/maximum reward.
