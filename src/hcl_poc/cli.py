@@ -31,8 +31,10 @@ from hcl_poc.incremental import (
     evaluate_phase7_privileged_branch_baselines,
     evaluate_phase7_replay_branch_oracle_low_level,
     evaluate_phase7_valid_goal_use,
+    evaluate_phase8_deterministic_hierarchy,
     probe_phase6_representation,
     probe_phase4_visual_history,
+    prepare_phase8_latent_episodes,
     run_phase0,
     run_phase7_branch_audit,
     train_phase1_bc,
@@ -48,6 +50,9 @@ from hcl_poc.incremental import (
     train_phase7_oracle_dagger_low_level,
     train_phase7_privileged_branch_baselines,
     train_phase7_residual_low_level,
+    train_phase8_deterministic_predictor,
+    train_phase8_dagger_predictor,
+    sweep_phase8_deterministic_predictors,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -560,6 +565,56 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             goal_mode=args.goal_mode,
             force=args.force,
         )
+    elif args.incremental_command == "phase8-prepare":
+        prepare_phase8_latent_episodes(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase8-train":
+        train_phase8_deterministic_predictor(
+            config,
+            history=args.history,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase8-dagger-train":
+        train_phase8_dagger_predictor(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            query_episodes=args.query_episodes,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase8-sweep":
+        sweep_phase8_deterministic_predictors(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            histories=args.histories,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase8-eval":
+        evaluate_phase8_deterministic_hierarchy(
+            config,
+            history=args.history,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            episodes=args.episodes,
+            high_dagger_query_episodes=args.high_dagger_query_episodes,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -834,6 +889,52 @@ def build_parser() -> argparse.ArgumentParser:
                 default="all",
             )
         phase7_dagger.set_defaults(func=incremental_cmd)
+
+    phase8_prepare = incremental_sub.add_parser("phase8-prepare")
+    add_config_arg(phase8_prepare)
+    phase8_prepare.add_argument("--latent-dim", type=int)
+    phase8_prepare.add_argument("--variant", default=None)
+    phase8_prepare.add_argument("--seed", type=int, default=0)
+    phase8_prepare.add_argument("--force", action="store_true")
+    phase8_prepare.set_defaults(func=incremental_cmd)
+    phase8_train = incremental_sub.add_parser("phase8-train")
+    add_config_arg(phase8_train)
+    phase8_train.add_argument("--history", type=int, required=True)
+    phase8_train.add_argument("--latent-dim", type=int)
+    phase8_train.add_argument("--variant", default=None)
+    phase8_train.add_argument("--horizon-steps", type=int)
+    phase8_train.add_argument("--seed", type=int, default=0)
+    phase8_train.add_argument("--force", action="store_true")
+    phase8_train.set_defaults(func=incremental_cmd)
+    phase8_dagger = incremental_sub.add_parser("phase8-dagger-train")
+    add_config_arg(phase8_dagger)
+    phase8_dagger.add_argument("--latent-dim", type=int)
+    phase8_dagger.add_argument("--variant", default=None)
+    phase8_dagger.add_argument("--horizon-steps", type=int)
+    phase8_dagger.add_argument("--query-episodes", type=int, default=10)
+    phase8_dagger.add_argument("--seed", type=int, default=0)
+    phase8_dagger.add_argument("--force", action="store_true")
+    phase8_dagger.set_defaults(func=incremental_cmd)
+    phase8_sweep = incremental_sub.add_parser("phase8-sweep")
+    add_config_arg(phase8_sweep)
+    phase8_sweep.add_argument("--latent-dim", type=int)
+    phase8_sweep.add_argument("--variant", default=None)
+    phase8_sweep.add_argument("--horizon-steps", type=int)
+    phase8_sweep.add_argument("--histories", type=int, nargs="+")
+    phase8_sweep.add_argument("--seed", type=int, default=0)
+    phase8_sweep.add_argument("--force", action="store_true")
+    phase8_sweep.set_defaults(func=incremental_cmd)
+    phase8_eval = incremental_sub.add_parser("phase8-eval")
+    add_config_arg(phase8_eval)
+    phase8_eval.add_argument("--history", type=int, required=True)
+    phase8_eval.add_argument("--latent-dim", type=int)
+    phase8_eval.add_argument("--variant", default=None)
+    phase8_eval.add_argument("--horizon-steps", type=int)
+    phase8_eval.add_argument("--seed", type=int, default=0)
+    phase8_eval.add_argument("--episodes", type=int)
+    phase8_eval.add_argument("--high-dagger-query-episodes", type=int)
+    phase8_eval.add_argument("--force", action="store_true")
+    phase8_eval.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

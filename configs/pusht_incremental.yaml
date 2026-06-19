@@ -213,3 +213,23 @@ incremental:
     privileged_epochs: 100
     privileged_lr: 0.0003
     privileged_eval_episodes: 50
+  phase8:
+    latent_dim: 256
+    variant: ae_recon
+    horizon_steps: 2
+    histories: [1, 2, 4, 8]
+    hidden_dim: 1024
+    batch_size: 512
+    batches_per_epoch: 300
+    epochs: 60
+    lr: 0.0003
+    validation_samples: 10000
+    nearest_neighbor_predictions: 1000
+    nearest_neighbor_references: 10000
+    dagger_epochs: 30
+    dagger_batches_per_epoch: 100
+    dagger_batch_size: 512
+    dagger_lr: 0.0001
+    eval_episodes: 100
+    eval_num_envs: 64
+    eval_seed: 1200000

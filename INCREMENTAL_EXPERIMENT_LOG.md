@@ -1333,3 +1333,45 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   while the previous nominal-trajectory evaluation was invalid after learner
   deviation. Proceed to Phase 8 deterministic high-level prediction with
   `ae_recon_z256`, `k=2`, `H=1`, and delta-goal low-level conditioning.
+
+### 2026-06-19 - P8-D01: Deterministic future-latent baseline
+
+- **Implementation:** Added `phase8-prepare`, `phase8-train`, `phase8-sweep`,
+  and `phase8-eval`. The high level consumes a history of normalized
+  `[z_t,a_{t-1}]` rows, receives no future actions, and directly regresses
+  `z_{t+2}` from causal successful teacher trajectories.
+- **Data:** Cached all `ae_recon_z256` latents from the existing 1,800/200
+  causal teacher split. The prepared visual dataset does not contain aligned
+  privileged T-block state, so the Phase 8.1 structured-state experiment
+  requires a new aligned collection and was not fabricated from unavailable
+  labels.
+- **Offline history sweep:** All models use 60 epochs and 10,000 held-out
+  future-state samples.
+
+| history `L` | latent L2 | persistence L2 | improvement | predicted-goal action MAE | oracle-goal MAE | ratio |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | `13.946` | `25.251` | `44.8%` | `0.0389` | `0.0268` | `1.45` |
+| `2` | `13.847` | `25.251` | `45.2%` | `0.0381` | `0.0268` | `1.42` |
+| `4` | `13.900` | `25.251` | `45.0%` | `0.0390` | `0.0268` | `1.46` |
+| `8` | `14.033` | `25.251` | `44.4%` | `0.0393` | `0.0268` | `1.47` |
+
+- **Manifold diagnostic:** Predicted latents have nearest-reference distance
+  around `7.7-7.9`, versus `9.4-9.6` for held-out real targets against the same
+  10,000-sample reference subset. This rules out gross off-manifold drift but
+  may also indicate MSE regression toward dense latent regions.
+- **100-episode closed loop:** `L={1,2,4,8}` success is respectively
+  `0.46`, `0.42`, `0.40`, and `0.32`. The best result reaches only `63.0%` of
+  the `0.73` oracle hierarchy, below the `70%` Phase 8 gate (`0.511`). Rollout
+  teacher-action MAE rises to `0.125-0.135`, far above teacher-state offline
+  estimates.
+- **Old-query fine-tuning:** Balanced fine-tuning of `L=1` on 496 coherent
+  Phase 7 learner/branch pairs reduces action MAE on that dataset to `0.0229`
+  but worsens 100-episode success to `0.40`. Those states were visited under
+  oracle goals and do not match the learned-high-level failure distribution.
+- **Calibration rejected:** On held-out teacher states, the raw unscaled goal
+  has action MAE `0.0389`. AE decoder/encoder projection gives `0.0395`; delta
+  scales `0.5,0.75,1.25,1.5,2.0` are all worse (`0.0488-0.1051` at the best
+  non-unit scale).
+- **Gate status:** Phase 8 does not yet pass. The next experiment is coherent
+  high-level DAgger collected under the learned hierarchy, with local branch
+  targets generated from each actual learner state.
