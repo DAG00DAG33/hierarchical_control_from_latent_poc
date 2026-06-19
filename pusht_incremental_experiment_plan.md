@@ -38,10 +38,13 @@ All policies should be evaluated with:
 - identical reset seed list;
 - identical maximum episode length;
 - deterministic evaluation unless stochasticity is explicitly being tested;
-- at least 500 evaluation episodes for final results;
-- at least 3 training seeds for final comparisons.
+- 100 fixed-seed evaluation episodes for final results;
+- one training seed for final comparisons.
 
-For fast debugging, 50-100 episodes are acceptable, but they should not be used for final claims.
+For fast debugging, 10-50 episodes are acceptable. Final claims must report
+binomial uncertainty and state explicitly that training-seed variance was not
+measured. This reduced protocol is a deliberate runtime tradeoff approved after
+exact replay evaluations took roughly 15-16 minutes per 100 episodes.
 
 ### 2.2 Track the same KPIs in every phase
 
@@ -1976,9 +1979,15 @@ Development:
 
 Final Phase 7 gate:
 
-- 500 episodes;
-- at least 3 policy seeds for the final selected method;
+- 100 episodes on one policy seed for the final selected method;
 - fixed evaluation seeds.
+
+The originally proposed 500-episode, three-policy-seed exact-oracle evaluation
+is intentionally skipped. Exact replay branch generation takes about 15-16
+minutes per 100 episodes for one controller on the available GPU, while the
+oracle is only an interface diagnostic and will not be part of the deployable
+hierarchy. The final Phase 7 claim must therefore report binomial uncertainty
+from the 100 fixed episodes and must not claim multi-seed robustness.
 
 ### Primary KPIs
 
@@ -2638,7 +2647,7 @@ Only start this phase after:
 | 9 | Generative high level | At least matches deterministic hierarchy |
 | 10 | Robust low level | Generated-goal success at least 80% of oracle-goal success |
 | 11 | Complete hierarchy | Clear advantage in success, robustness, or sample efficiency |
-| 12 | Final scaling | Three seeds, nested data subsets, 500 episodes per seed |
+| 12 | Final scaling | One seed, nested data subsets, 100 fixed episodes |
 
 ---
 

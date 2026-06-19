@@ -114,16 +114,16 @@ for H in 0.05 0.10 0.25; do
 done
 ```
 
-Evaluate each policy over 500 episodes:
+Evaluate each policy over 100 fixed-seed episodes:
 
 ```bash
 uv run hcl-poc eval flat \
-  --config "$CONFIG" --n-traj "$N" --seed "$SEED" --episodes 500
+  --config "$CONFIG" --n-traj "$N" --seed "$SEED" --episodes 100
 
 for H in 0.05 0.10 0.25; do
   uv run hcl-poc eval hier \
     --config "$CONFIG" --n-traj "$N" --seed "$SEED" \
-    --horizon-s "$H" --episodes 500
+    --horizon-s "$H" --episodes 100
 done
 
 uv run hcl-poc report --config "$CONFIG"

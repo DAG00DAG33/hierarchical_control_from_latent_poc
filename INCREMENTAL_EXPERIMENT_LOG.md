@@ -27,14 +27,14 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 7: oracle future-latent low-level policy |
-| Gate | Oracle future-latent low-level should match flat visual flow and degrade under corrupted goals |
-| Gate state | Phases 0-6 passed; Phase 7 oracle low-level fails closed-loop success |
-| Current blocker | Absolute future-latent conditioning is goal-sensitive but brittle in closed loop |
+| Active phase | Phase 8: deterministic high-level future-latent prediction |
+| Gate | Learned high-level hierarchy should reach at least 70% of oracle-hierarchy success |
+| Gate state | Phases 0-7 passed; Phase 8 not yet run |
+| Current blocker | No learned high-level predictor has been trained under the corrected local-oracle protocol |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
 | Canonical controller | `pd_ee_delta_pos`, 20 Hz |
-| Canonical final evaluation | 500 episodes, fixed reset seeds |
+| Canonical final evaluation | 100 episodes, one policy seed, fixed reset seeds |
 | Development gate evaluation | 100 episodes unless a cheaper diagnostic is sufficient |
 
 ## Prior Evidence
@@ -1286,3 +1286,50 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Next action:** Run the 100-episode Phase 7I gate for selected methods and
   assemble the matched Phase 7 table. Do not spend 100 exact-branch episodes on
   clearly rejected ablations.
+
+### 2026-06-19 - P7-D17: Final Phase 7 gate
+
+- **Runtime decision:** Exact replay branch evaluation took `16.2 min` for the
+  selected 100-episode latent run and `14.6 min` for the 100-episode privileged
+  run. At the user's direction, the project-wide final protocol is reduced from
+  500 episodes and three policy seeds to 100 fixed episodes and one policy seed.
+  Final results must report uncertainty and cannot claim training-seed
+  robustness.
+- **Final-budget methods:** Matched flat latent, privileged flat/branch, and the
+  selected coherent branch-DAgger latent controller use the same 100 reset seeds
+  starting at `1200000`. Rejected ablations retain smaller development budgets.
+
+| method | oracle | episodes | success | stderr | final reward | max reward | teacher MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| privileged flat | none | `100` | `0.25` | `0.043` | `0.429` | `0.451` | `0.1665` |
+| privileged structured goal | local branch | `100` | `0.55` | `0.050` | `0.688` | `0.692` | `0.0516` |
+| matched flat latent | none | `100` | `0.47` | `0.050` | `0.588` | `0.611` | n/a |
+| absolute latent goal | local branch | `10` | `0.60` | `0.155` | `0.733` | `0.734` | `0.0268` |
+| delta latent goal | local branch | `50` | `0.72` | `0.063` | `0.809` | `0.810` | `0.0337` |
+| residual latent goal | local branch | `10` | `0.30` | `0.145` | `0.468` | `0.494` | `0.1337` |
+| coherent DAgger delta | local branch | `100` | `0.73` | `0.044` | `0.811` | `0.813` | `0.0379` |
+| delta latent goal | nominal trajectory | `100` | `0.38` | `0.049` | `0.388` | `0.522` | n/a |
+| direct visual flow reference | none | `100` | `0.66` | `0.047` | `0.631` | `0.758` | n/a |
+
+- **Seed caveat:** The nominal-goal and direct visual-flow rows use the older
+  Phase 5/7 seed range beginning at `10000`; they are system-level references,
+  not paired tests against the `1200000` branch-oracle rows. The formal latent
+  interface comparison is the paired `0.73` branch result versus `0.47` matched
+  flat latent result.
+- **Gate 1, branch correctness:** Pass. Replay state max error and failed replay
+  fraction are both `0.0` in all final branch runs.
+- **Gate 2, privileged interface:** Pass. Privileged branch success `0.55` is
+  30 percentage points above privileged flat `0.25`.
+- **Gate 3, latent interface:** Pass. Best latent branch success `0.73` is 26
+  percentage points above matched flat latent `0.47`.
+- **Gate 4, meaningful goal use:** Pass. On 45 valid counterfactual rollouts,
+  latent error decreases in `95.6%`, TCP error decreases in `100%`, and the
+  assigned physical goal is closest in `91.1%`.
+- **Gate 5, oracle definition:** Pass. Primary results use a local teacher
+  branch reconstructed from the current learner state. The old nominal goal is
+  reported only as a hard tracking diagnostic.
+- **Phase decision:** Phase 7 passes. The corrected local branch oracle changes
+  the conclusion: future-latent conditioning is a viable low-level interface,
+  while the previous nominal-trajectory evaluation was invalid after learner
+  deviation. Proceed to Phase 8 deterministic high-level prediction with
+  `ae_recon_z256`, `k=2`, `H=1`, and delta-goal low-level conditioning.
