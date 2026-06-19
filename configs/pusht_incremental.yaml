@@ -170,3 +170,17 @@ incremental:
     eval_episodes: 100
     eval_seed: 10000
     eval_num_envs: 64
+  phase7:
+    latent_dim: 256
+    variant: ae_recon
+    horizon_steps: 2
+    action_chunk_steps: 1
+    hidden_dim: 1024
+    batch_size: 512
+    batches_per_epoch: 300
+    epochs: 80
+    lr: 0.0003
+    validation_queries: 10000
+    eval_episodes: 100
+    eval_seed: 10000
+    eval_num_envs: 64

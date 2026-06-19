@@ -5168,3 +5168,564 @@ def evaluate_phase6_latent_dagger_bc(
     write_json(output_path, payload)
     console.print(payload)
     return output_path
+
+
+def _phase7_defaults(
+    config: Config,
+    latent_dim: int | None,
+    variant: str | None,
+    horizon_steps: int | None,
+    action_chunk_steps: int | None,
+) -> tuple[int, str, int, int]:
+    return (
+        int(latent_dim or config.get("incremental.phase7.latent_dim", 256)),
+        str(variant or config.get("incremental.phase7.variant", "ae_recon")),
+        int(horizon_steps or config.get("incremental.phase7.horizon_steps", 10)),
+        int(action_chunk_steps or config.get("incremental.phase7.action_chunk_steps", 1)),
+    )
+
+
+def _phase7_tag(variant: str, latent_dim: int, horizon_steps: int, action_chunk_steps: int) -> str:
+    return f"{variant}_z{latent_dim}_k{horizon_steps}_h{action_chunk_steps}"
+
+
+class _Phase7OracleDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        conditions: np.ndarray,
+        actions: np.ndarray,
+        length: int,
+    ) -> None:
+        if len(conditions) == 0:
+            raise ValueError("Phase 7 oracle dataset is empty")
+        self.conditions = conditions.astype(np.float32)
+        self.actions = actions.astype(np.float32)
+        self.length = length
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        i = int(np.random.randint(0, len(self.conditions)))
+        return torch.from_numpy(self.conditions[i]), torch.from_numpy(self.actions[i])
+
+
+def _phase7_encode_oracle_episodes(
+    encoder: ObservationEncoder,
+    frame_norm: Standardizer,
+    action_norm: Standardizer,
+    episodes: list[dict[str, np.ndarray]],
+    horizon_steps: int,
+    action_chunk_steps: int,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    if action_chunk_steps != 1:
+        raise NotImplementedError("Phase 7 currently implements H=1 low-level actions")
+    conditions = []
+    actions = []
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, episodes[0]["actions"].shape[-1]), dtype=np.float32)
+    )[0]
+    with torch.inference_mode():
+        for episode in episodes:
+            if len(episode["actions"]) <= horizon_steps:
+                continue
+            frames_norm = frame_norm.transform(episode["frames"])
+            chunks = []
+            for start in range(0, len(frames_norm), 4096):
+                chunks.append(
+                    encoder(torch.from_numpy(frames_norm[start : start + 4096]).to(device).float())
+                    .cpu()
+                    .numpy()
+                )
+            z = np.concatenate(chunks, axis=0).astype(np.float32)
+            prev_actions = action_norm.transform(episode["actions"]).astype(np.float32)
+            for t in range(len(episode["actions"]) - horizon_steps):
+                prev_action = prev_actions[t - 1] if t > 0 else zero_action_norm
+                conditions.append(np.concatenate([z[t], z[t + horizon_steps], prev_action], axis=0))
+                actions.append(episode["actions"][t])
+    if not conditions:
+        raise ValueError(f"No Phase 7 samples for horizon {horizon_steps}")
+    return np.stack(conditions).astype(np.float32), np.stack(actions).astype(np.float32)
+
+
+def _phase7_oracle_action_metrics(
+    model: nn.Module,
+    conditions: np.ndarray,
+    actions: np.ndarray,
+    action_norm: Standardizer,
+    latent_dim: int,
+    max_queries: int,
+    seed: int,
+) -> dict[str, Any]:
+    rng = np.random.default_rng(seed)
+    indices = np.arange(len(conditions))
+    if len(indices) > max_queries:
+        indices = rng.choice(indices, size=max_queries, replace=False)
+    x = conditions[indices].copy()
+    y = actions[indices]
+    shuffled = x.copy()
+    shuffled_goal_order = rng.permutation(len(shuffled))
+    shuffled[:, latent_dim : 2 * latent_dim] = shuffled[shuffled_goal_order, latent_dim : 2 * latent_dim]
+    zero_goal = x.copy()
+    zero_goal[:, latent_dim : 2 * latent_dim] = 0.0
+    device = next(model.parameters()).device
+
+    def predict(raw_conditions: np.ndarray) -> np.ndarray:
+        preds = []
+        with torch.inference_mode():
+            for start in range(0, len(raw_conditions), 4096):
+                pred_norm = model(torch.from_numpy(raw_conditions[start : start + 4096]).to(device).float())
+                preds.append(action_norm.inverse(pred_norm.cpu().numpy()))
+        return np.concatenate(preds).astype(np.float32)
+
+    correct_pred = predict(x)
+    shuffled_pred = predict(shuffled)
+    zero_pred = predict(zero_goal)
+    correct = _action_regression_metrics(correct_pred, y)
+    shuffled_metrics = _action_regression_metrics(shuffled_pred, y)
+    zero_metrics = _action_regression_metrics(zero_pred, y)
+    return {
+        "correct_goal": correct,
+        "shuffled_goal": shuffled_metrics,
+        "zero_goal": zero_metrics,
+        "goal_sensitivity_l2": float(np.mean(np.linalg.norm(correct_pred - shuffled_pred, axis=-1))),
+        "mae_gap_shuffled_minus_correct": float(shuffled_metrics["mae"] - correct["mae"]),
+        "mae_gap_zero_minus_correct": float(zero_metrics["mae"] - correct["mae"]),
+        "queries": int(len(indices)),
+    }
+
+
+def train_phase7_oracle_low_level(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
+        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    )
+    if action_chunk_steps >= horizon_steps:
+        raise ValueError(f"Phase 7 requires H < k, got H={action_chunk_steps}, k={horizon_steps}")
+    tag = _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir") / "phase7" / tag / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "oracle_low_level.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 7 oracle low-level policy exists: {checkpoint_path}")
+        return checkpoint_path
+    encoder_path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(encoder_checkpoint["action_norm"])
+    train_episodes, val_episodes, data_metadata = _load_phase6_train_episodes(config)
+    train_cond, train_actions = _phase7_encode_oracle_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        train_episodes,
+        horizon_steps,
+        action_chunk_steps,
+        device,
+    )
+    val_cond, val_actions = _phase7_encode_oracle_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        val_episodes,
+        horizon_steps,
+        action_chunk_steps,
+        device,
+    )
+    train_dataset = _Phase7OracleDataset(
+        train_cond,
+        action_norm.transform(train_actions).astype(np.float32),
+        length=int(config.get("incremental.phase7.batch_size", 512))
+        * int(config.get("incremental.phase7.batches_per_epoch", 300)),
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase7.batch_size", 512)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    model = MLP(
+        train_cond.shape[-1],
+        train_actions.shape[-1],
+        int(config.get("incremental.phase7.hidden_dim", 1024)),
+        depth=4,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase7.lr", 3e-4)),
+    )
+    x_val = torch.from_numpy(val_cond).to(device).float()
+    y_val = torch.from_numpy(action_norm.transform(val_actions)).to(device).float()
+    epochs = int(config.get("incremental.phase7.epochs", 80))
+    best_state = None
+    best_val = float("inf")
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc=f"train phase7 oracle {tag}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            val_mse = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+        history.append({"epoch": epoch, "train_mse": loss_sum / count, "validation_mse": val_mse})
+        if val_mse < best_val:
+            best_val = val_mse
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 7 oracle low-level training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    validation_metrics = _phase7_oracle_action_metrics(
+        model,
+        val_cond,
+        val_actions,
+        action_norm,
+        latent_dim,
+        int(config.get("incremental.phase7.validation_queries", 10000)),
+        seed + horizon_steps,
+    )
+    payload = {
+        "model": model.state_dict(),
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "action_chunk_steps": action_chunk_steps,
+        "cond_dim": train_cond.shape[-1],
+        "hidden_dim": int(config.get("incremental.phase7.hidden_dim", 1024)),
+        "action_dim": train_actions.shape[-1],
+        "encoder_checkpoint": str(encoder_path),
+        "action_norm": action_norm.state_dict(),
+        "validation_metrics": validation_metrics,
+        "best_validation_mse": best_val,
+        "history": history,
+        "data": {
+            **data_metadata,
+            "phase7_train_samples": int(len(train_cond)),
+            "phase7_validation_samples": int(len(val_cond)),
+        },
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "oracle_low_level_metrics.json",
+        {
+            "variant": variant,
+            "latent_dim": latent_dim,
+            "horizon_steps": horizon_steps,
+            "action_chunk_steps": action_chunk_steps,
+            "validation_metrics": validation_metrics,
+            "best_validation_mse": best_val,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 7 oracle low-level policy: {checkpoint_path}")
+    return checkpoint_path
+
+
+@torch.inference_mode()
+def _phase7_collect_oracle_frames(
+    config: Config,
+    dino: DinoExtractor,
+    eval_episodes: int,
+    seed_start: int,
+) -> list[np.ndarray]:
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = min(int(config.get("incremental.phase7.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=seed_start)
+    oracle: list[list[np.ndarray] | None] = [[] for _ in range(eval_episodes)]
+    active_idx = np.arange(num_envs, dtype=np.int32)
+    next_idx = num_envs
+    completed = 0
+    while completed < eval_episodes:
+        frames = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        _rgb, state = _phase4_rgb_state(obs)
+        for env_idx, episode_idx in enumerate(active_idx):
+            if episode_idx < eval_episodes and oracle[episode_idx] is not None:
+                oracle[episode_idx].append(frames[env_idx].copy())
+        action = torch.clamp(
+            teacher.actor_mean(torch.from_numpy(state).to(device).float()),
+            action_low,
+            action_high,
+        )
+        obs, _reward, _terminated, _truncated, info = env.step(action)
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            for env_idx in np.flatnonzero(mask):
+                completed += 1
+                if next_idx < eval_episodes:
+                    active_idx[env_idx] = next_idx
+                    next_idx += 1
+                else:
+                    active_idx[env_idx] = eval_episodes
+                if completed >= eval_episodes:
+                    break
+    env.close()
+    out = []
+    for episode in oracle:
+        if episode is None or not episode:
+            raise RuntimeError("Oracle collection produced an empty episode")
+        out.append(np.stack(episode).astype(np.float32))
+    return out
+
+
+@torch.inference_mode()
+def _phase7_encode_oracle_frame_sequences(
+    encoder: ObservationEncoder,
+    frame_norm: Standardizer,
+    oracle_frames: list[np.ndarray],
+    device: torch.device,
+) -> list[np.ndarray]:
+    encoded = []
+    for frames in oracle_frames:
+        frame_rows = frame_norm.transform(frames)
+        chunks = []
+        for start in range(0, len(frame_rows), 4096):
+            chunks.append(
+                encoder(torch.from_numpy(frame_rows[start : start + 4096]).to(device).float())
+                .cpu()
+                .numpy()
+            )
+        encoded.append(np.concatenate(chunks, axis=0).astype(np.float32))
+    return encoded
+
+
+def _phase7_visual_flow_success(config: Config, seed: int) -> float:
+    import json
+
+    visual_flow_path = (
+        config.path_value("paths.incremental_results_dir")
+        / "phase5"
+        / "concat_h1"
+        / f"seed{seed}"
+        / "visual_flow.json"
+    )
+    with visual_flow_path.open("r", encoding="utf-8") as f:
+        return float(json.load(f)["closed_loop"]["success"])
+
+
+@torch.inference_mode()
+def _evaluate_phase7_goal_mode(
+    config: Config,
+    checkpoint: dict[str, Any],
+    encoder: ObservationEncoder,
+    frame_norm: Standardizer,
+    action_norm: Standardizer,
+    model: nn.Module,
+    dino: DinoExtractor,
+    oracle_latents: list[np.ndarray],
+    goal_mode: str,
+    seed_start: int,
+    eval_episodes: int,
+) -> dict[str, Any]:
+    device = default_device()
+    num_envs = min(int(config.get("incremental.phase7.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=seed_start)
+    action_dim = int(checkpoint["action_dim"])
+    latent_dim = int(checkpoint["latent_dim"])
+    horizon_steps = int(checkpoint["horizon_steps"])
+    zero_action_norm = action_norm.transform(np.zeros((1, action_dim), dtype=np.float32))[0]
+    prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
+    active_idx = np.arange(num_envs, dtype=np.int32)
+    active_t = np.zeros(num_envs, dtype=np.int32)
+    next_idx = num_envs
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    latencies: list[float] = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    goal_distances = []
+    while len(successes) < eval_episodes:
+        timer = Timer()
+        frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        z = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy().astype(np.float32)
+        goals = np.zeros((num_envs, latent_dim), dtype=np.float32)
+        for env_idx in range(num_envs):
+            episode_idx = int(active_idx[env_idx])
+            t = int(active_t[env_idx])
+            if goal_mode == "zero" or episode_idx >= eval_episodes:
+                continue
+            source_idx = episode_idx
+            if goal_mode == "shuffled":
+                source_idx = (episode_idx + max(1, eval_episodes // 2)) % eval_episodes
+            elif goal_mode != "correct":
+                raise ValueError(f"Unknown Phase 7 goal mode: {goal_mode}")
+            source = oracle_latents[source_idx]
+            goals[env_idx] = source[min(t + horizon_steps, len(source) - 1)]
+        cond = np.concatenate([z, goals, prev_action_norm], axis=-1).astype(np.float32)
+        pred_norm = model(torch.from_numpy(cond).to(device).float())
+        raw_action = action_norm.inverse(pred_norm.cpu().numpy())
+        latencies.append(timer.elapsed() / num_envs)
+        goal_distances.extend(np.linalg.norm(z - goals, axis=-1).tolist())
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        prev_action_norm = action_norm.transform(action.cpu().numpy().astype(np.float32))
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        active_t += 1
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    active_t[env_idx] = 0
+                    prev_action_norm[env_idx] = zero_action_norm
+                    if next_idx < eval_episodes:
+                        active_idx[env_idx] = next_idx
+                        next_idx += 1
+                    else:
+                        active_idx[env_idx] = eval_episodes
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    return {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "inference_latency_s": float(np.mean(latencies)),
+        "latent_current_to_goal_l2": float(np.mean(goal_distances)),
+        "episodes": eval_episodes,
+        "seed_start": seed_start,
+        "num_envs": num_envs,
+    }
+
+
+def evaluate_phase7_oracle_low_level(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    goal_mode: str = "all",
+    force: bool = False,
+) -> Path:
+    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
+        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    )
+    checkpoint_path = train_phase7_oracle_low_level(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        action_chunk_steps=action_chunk_steps,
+        seed=seed,
+        force=force,
+    )
+    device = default_device()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    model = MLP(
+        int(checkpoint["cond_dim"]),
+        int(checkpoint["action_dim"]),
+        int(checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    dino = _phase4_dino_from_config(config, device)
+    eval_episodes = int(episodes or config.get("incremental.phase7.eval_episodes", 100))
+    seed_start = int(config.get("incremental.phase7.eval_seed", 10000))
+    oracle_frames = _phase7_collect_oracle_frames(config, dino, eval_episodes, seed_start)
+    oracle_latents = _phase7_encode_oracle_frame_sequences(encoder, frame_norm, oracle_frames, device)
+    modes = ["correct", "shuffled", "zero"] if goal_mode == "all" else [goal_mode]
+    closed_loop = {
+        mode: _evaluate_phase7_goal_mode(
+            config,
+            checkpoint,
+            encoder,
+            frame_norm,
+            action_norm,
+            model,
+            dino,
+            oracle_latents,
+            mode,
+            seed_start,
+            eval_episodes,
+        )
+        for mode in modes
+    }
+    correct_success = closed_loop["correct"]["success"] if "correct" in closed_loop else None
+    visual_success = _phase7_visual_flow_success(config, seed)
+    tag = _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir") / "phase7" / tag / f"seed{seed}"
+    )
+    output_path = results_dir / f"oracle_low_level_{goal_mode}.json"
+    payload = {
+        "phase": 7,
+        "method": "oracle_future_latent_low_level",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "action_chunk_steps": action_chunk_steps,
+        "seed": seed,
+        "goal_mode": goal_mode,
+        "closed_loop": closed_loop,
+        "validation_action_metrics": checkpoint["validation_metrics"],
+        "direct_visual_flow_success": visual_success,
+        "oracle_gate_visual_flow": (
+            bool(correct_success >= visual_success) if correct_success is not None else None
+        ),
+        "oracle_gate_90pct_visual_flow": (
+            bool(correct_success >= 0.9 * visual_success) if correct_success is not None else None
+        ),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path

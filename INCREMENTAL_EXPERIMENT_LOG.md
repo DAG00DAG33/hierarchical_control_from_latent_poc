@@ -27,10 +27,10 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 6: latent representation capacity and objective study |
-| Gate | Encoder should preserve task-relevant state and support flat latent control before Phase 7 |
-| Gate state | Phases 0-5 passed; Phase 6 reopened for smaller-latent and WM-objective ablations |
-| Current blocker | None |
+| Active phase | Phase 7: oracle future-latent low-level policy |
+| Gate | Oracle future-latent low-level should match flat visual flow and degrade under corrupted goals |
+| Gate state | Phases 0-6 passed; Phase 7 initial offline oracle low-level fails closed-loop success |
+| Current blocker | Offline oracle-goal low-level is goal-sensitive but suffers closed-loop distribution shift |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
 | Canonical controller | `pd_ee_delta_pos`, 20 Hz |
@@ -681,3 +681,61 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Decision:** Do not move to Phase 7 with a WM-trained encoder. Continue
   with reconstruction-only `ae_recon_z256` unless a later Phase 6 diagnostic
   finds a concrete reason to revisit the WM objective.
+
+### 2026-06-19 - P7-I01: Oracle future-latent low-level implementation
+
+- **Goal:** Validate the future-latent interface before training a high-level
+  predictor.
+- **Implemented commands:**
+  - `incremental phase7-train`;
+  - `incremental phase7-eval`.
+- **Current implementation scope:** deterministic one-step low-level policy
+  with `H=1`, conditioned on current latent, oracle future latent, and previous
+  action. This satisfies `H < k` for all tested `k > 1`.
+- **Training dataset:** Successful PPO `causal_dataset`, same 1,800/200
+  train/validation episode split as Phases 4-6. The action target and future
+  latent goal are from the same teacher-executed trajectory.
+- **Evaluation oracle:** For each evaluation reset seed, precompute a
+  deterministic teacher visual trajectory and encode its future observations
+  as oracle goals. During student rollout, the current latent comes from the
+  student's actual observation; the future goal comes from the teacher oracle
+  trajectory for the same initial seed.
+- **Goal corruption tests:** Evaluate correct future goals, shuffled future
+  goals from another episode, and zero goals.
+
+### 2026-06-19 - P7-D01: Offline oracle low-level horizon sweep
+
+- **Representation:** `ae_recon_z256`.
+- **Action chunk:** `H=1`.
+- **Reference:** Flat visual flow success is 66/100 on the same development
+  evaluation seeds.
+- **Commands:** `phase7-eval --latent-dim 256 --variant ae_recon
+  --horizon-steps {10,5,2} --action-chunk-steps 1 --goal-mode all --force`.
+- **Closed-loop results:**
+
+| k steps | seconds | correct success | shuffled success | zero success | correct max reward | correct action MAE |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10 | 0.50 | `0.28` | `0.00` | `0.00` | `0.445` | `0.0330` |
+| 5 | 0.25 | `0.30` | `0.00` | `0.00` | `0.466` | `0.0291` |
+| 2 | 0.10 | `0.33` | `0.00` | `0.00` | `0.487` | `0.0250` |
+
+- **Goal-sensitivity diagnostics:**
+  - `k=10`: shuffled-goal action MAE `0.1549`, zero-goal action MAE
+    `0.1189`, goal-sensitivity L2 `0.311`;
+  - `k=5`: shuffled-goal action MAE `0.2376`, zero-goal action MAE `0.1766`,
+    goal-sensitivity L2 `0.486`;
+  - `k=2`: shuffled-goal action MAE `0.3876`, zero-goal action MAE `0.3244`,
+    goal-sensitivity L2 `0.793`.
+- **Gate decision:** Failed. Correct oracle goals are far below the 66/100
+  flat visual-flow reference even at the shortest valid horizon.
+- **Diagnosis:** The low-level policy clearly uses the future goal: corrupting
+  the goal collapses success to zero and heavily degrades validation action
+  MAE. The failure is therefore not goal ignorance. The likely bottleneck is
+  closed-loop distribution shift: the model is trained on teacher-current
+  latent plus teacher-future latent, but at evaluation it sees student-current
+  latent plus teacher-future latent.
+- **Next action:** Add Phase 7 DAgger for the low-level action head. Collect
+  student-visited current observations under correct oracle goals, label each
+  state with the privileged teacher action, and keep the oracle future goal
+  fixed as a conditioning variable. These are state-query labels for the
+  action head only, not causal future-state labels.
