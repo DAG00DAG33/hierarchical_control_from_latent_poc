@@ -37,6 +37,7 @@ from hcl_poc.incremental import (
     probe_phase6_representation,
     probe_phase4_visual_history,
     prepare_phase8_latent_episodes,
+    probe_phase8_predicted_latents,
     run_phase0,
     run_phase7_branch_audit,
     train_phase1_bc,
@@ -55,6 +56,7 @@ from hcl_poc.incremental import (
     train_phase8_deterministic_predictor,
     train_phase8_dagger_predictor,
     train_phase8_adapted_low_level,
+    train_phase8_action_consistent_predictor,
     train_phase8_structured_predictor,
     sweep_phase8_deterministic_predictors,
 )
@@ -603,6 +605,15 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "phase8-probe-predictions":
+        probe_phase8_predicted_latents(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            force=args.force,
+        )
     elif args.incremental_command == "phase8-dagger-train":
         train_phase8_dagger_predictor(
             config,
@@ -635,6 +646,16 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             force=args.force,
         )
+    elif args.incremental_command == "phase8-action-train":
+        train_phase8_action_consistent_predictor(
+            config,
+            action_consistency_weight=args.action_consistency_weight,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            force=args.force,
+        )
     elif args.incremental_command == "phase8-sweep":
         sweep_phase8_deterministic_predictors(
             config,
@@ -658,6 +679,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             high_dagger_query_episodes=args.high_dagger_query_episodes,
             adapted_low_query_episodes=args.adapted_low_query_episodes,
             branch_action_weight=args.branch_action_weight,
+            action_consistency_weight=args.action_consistency_weight,
             force=args.force,
         )
     else:
@@ -965,6 +987,14 @@ def build_parser() -> argparse.ArgumentParser:
     phase8_structured_eval.add_argument("--episodes", type=int)
     phase8_structured_eval.add_argument("--force", action="store_true")
     phase8_structured_eval.set_defaults(func=incremental_cmd)
+    phase8_probe = incremental_sub.add_parser("phase8-probe-predictions")
+    add_config_arg(phase8_probe)
+    phase8_probe.add_argument("--latent-dim", type=int)
+    phase8_probe.add_argument("--variant", default=None)
+    phase8_probe.add_argument("--horizon-steps", type=int)
+    phase8_probe.add_argument("--seed", type=int, default=0)
+    phase8_probe.add_argument("--force", action="store_true")
+    phase8_probe.set_defaults(func=incremental_cmd)
     phase8_dagger = incremental_sub.add_parser("phase8-dagger-train")
     add_config_arg(phase8_dagger)
     phase8_dagger.add_argument("--latent-dim", type=int)
@@ -994,6 +1024,15 @@ def build_parser() -> argparse.ArgumentParser:
     phase8_low.add_argument("--seed", type=int, default=0)
     phase8_low.add_argument("--force", action="store_true")
     phase8_low.set_defaults(func=incremental_cmd)
+    phase8_action = incremental_sub.add_parser("phase8-action-train")
+    add_config_arg(phase8_action)
+    phase8_action.add_argument("--action-consistency-weight", type=float, required=True)
+    phase8_action.add_argument("--latent-dim", type=int)
+    phase8_action.add_argument("--variant", default=None)
+    phase8_action.add_argument("--horizon-steps", type=int)
+    phase8_action.add_argument("--seed", type=int, default=0)
+    phase8_action.add_argument("--force", action="store_true")
+    phase8_action.set_defaults(func=incremental_cmd)
     phase8_sweep = incremental_sub.add_parser("phase8-sweep")
     add_config_arg(phase8_sweep)
     phase8_sweep.add_argument("--latent-dim", type=int)
@@ -1015,6 +1054,7 @@ def build_parser() -> argparse.ArgumentParser:
     phase8_eval.add_argument("--high-dagger-query-episodes", type=int)
     phase8_eval.add_argument("--adapted-low-query-episodes", type=int)
     phase8_eval.add_argument("--branch-action-weight", type=float, default=1.0)
+    phase8_eval.add_argument("--action-consistency-weight", type=float)
     phase8_eval.add_argument("--force", action="store_true")
     phase8_eval.set_defaults(func=incremental_cmd)
 

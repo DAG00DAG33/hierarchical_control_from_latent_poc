@@ -9881,6 +9881,444 @@ def evaluate_phase8_structured_hierarchy(
     return output_path
 
 
+def _phase8_pose_probe_metrics(
+    predicted_encoded: np.ndarray, target: np.ndarray
+) -> dict[str, float]:
+    predicted_yaw = np.arctan2(predicted_encoded[:, 2], predicted_encoded[:, 3])
+    errors = np.stack(
+        [
+            np.abs(predicted_encoded[:, 0] - target[:, 0]),
+            np.abs(predicted_encoded[:, 1] - target[:, 1]),
+            np.abs(_wrap_angle(predicted_yaw - target[:, 2])),
+            *[np.abs(predicted_encoded[:, index + 1] - target[:, index]) for index in range(3, 10)],
+        ],
+        axis=-1,
+    )
+    names = [
+        "obj_x_m",
+        "obj_y_m",
+        "obj_yaw_rad",
+        "obj_vx_mps",
+        "obj_vy_mps",
+        "obj_yaw_rate_rps",
+        "tcp_x_m",
+        "tcp_y_m",
+        "tcp_vx_mps",
+        "tcp_vy_mps",
+    ]
+    return {name: float(value) for name, value in zip(names, errors.mean(axis=0), strict=True)}
+
+
+def probe_phase8_predicted_latents(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    """Apply one frozen structured probe to real and predicted future latents."""
+    latent_dim, variant, horizon_steps = _phase8_defaults(
+        config, latent_dim, variant, horizon_steps
+    )
+    if horizon_steps != 2:
+        raise ValueError("The existing time-major probe dataset currently supports k=2")
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase8"
+        / f"{variant}_z{latent_dim}_k{horizon_steps}_l1"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "predicted_latent_structured_probe.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 8 predicted-latent probe exists: {output_path}")
+        return output_path
+    predictor_path = train_phase8_deterministic_predictor(
+        config,
+        history=1,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        target_mode="absolute",
+        seed=seed,
+        force=False,
+    )
+    predictor_checkpoint = torch.load(predictor_path, map_location="cpu", weights_only=False)
+    encoder_path = Path(predictor_checkpoint["encoder_checkpoint"])
+    device = default_device()
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    latent_norm = Standardizer.from_state_dict(predictor_checkpoint["latent_norm"])
+    target_norm = Standardizer.from_state_dict(
+        predictor_checkpoint.get("target_norm", predictor_checkpoint["latent_norm"])
+    )
+    action_norm = Standardizer.from_state_dict(predictor_checkpoint["action_norm"])
+    predictor = MLP(
+        int(predictor_checkpoint["condition_dim"]),
+        latent_dim,
+        int(predictor_checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    predictor.load_state_dict(predictor_checkpoint["model"])
+    predictor.eval()
+
+    probe_path = collect_phase6_probe_dataset(config, force=False)
+    with np.load(probe_path) as data:
+        inputs = np.asarray(data["inputs"], dtype=np.float32)
+        next_inputs = np.asarray(data["next_inputs"], dtype=np.float32)
+        actions = np.asarray(data["actions"], dtype=np.float32)
+        labels = np.asarray(data["labels"], dtype=np.float32)
+        next_labels = np.asarray(data["next_labels"], dtype=np.float32)
+        contact = np.asarray(data["contact"], dtype=np.float32)
+        next_contact = np.asarray(data["next_contact"], dtype=np.float32)
+    num_envs = int(config.get("incremental.phase6.eval_num_envs", 64))
+    full_rows = len(inputs) // num_envs * num_envs
+    time_steps = full_rows // num_envs
+
+    def blocks(values: np.ndarray) -> np.ndarray:
+        return values[:full_rows].reshape(time_steps, num_envs, *values.shape[1:])
+
+    input_blocks = blocks(inputs)
+    next_input_blocks = blocks(next_inputs)
+    action_blocks = blocks(actions)
+    label_blocks = blocks(labels)
+    next_label_blocks = blocks(next_labels)
+    contact_blocks = blocks(contact)
+    next_contact_blocks = blocks(next_contact)
+
+    def encode(values: np.ndarray) -> np.ndarray:
+        normalized = frame_norm.transform(values.reshape(-1, values.shape[-1]))
+        rows = []
+        with torch.inference_mode():
+            for start in range(0, len(normalized), 4096):
+                rows.append(
+                    encoder(torch.from_numpy(normalized[start : start + 4096]).to(device).float())
+                    .cpu()
+                    .numpy()
+                )
+        return np.concatenate(rows).reshape(time_steps, num_envs, latent_dim).astype(np.float32)
+
+    latent_blocks = encode(input_blocks)
+    next_latent_blocks = encode(next_input_blocks)
+    train_envs = int(0.75 * num_envs)
+    train_reps = latent_blocks[:, :train_envs].reshape(-1, latent_dim)
+    train_labels = label_blocks[:, :train_envs].reshape(-1, labels.shape[-1])
+    train_contact = contact_blocks[:, :train_envs].reshape(-1, 1)
+    train_encoded_labels = np.concatenate(
+        [
+            train_labels[:, :2],
+            np.sin(train_labels[:, 2:3]),
+            np.cos(train_labels[:, 2:3]),
+            train_labels[:, 3:],
+        ],
+        axis=-1,
+    ).astype(np.float32)
+    rep_norm = Standardizer.fit(train_reps)
+    label_norm = Standardizer.fit(train_encoded_labels)
+    probe_dataset = TensorDataset(
+        torch.from_numpy(rep_norm.transform(train_reps)).float(),
+        torch.from_numpy(label_norm.transform(train_encoded_labels)).float(),
+        torch.from_numpy(train_contact).float(),
+    )
+    loader = DataLoader(
+        probe_dataset,
+        batch_size=int(config.get("incremental.phase6.probe_batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    hidden_dim = int(config.get("incremental.phase6.probe_hidden_dim", 512))
+    pose_head = MLP(latent_dim, train_encoded_labels.shape[-1], hidden_dim, depth=3).to(device)
+    contact_head = MLP(latent_dim, 1, hidden_dim, depth=3).to(device)
+    optimizer = torch.optim.AdamW(
+        list(pose_head.parameters()) + list(contact_head.parameters()),
+        lr=float(config.get("incremental.phase6.probe_lr", 1e-3)),
+    )
+    epochs = int(config.get("incremental.phase8.predicted_probe_epochs", 80))
+    timer = Timer()
+    for _epoch in trange(epochs, desc="train phase8 frozen probe"):
+        for x, y, c in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            c = c.to(device, non_blocking=True)
+            loss = torch.mean(
+                (pose_head(x) - y) ** 2
+            ) + torch.nn.functional.binary_cross_entropy_with_logits(contact_head(x), c)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+    pose_head.eval()
+    contact_head.eval()
+
+    previous_continuity = (
+        np.max(np.abs(next_label_blocks[:-2] - label_blocks[1:-1]), axis=-1) < 1e-4
+    )
+    future_continuity = np.max(np.abs(next_label_blocks[1:-1] - label_blocks[2:]), axis=-1) < 1e-4
+    valid = previous_continuity & future_continuity
+    valid[:, :train_envs] = False
+    time_idx, env_idx = np.nonzero(valid)
+    current_t = time_idx + 1
+    current_latents = latent_blocks[current_t, env_idx]
+    real_future_latents = next_latent_blocks[current_t + 1, env_idx]
+    physical_targets = next_label_blocks[current_t + 1, env_idx]
+    contact_targets = next_contact_blocks[current_t + 1, env_idx, 0]
+    previous_actions = action_blocks[current_t - 1, env_idx]
+    high_condition = np.concatenate(
+        [latent_norm.transform(current_latents), action_norm.transform(previous_actions)], axis=-1
+    )
+    with torch.inference_mode():
+        predicted_future_latents = target_norm.inverse(
+            predictor(torch.from_numpy(high_condition).to(device).float()).cpu().numpy()
+        )
+
+    def probe(representations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x = torch.from_numpy(rep_norm.transform(representations)).to(device).float()
+        with torch.inference_mode():
+            pose = label_norm.inverse(pose_head(x).cpu().numpy())
+            contact_logits = contact_head(x).cpu().numpy()[:, 0]
+        return pose, contact_logits
+
+    real_pose, real_contact_logits = probe(real_future_latents)
+    predicted_pose, predicted_contact_logits = probe(predicted_future_latents)
+    payload = {
+        "phase": "8.5",
+        "method": "matched_frozen_probe_real_vs_predicted_future_latents",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "seed": seed,
+        "predictor": str(predictor_path),
+        "probe_dataset": str(probe_path),
+        "split": {
+            "train_environment_streams": train_envs,
+            "evaluation_environment_streams": num_envs - train_envs,
+            "train_samples": len(train_reps),
+            "valid_k2_evaluation_samples": len(current_latents),
+            "continuity_tolerance": 1e-4,
+        },
+        "real_future_latent_probe_mae": _phase8_pose_probe_metrics(real_pose, physical_targets),
+        "predicted_future_latent_probe_mae": _phase8_pose_probe_metrics(
+            predicted_pose, physical_targets
+        ),
+        "contact": {
+            "real_accuracy": float(np.mean((real_contact_logits >= 0) == contact_targets)),
+            "predicted_accuracy": float(
+                np.mean((predicted_contact_logits >= 0) == contact_targets)
+            ),
+            "real_auroc": _binary_auc(real_contact_logits, contact_targets),
+            "predicted_auroc": _binary_auc(predicted_contact_logits, contact_targets),
+        },
+        "latent": {
+            "predicted_to_real_l2": float(
+                np.mean(np.linalg.norm(predicted_future_latents - real_future_latents, axis=-1))
+            )
+        },
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def train_phase8_action_consistent_predictor(
+    config: Config,
+    action_consistency_weight: float,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    if action_consistency_weight <= 0:
+        raise ValueError("Action-consistency weight must be positive")
+    set_seed(seed)
+    latent_dim, variant, horizon_steps = _phase8_defaults(
+        config, latent_dim, variant, horizon_steps
+    )
+    weight_label = f"{action_consistency_weight:g}".replace(".", "p")
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase8"
+        / f"{variant}_z{latent_dim}_k{horizon_steps}_l1"
+        / f"seed{seed}"
+    )
+    output_path = artifact_dir / f"deterministic_predictor_actionw{weight_label}.pt"
+    if output_path.exists() and not force:
+        console.print(f"Phase 8 action-consistent predictor exists: {output_path}")
+        return output_path
+    base_path = train_phase8_deterministic_predictor(
+        config,
+        history=1,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        target_mode="absolute",
+        seed=seed,
+        force=False,
+    )
+    base = torch.load(base_path, map_location="cpu", weights_only=False)
+    cache_path = prepare_phase8_latent_episodes(
+        config, latent_dim=latent_dim, variant=variant, seed=seed, force=False
+    )
+    cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+    latent_norm = Standardizer.from_state_dict(base["latent_norm"])
+    target_norm = Standardizer.from_state_dict(base.get("target_norm", base["latent_norm"]))
+    action_norm = Standardizer.from_state_dict(base["action_norm"])
+    dataset = _Phase8FutureDataset(
+        cached["train"],
+        1,
+        horizon_steps,
+        latent_norm,
+        target_norm,
+        "absolute",
+        action_norm,
+        length=int(config.get("incremental.phase8.batch_size", 512))
+        * int(config.get("incremental.phase8.batches_per_epoch", 300)),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase8.batch_size", 512)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    validation = _phase8_validation_samples(
+        cached["validation"],
+        1,
+        horizon_steps,
+        latent_norm,
+        action_norm,
+        int(config.get("incremental.phase8.validation_samples", 10000)),
+        seed + 8200,
+    )
+    device = default_device()
+    model = MLP(int(base["condition_dim"]), latent_dim, int(base["hidden_dim"]), depth=4).to(device)
+    model.load_state_dict(base["model"])
+    low_model, low_checkpoint = _load_phase7_low_level_checkpoint(
+        Path(base["low_level_checkpoint"]), device
+    )
+    for parameter in low_model.parameters():
+        parameter.requires_grad_(False)
+    latent_mean = torch.from_numpy(latent_norm.mean).to(device).float()
+    latent_std = torch.from_numpy(latent_norm.std).to(device).float()
+    target_mean = torch.from_numpy(target_norm.mean).to(device).float()
+    target_std = torch.from_numpy(target_norm.std).to(device).float()
+
+    def low_condition(condition: torch.Tensor, goal_normalized: torch.Tensor) -> torch.Tensor:
+        current = condition[:, :latent_dim] * latent_std + latent_mean
+        previous = condition[:, latent_dim:]
+        goal = goal_normalized * target_std + target_mean
+        return torch.cat([current, goal - current, previous], dim=-1)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase8.action_consistency_lr", 1e-4)),
+    )
+    epochs = int(config.get("incremental.phase8.action_consistency_epochs", 20))
+    history = []
+    timer = Timer()
+    for epoch in trange(
+        1, epochs + 1, desc=f"phase8 action consistency w={action_consistency_weight:g}"
+    ):
+        model.train()
+        totals = np.zeros(3, dtype=np.float64)
+        count = 0
+        for condition, target in loader:
+            condition = condition.to(device, non_blocking=True).float()
+            target = target.to(device, non_blocking=True).float()
+            predicted = model(condition)
+            latent_loss = torch.mean((predicted - target) ** 2)
+            with torch.no_grad():
+                oracle_action = low_model(low_condition(condition, target))
+            predicted_action = low_model(low_condition(condition, predicted))
+            action_loss = torch.mean((predicted_action - oracle_action) ** 2)
+            loss = latent_loss + action_consistency_weight * action_loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            totals += np.asarray(
+                [
+                    float(loss.detach().cpu()),
+                    float(latent_loss.detach().cpu()),
+                    float(action_loss.detach().cpu()),
+                ]
+            ) * len(condition)
+            count += len(condition)
+        history.append(
+            {
+                "epoch": epoch,
+                "loss": float(totals[0] / count),
+                "latent_mse": float(totals[1] / count),
+                "action_consistency_mse": float(totals[2] / count),
+            }
+        )
+    model.eval()
+    val_condition = torch.from_numpy(validation["conditions"]).to(device).float()
+    val_target = (
+        torch.from_numpy(target_norm.transform(validation["future_latents"])).to(device).float()
+    )
+    with torch.inference_mode():
+        val_predicted_norm = model(val_condition)
+        val_predicted = target_norm.inverse(val_predicted_norm.cpu().numpy())
+        oracle_actions_norm = low_model(low_condition(val_condition, val_target)).cpu().numpy()
+        predicted_actions_norm = (
+            low_model(low_condition(val_condition, val_predicted_norm)).cpu().numpy()
+        )
+    low_action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
+    teacher_actions = validation["teacher_actions"]
+    oracle_actions = low_action_norm.inverse(oracle_actions_norm)
+    predicted_actions = low_action_norm.inverse(predicted_actions_norm)
+    prediction_l2 = np.linalg.norm(val_predicted - validation["future_latents"], axis=-1)
+    persistence_l2 = np.linalg.norm(
+        validation["current_latents"] - validation["future_latents"], axis=-1
+    )
+    oracle_mae = float(np.mean(np.abs(oracle_actions - teacher_actions)))
+    predicted_mae = float(np.mean(np.abs(predicted_actions - teacher_actions)))
+    payload = {
+        **base,
+        "model": model.state_dict(),
+        "action_consistency_weight": action_consistency_weight,
+        "base_predictor": str(base_path),
+        "offline_metrics": {
+            "raw_latent_l2": float(np.mean(prediction_l2)),
+            "persistence_raw_latent_l2": float(np.mean(persistence_l2)),
+            "l2_improvement_over_persistence": float(
+                1.0 - np.mean(prediction_l2) / max(np.mean(persistence_l2), 1e-8)
+            ),
+        },
+        "low_level_metrics": {
+            "oracle_goal_action_mae": oracle_mae,
+            "predicted_goal_action_mae": predicted_mae,
+            "predicted_to_oracle_mae_ratio": predicted_mae / max(oracle_mae, 1e-8),
+            "predicted_vs_oracle_action_l2": float(
+                np.mean(np.linalg.norm(predicted_actions - oracle_actions, axis=-1))
+            ),
+        },
+        "action_consistency_history": history,
+        "action_consistency_elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, output_path)
+    write_json(
+        artifact_dir / f"deterministic_predictor_actionw{weight_label}_metrics.json",
+        {
+            key: payload[key]
+            for key in [
+                "action_consistency_weight",
+                "base_predictor",
+                "offline_metrics",
+                "low_level_metrics",
+                "action_consistency_history",
+                "action_consistency_elapsed_s",
+                "metadata",
+            ]
+        },
+    )
+    console.print(f"Wrote Phase 8 action-consistent predictor: {output_path}")
+    return output_path
+
+
 def sweep_phase8_deterministic_predictors(
     config: Config,
     latent_dim: int | None = None,
@@ -10667,6 +11105,7 @@ def evaluate_phase8_deterministic_hierarchy(
     high_dagger_query_episodes: int | None = None,
     adapted_low_query_episodes: int | None = None,
     branch_action_weight: float = 1.0,
+    action_consistency_weight: float | None = None,
     force: bool = False,
 ) -> Path:
     latent_dim, variant, horizon_steps = _phase8_defaults(
@@ -10674,7 +11113,22 @@ def evaluate_phase8_deterministic_hierarchy(
     )
     if not 0.0 <= branch_action_weight <= 1.0:
         raise ValueError("branch_action_weight must be in [0, 1]")
-    if high_dagger_query_episodes is None:
+    if action_consistency_weight is not None:
+        if high_dagger_query_episodes is not None or target_mode != "absolute" or history != 1:
+            raise ValueError(
+                "Action-consistent evaluation requires base absolute L=1 without high DAgger"
+            )
+        predictor_path = train_phase8_action_consistent_predictor(
+            config,
+            action_consistency_weight=action_consistency_weight,
+            latent_dim=latent_dim,
+            variant=variant,
+            horizon_steps=horizon_steps,
+            seed=seed,
+            force=False,
+        )
+        predictor_label = f"actionw{action_consistency_weight:g}".replace(".", "p")
+    elif high_dagger_query_episodes is None:
         predictor_path = train_phase8_deterministic_predictor(
             config,
             history=history,
@@ -10930,6 +11384,7 @@ def evaluate_phase8_deterministic_hierarchy(
         "high_dagger_query_episodes": high_dagger_query_episodes,
         "adapted_low_query_episodes": adapted_low_query_episodes,
         "branch_action_weight": branch_action_weight,
+        "action_consistency_weight": action_consistency_weight,
         "seed": seed,
         "checkpoint": str(predictor_path),
         "closed_loop": metrics,

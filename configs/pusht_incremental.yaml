@@ -221,6 +221,9 @@ incremental:
     hidden_dim: 1024
     structured_hidden_dim: 512
     structured_epochs: 30
+    predicted_probe_epochs: 80
+    action_consistency_epochs: 20
+    action_consistency_lr: 0.0001
     batch_size: 512
     batches_per_epoch: 300
     epochs: 60

@@ -1470,3 +1470,125 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   learned-latent prediction problem, not a general failure of future-state
   conditioning. Phase 8.1 passes; Phase 8.2 remains open pending structured
   probe diagnostics on predicted versus real latents.
+
+### 2026-06-19 - P8-D05: Matched probe on predicted future latents
+
+- **Data:** Reused the 12,000-transition Phase 6 causal visual/state probe
+  dataset. Its time-major 64-environment layout permits two-step samples
+  without new collection. Transitions crossing an auto-reset are rejected by
+  requiring the stored next physical label to match the following row's
+  current label within `1e-4`.
+- **Probe protocol:** One pose/velocity/contact probe is trained only on 8,976
+  real latents from environment streams 0-47. The frozen probe is evaluated on
+  2,928 valid `k=2` samples from disjoint streams 48-63, once with the real
+  future latent and once with the deterministic high-level prediction. This is
+  a matched comparison; separate probes are not retrained for predictions.
+
+| probe metric | real future latent | predicted future latent |
+| --- | ---: | ---: |
+| T x MAE | `0.00325 m` | `0.00398 m` |
+| T y MAE | `0.00319 m` | `0.00442 m` |
+| T yaw MAE | `0.0686 rad` | `0.0907 rad` |
+| TCP x MAE | `0.00350 m` | `0.00596 m` |
+| TCP y MAE | `0.00382 m` | `0.00669 m` |
+| contact accuracy | `0.932` | `0.938` |
+| contact AUROC | `0.979` | `0.972` |
+
+- **Latent error:** Predicted-to-real future latent L2 is `13.09` on this
+  independently collected dataset.
+- **Interpretation:** Predictions degrade task pose and TCP information, but
+  not catastrophically; contact remains well represented. Uniform 256D latent
+  MSE likely spends capacity on nuisance/reconstruction dimensions and does not
+  control the particular latent directions to which the low level is
+  sensitive.
+
+### 2026-06-19 - P8-D06: Action-consistent high-level fine-tuning
+
+- **Difference from base:** Starting from the absolute `k=2`, `L=1` predictor,
+  the encoder and low-level policy are frozen. The high level is fine-tuned for
+  20 epochs on the same 1,800 causal visual teacher trajectories with:
+  `latent_MSE + 10 * normalized_action_consistency_MSE`. The action target is
+  the frozen low-level action induced by the real future latent, not a
+  privileged physical label.
+- **Offline:** Latent L2 improves slightly from `13.946` to `13.850`.
+  Predicted-goal action MAE improves from `0.0389` to `0.0333`; the ratio to
+  oracle-goal MAE improves from `1.45x` to `1.24x`.
+- **Closed loop:** Success remains `0.46 +/- 0.050`, exactly equal to the base
+  predictor. Rollout teacher-action MAE falls from `0.1329` to `0.1112`, but
+  task success does not improve. This is a second demonstration that aggregate
+  one-step action MAE is not sufficient to select a stable hierarchy.
+
+### 2026-06-19 - P8-D07: Smaller AE latent
+
+- **Motivation:** Test whether removing reconstruction/nuisance dimensions
+  makes deterministic high-level regression easier. AE-192 was selected over
+  the VAE because its Phase 6 flat control success was `0.50` versus `0.37` for
+  VAE-256 while their pose probes were comparable.
+- **Data and architecture:** Same nested 1,800/200 successful causal visual
+  teacher trajectories, same `k=2`, `L=1`, 60 epochs, and same MLP family as
+  AE-256. A new matched AE-192 delta-goal low level was trained on the same
+  causal trajectories.
+- **Oracle diagnostic:** The AE-192 low level scores `0.80 +/- 0.126` on 10
+  exact branch-oracle episodes, with replay error `0.0` and teacher-action MAE
+  `0.0320`. This small development result confirms a usable interface but has
+  wide uncertainty.
+- **Prediction:** Latent L2 `12.676` versus persistence `23.158`; predicted
+  action MAE `0.0395` versus oracle `0.0272` (`1.45x`).
+- **Closed loop:** Success `0.32 +/- 0.047`, final reward `0.355`, maximum
+  reward `0.493`, and rollout teacher-action MAE `0.1469`. Reducing dimension
+  from 256 to 192 makes performance substantially worse and is rejected.
+
+### 2026-06-19 - Phase 8 consolidated protocol and decision
+
+#### Training and diagnostic data
+
+| data source | contents | used by |
+| --- | --- | --- |
+| prepared visual teacher data | 1,800 train + 200 validation successful deterministic PPO trajectories; spatial DINO + proprio, clipped actions; 80,472/8,969 causal state-action queries before horizon filtering | base histories, delta target, `k=5`, action consistency, AE-192 |
+| old Phase 7 branch queries | 496 coherent learner-state/local-branch pairs collected under oracle-goal low-level behavior | old-query high-level fine-tune only |
+| fresh learned-hierarchy queries | 783 coherent queries from 10 episodes visited by the learned `k=2` hierarchy; exact replay error `0.0` | fresh high-level DAgger and adapted low level |
+| privileged causal teacher data | 1,800/200 successful trajectories with full 31D simulator state and clipped actions; 67,515/7,501 `k=2` samples | structured high-level predictor and privileged low level |
+| causal probe data | 12,000 aligned visual/state/action/next-state transitions; 8,976 real-latent probe train samples and 2,928 disjoint valid `k=2` evaluations | matched real-versus-predicted latent probe |
+
+The old branch-query and fresh learned-hierarchy datasets are not treated as
+additional causal trajectories. They are reported separately as state-query
+samples and are never added to the sample-efficiency trajectory count.
+
+#### Experiment differences and closed-loop results
+
+All rows use 100 fixed episodes and policy seed 0 unless marked as a smaller
+development diagnostic.
+
+| experiment | representation / high-level change | low-level change | success |
+| --- | --- | --- | ---: |
+| structured oracle | true local future 14D privileged state | privileged branch low | `0.55` |
+| structured prediction | deterministic predicted 14D privileged state | same privileged branch low | `0.54` |
+| learned-latent oracle | true local future AE-256 latent | coherent DAgger delta low | `0.73` |
+| base deterministic | AE-256 absolute MSE, `k=2`, `L=1` | same oracle low | `0.46` |
+| history `L=2/4/8` | longer causal histories | same | `0.42/0.40/0.32` |
+| delta target | predict `z_future-z_current` | same | `0.30` |
+| `k=5` | 0.25 s absolute future | matched base `k=5` low | `0.31` |
+| old-query fine-tune | add 496 oracle-behavior branch queries | same | `0.40` |
+| fresh high DAgger | add 783 learned-hierarchy branch queries | same | `0.37` |
+| adapted low | base high | low balanced on nominal + 783 fresh queries | `0.47` |
+| fresh high + adapted low | both fresh-query adaptations | adapted low | `0.38` |
+| flat/branch blend | base high | 25% branch + 75% flat action | `0.44` |
+| action consistency | latent MSE + frozen-low action loss | same | `0.46` |
+| AE-192 | smaller absolute latent MSE | matched AE-192 base low | `0.32` |
+
+- **Phase 8.1 gate:** Pass. Structured prediction retains `98.2%` of its
+  matched oracle success (`0.54/0.55`).
+- **Phase 8.2 gate:** Fail. The best learned-latent result is `0.47`, only
+  `64.4%` of the selected AE-256 oracle's `0.73`; the required threshold is
+  `0.511`. None of the history, horizon, target, DAgger, low adaptation,
+  blending, action-consistency, or dimension interventions passes.
+- **Scientific conclusion:** Deterministic future-state prediction is feasible,
+  but direct MSE in the reconstruction latent does not provide closed-loop
+  stable latent goals. Offline latent distance, structured probes, nearest-
+  manifold distance, and one-step action MAE all underestimate compounding
+  error. The regression-to-dense-region diagnostic and failure of deterministic
+  repairs justify proceeding to Phase 9 conditional flow matching rather than
+  tuning more MSE weights.
+- **Runtime/uncertainty:** The project-wide protocol remains one training seed
+  and 100 fixed evaluation episodes. Binomial standard errors are reported;
+  no training-seed robustness claim is made.
