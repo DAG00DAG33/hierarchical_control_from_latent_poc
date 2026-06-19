@@ -1035,3 +1035,33 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   privileged improvements to test before final gating are adding learner/recovery
   states and adding the residual privileged controller initialized around the
   flat policy.
+
+### 2026-06-19 - P7-D09: Matched flat latent Phase 7E baseline
+
+- **Implementation:** Added `phase7-matched-flat-eval`, which evaluates the
+  existing Phase 6 latent BC checkpoint under the Phase 7 replay-branch seed
+  protocol. This policy is the matched flat latent controller:
+  `[z_t, a_{t-1}] -> a_t`.
+- **Reason:** The previous Phase 6 flat result used a different evaluation seed
+  range. Phase 7E needs the flat latent baseline and branch-oracle policies on
+  the same reset seeds.
+- **Run:** `phase7-matched-flat-eval --latent-dim 256 --variant ae_recon
+  --episodes 50 --force`, compared to the existing exact replay branch
+  `ae_recon_z256`, delta-goal, `k=2`, `H=1` result on the same seed start
+  (`1200000`).
+
+| policy | episodes | success | final reward | max reward | teacher action MAE | replay max error |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| matched flat latent `[z_t,a_{t-1}]` | 50 | `0.40` | `0.547` | `0.568` | n/a | n/a |
+| latent branch oracle delta `k=2` | 50 | `0.72` | `0.809` | `0.810` | `0.0337` | `0.0` |
+
+- **Gate status:** The initial Phase 7E relative gate passes on the 50-episode
+  development run: the branch-oracle latent controller is above the matched flat
+  latent controller by 32 percentage points.
+- **Caveat:** This is not the final Phase 7E result. The branch controller was
+  trained from nominal teacher future-latent samples and then evaluated with
+  online reachable replay branch goals. The result is a strong positive signal,
+  but Phase 7F should still collect coherent branch-oracle DAgger samples.
+- **Next action:** Train/evaluate residual latent branch controllers and/or move
+  to coherent branch-oracle DAgger. Also add valid reachable-goal sensitivity
+  tests before any final Phase 7 claim.

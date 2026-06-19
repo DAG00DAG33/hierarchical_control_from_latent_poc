@@ -6531,6 +6531,166 @@ def _load_phase7_low_level_checkpoint(
 
 
 @torch.inference_mode()
+def evaluate_phase7_matched_flat_latent_policy(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    latent_dim = int(latent_dim or config.get("incremental.phase7.latent_dim", 256))
+    variant = str(variant or config.get("incremental.phase7.variant", "ae_recon"))
+    checkpoint_path = train_phase6_latent_bc(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase7"
+        / "matched_flat"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    eval_episodes = int(episodes or config.get("incremental.phase7.eval_episodes", 100))
+    output_path = results_dir / f"matched_flat_latent_eval_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 7E matched flat latent eval exists: {output_path}")
+        return output_path
+
+    device = default_device()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    model = MLP(
+        int(checkpoint["cond_dim"]),
+        int(checkpoint["action_dim"]),
+        int(checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    dino = _phase4_dino_from_config(config, device)
+
+    def make_env(num_envs: int):
+        return gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=num_envs,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, int(checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    seed_start = int(config.get("incremental.phase7.replay_branch_seed", 1_200_000))
+    max_num_envs = min(
+        int(config.get("incremental.phase7.replay_branch_num_envs", 16)),
+        eval_episodes,
+    )
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    latencies: list[float] = []
+    max_episode_steps = int(config.get("env_max_episode_steps", 100))
+    progress = trange(eval_episodes, desc="phase7E matched flat latent eval")
+    for batch_start in range(0, eval_episodes, max_num_envs):
+        num_envs = min(max_num_envs, eval_episodes - batch_start)
+        reset_seeds = [seed_start + batch_start + i for i in range(num_envs)]
+        env = make_env(num_envs)
+        action_low_np = np.asarray(env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device, dtype=torch.float32)
+        action_high = torch.as_tensor(action_high_np, device=device, dtype=torch.float32)
+        try:
+            obs, _info = env.reset(seed=reset_seeds)
+            prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(
+                np.float32
+            )
+            active = np.ones(num_envs, dtype=bool)
+            success_once = np.zeros(num_envs, dtype=bool)
+            batch_final_rewards = np.zeros(num_envs, dtype=np.float32)
+            batch_max_rewards = np.full(num_envs, -np.inf, dtype=np.float32)
+            batch_lengths = np.zeros(num_envs, dtype=np.int32)
+            for _step in range(max_episode_steps):
+                if not active.any():
+                    break
+                active_count = int(active.sum())
+                timer = Timer()
+                frames = frame_norm.transform(
+                    _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+                )
+                z = encoder(torch.from_numpy(frames).to(device).float())
+                prev_action_t = torch.from_numpy(prev_action_norm).to(device).float()
+                pred_norm = model(torch.cat([z, prev_action_t], dim=-1))
+                raw_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
+                latencies.append(timer.elapsed() / active_count)
+                action_t = torch.from_numpy(raw_action).to(device).float()
+                if bool(config.get("policy.clip_actions_to_env_space", True)):
+                    action_t = torch.clamp(action_t, action_low, action_high)
+                action_t[~torch.from_numpy(active).to(device)] = 0.0
+                obs, reward, terminated, truncated, info = env.step(action_t)
+                prev_action_norm = action_norm.transform(action_t.detach().cpu().numpy().astype(np.float32))
+                reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+                batch_final_rewards[active] = reward_np[active]
+                batch_max_rewards[active] = np.maximum(batch_max_rewards[active], reward_np[active])
+                batch_lengths[active] += 1
+                if "success" in info:
+                    success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
+                done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(bool)
+                newly_done = active & done
+                if np.any(newly_done):
+                    progress.update(int(newly_done.sum()))
+                    active[newly_done] = False
+            if np.any(active):
+                progress.update(int(active.sum()))
+            successes.extend(float(x) for x in success_once)
+            final_rewards.extend(float(x) for x in batch_final_rewards)
+            max_rewards.extend(float(x) for x in batch_max_rewards)
+            episode_lengths.extend(int(x) for x in batch_lengths)
+        finally:
+            env.close()
+    progress.close()
+    metrics = {
+        "success": float(np.mean(successes)),
+        "success_stderr": float(np.std(successes) / np.sqrt(len(successes))),
+        "final_reward": float(np.mean(final_rewards)),
+        "max_reward": float(np.mean(max_rewards)),
+        "mean_episode_length": float(np.mean(episode_lengths)),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "num_envs": max_num_envs,
+        "seed_start": seed_start,
+    }
+    payload = {
+        "phase": "7E",
+        "method": "matched_flat_latent_policy",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "seed": seed,
+        "checkpoint": str(checkpoint_path),
+        "closed_loop": metrics,
+        "held_out_action_metrics": checkpoint["validation_metrics"],
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+@torch.inference_mode()
 def evaluate_phase7_replay_branch_oracle_low_level(
     config: Config,
     latent_dim: int | None = None,

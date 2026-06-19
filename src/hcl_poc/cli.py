@@ -25,6 +25,7 @@ from hcl_poc.incremental import (
     evaluate_phase6_latent_bc,
     evaluate_phase6_latent_dagger_bc,
     evaluate_phase6_latent_flow,
+    evaluate_phase7_matched_flat_latent_policy,
     evaluate_phase7_oracle_low_level,
     evaluate_phase7_oracle_dagger_low_level,
     evaluate_phase7_privileged_branch_baselines,
@@ -445,6 +446,15 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "phase7-matched-flat-eval":
+        evaluate_phase7_matched_flat_latent_policy(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     elif args.incremental_command == "phase7-priv-train":
         train_phase7_privileged_branch_baselines(
             config,
@@ -703,6 +713,14 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_replay.add_argument("--episodes", type=int)
     phase7_replay.add_argument("--force", action="store_true")
     phase7_replay.set_defaults(func=incremental_cmd)
+    phase7_flat = incremental_sub.add_parser("phase7-matched-flat-eval")
+    add_config_arg(phase7_flat)
+    phase7_flat.add_argument("--latent-dim", type=int)
+    phase7_flat.add_argument("--variant", default=None)
+    phase7_flat.add_argument("--seed", type=int, default=0)
+    phase7_flat.add_argument("--episodes", type=int)
+    phase7_flat.add_argument("--force", action="store_true")
+    phase7_flat.set_defaults(func=incremental_cmd)
     for command in ["phase7-priv-train", "phase7-priv-eval"]:
         phase7_priv = incremental_sub.add_parser(command)
         add_config_arg(phase7_priv)
