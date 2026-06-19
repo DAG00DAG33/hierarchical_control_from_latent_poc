@@ -964,3 +964,40 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   - cache/reuse replay prefixes where possible;
   - train/evaluate the privileged structured branch-oracle baseline on replay
     generated coherent samples while keeping development evaluations small.
+
+### 2026-06-19 - P7-D07: Batched exact replay branch oracle
+
+- **Implementation:** Reworked `phase7-replay-branch-eval` to evaluate several
+  replay-branch episodes in one CUDA vector environment. The oracle still
+  resets to the episode seed and replays the student's executed action history
+  before rolling the teacher branch, but the replay is batched across episodes.
+- **Important failed optimization:** Setting branch `reconfiguration_freq=0`
+  made the batched run faster but invalid. Replay state max error reached
+  `1.86`, with failed replay fraction `0.459`. This suggests reset without
+  reconfiguration can leave hidden simulator/contact state from the previous
+  teacher branch. The valid batched path therefore uses full reset
+  reconfiguration.
+- **Correctness check:** With full reset reconfiguration, replay state error is
+  exactly `0.0` again.
+- **Run:** `phase7-replay-branch-eval --latent-dim 256 --variant ae_recon
+  --horizon-steps 2 --action-chunk-steps 1 --goal-encoding delta --episodes 50
+  --force`.
+
+| oracle definition | episodes | success | final reward | max reward | replay max error | failed replay fraction | branch latency/env |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| exact scalar replay | 10 | `0.80` | `0.866` | `0.866` | `0.0` | `0.0` | `0.902 s` |
+| exact batched replay | 50 | `0.72` | `0.809` | `0.810` | `0.0` | `0.0` | `0.315 s` |
+
+- **Interpretation:** The branch-oracle result remains positive at a larger
+  development budget: `0.72` success is above the direct visual-flow reference
+  (`0.66`) and far above the old nominal-oracle result (`0.38`). The lower
+  50-episode success versus the scalar 10-episode run is expected sampling
+  noise and/or scalar-versus-vector execution differences; the replay
+  correctness gate itself passes exactly.
+- **Gate status:** Phase 7C has a strong positive signal. The final Phase 7
+  gate still requires matched flat latent, privileged structured branch-oracle,
+  valid goal-use tests, and larger evaluation budgets.
+- **Next action:** Move to Phase 7D/7E with the batched replay oracle:
+  implement the privileged structured branch-oracle baseline first, then the
+  matched latent flat/residual branch controllers. Keep final 500-episode
+  evaluation only for selected methods.

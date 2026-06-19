@@ -6268,7 +6268,7 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     dino = _phase4_dino_from_config(config, device)
     teacher = load_ppo_agent(_rl_paths(config).best, device)
 
-    def make_env():
+    def make_env(num_envs: int):
         return gym.make(
             config.get("env_id"),
             obs_mode="rgb+state",
@@ -6276,18 +6276,18 @@ def evaluate_phase7_replay_branch_oracle_low_level(
             reward_mode="normalized_dense",
             render_mode=None,
             sim_backend=_rl_backend(config),
-            num_envs=1,
+            num_envs=num_envs,
             reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
         )
 
-    student_env = make_env()
-    branch_env = make_env()
-    action_low = torch.as_tensor(student_env.action_space.low, device=device, dtype=torch.float32)
-    action_high = torch.as_tensor(student_env.action_space.high, device=device, dtype=torch.float32)
     zero_action_norm = action_norm.transform(
         np.zeros((1, int(checkpoint["action_dim"])), dtype=np.float32)
     )[0]
     seed_start = int(config.get("incremental.phase7.replay_branch_seed", 1_200_000))
+    max_num_envs = min(
+        int(config.get("incremental.phase7.replay_branch_num_envs", 16)),
+        eval_episodes,
+    )
     replay_state_tolerance = float(
         config.get("incremental.phase7.replay_branch_state_tolerance", 1e-6)
     )
@@ -6300,42 +6300,55 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     action_maes: list[float] = []
     policy_latencies: list[float] = []
     branch_latencies: list[float] = []
+    branch_latencies_per_env: list[float] = []
     failed_replay_steps = 0
-
-    try:
-        for episode in trange(eval_episodes, desc="phase7 replay branch oracle eval"):
-            reset_seed = seed_start + episode
-            obs, _info = student_env.reset(seed=reset_seed)
-            executed_actions: list[np.ndarray] = []
-            prev_action_norm = zero_action_norm.copy()
-            terminated = truncated = False
-            success = False
-            final_reward = 0.0
-            max_reward = -float("inf")
-            steps = 0
-            while not (terminated or truncated):
+    max_episode_steps = int(config.get("env_max_episode_steps", 100))
+    progress = trange(eval_episodes, desc="phase7 batched replay branch oracle eval")
+    for batch_start in range(0, eval_episodes, max_num_envs):
+        num_envs = min(max_num_envs, eval_episodes - batch_start)
+        reset_seeds = [seed_start + batch_start + i for i in range(num_envs)]
+        student_env = make_env(num_envs)
+        branch_env = make_env(num_envs)
+        action_low_np = np.asarray(student_env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student_env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device, dtype=torch.float32)
+        action_high = torch.as_tensor(action_high_np, device=device, dtype=torch.float32)
+        try:
+            obs, _info = student_env.reset(seed=reset_seeds)
+            history: list[torch.Tensor] = []
+            prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(
+                np.float32
+            )
+            active = np.ones(num_envs, dtype=bool)
+            success_once = np.zeros(num_envs, dtype=bool)
+            batch_final_rewards = np.zeros(num_envs, dtype=np.float32)
+            batch_max_rewards = np.full(num_envs, -np.inf, dtype=np.float32)
+            batch_lengths = np.zeros(num_envs, dtype=np.int32)
+            for _step in range(max_episode_steps):
+                if not active.any():
+                    break
+                active_count = int(active.sum())
                 branch_timer = Timer()
-                branch_obs, _branch_info = branch_env.reset(seed=reset_seed)
-                replay_done = False
-                for action_history in executed_actions:
+                branch_obs, _branch_info = branch_env.reset(seed=reset_seeds)
+                replay_done = torch.zeros(num_envs, device=device, dtype=torch.bool)
+                for action_history in history:
                     branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
                         branch_env.step(action_history)
                     )
-                    replay_done = replay_done or bool(_scalar(branch_term)) or bool(_scalar(branch_trunc))
-                    if replay_done:
-                        break
-                current_replay_error = float(
-                    torch.max(
-                        torch.abs(
-                            student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()
-                        )
-                    )
-                    .detach()
-                    .cpu()
+                    replay_done = replay_done | torch.logical_or(branch_term, branch_trunc).view(-1)
+                state_errors = torch.max(
+                    torch.abs(student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()),
+                    dim=1,
+                ).values
+                active_state_errors = state_errors.detach().cpu().numpy()[active]
+                replay_errors.extend(float(x) for x in active_state_errors)
+                replay_done_np = replay_done.detach().cpu().numpy().astype(bool)
+                failed_replay_steps += int(
+                    np.sum(active & (replay_done_np | (state_errors.detach().cpu().numpy() > replay_state_tolerance)))
                 )
-                replay_errors.append(current_replay_error)
-                if replay_done or current_replay_error > replay_state_tolerance:
-                    failed_replay_steps += 1
 
                 for _ in range(horizon_steps):
                     teacher_action = torch.clamp(
@@ -6344,11 +6357,13 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                         action_high,
                     )
                     branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
-                        branch_env.step(teacher_action.detach().cpu().numpy()[0])
+                        branch_env.step(teacher_action)
                     )
-                    if bool(_scalar(branch_term)) or bool(_scalar(branch_trunc)):
+                    if bool(torch.all(torch.logical_or(branch_term, branch_trunc))):
                         break
-                branch_latencies.append(branch_timer.elapsed())
+                branch_elapsed = branch_timer.elapsed()
+                branch_latencies.append(branch_elapsed)
+                branch_latencies_per_env.append(branch_elapsed / active_count)
 
                 policy_timer = Timer()
                 current_frame = _phase4_frame_inputs(
@@ -6363,38 +6378,59 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                 )
                 frames = frame_norm.transform(np.concatenate([current_frame, goal_frame], axis=0))
                 z_pair = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy()
-                z = z_pair[0].astype(np.float32)
-                goal = z_pair[1].astype(np.float32)
-                current_to_goal_l2.append(float(np.linalg.norm(z - goal)))
-                cond = _phase7_condition(z, goal, prev_action_norm, goal_encoding)[None]
+                z = z_pair[:num_envs].astype(np.float32)
+                goals = z_pair[num_envs:].astype(np.float32)
+                current_to_goal_l2.extend(np.linalg.norm(z[active] - goals[active], axis=-1).tolist())
+                cond = np.stack(
+                    [
+                        _phase7_condition(z[i], goals[i], prev_action_norm[i], goal_encoding)
+                        for i in range(num_envs)
+                    ],
+                    axis=0,
+                )
                 pred_norm = model(torch.from_numpy(cond).to(device).float())
-                raw_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)[0]
+                raw_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
                 teacher_now = torch.clamp(
                     teacher.actor_mean(obs["state"].to(device).float()),
                     action_low,
                     action_high,
-                ).cpu().numpy().astype(np.float32)[0]
-                action_maes.append(float(np.mean(np.abs(raw_action - teacher_now))))
-                policy_latencies.append(policy_timer.elapsed())
+                ).cpu().numpy().astype(np.float32)
+                action_maes.extend(
+                    np.mean(np.abs(raw_action[active] - teacher_now[active]), axis=-1).tolist()
+                )
+                policy_latencies.append(policy_timer.elapsed() / active_count)
 
                 action_t = torch.from_numpy(raw_action).to(device).float()
                 if bool(config.get("policy.clip_actions_to_env_space", True)):
                     action_t = torch.clamp(action_t, action_low, action_high)
+                action_t[~torch.from_numpy(active).to(device)] = 0.0
+                obs, reward, terminated, truncated, info = student_env.step(action_t)
+                history.append(action_t.detach().clone())
                 action_np = action_t.detach().cpu().numpy().astype(np.float32)
-                obs, reward, terminated, truncated, info = student_env.step(action_np)
-                executed_actions.append(action_np.copy())
-                prev_action_norm = action_norm.transform(action_np[None])[0]
-                final_reward = _scalar(reward)
-                max_reward = max(max_reward, final_reward)
-                success = success or bool(_scalar(info.get("success", False)))
-                steps += 1
-            successes.append(float(success))
-            final_rewards.append(final_reward)
-            max_rewards.append(max_reward)
-            episode_lengths.append(steps)
-    finally:
-        student_env.close()
-        branch_env.close()
+                prev_action_norm = action_norm.transform(action_np)
+                reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+                batch_final_rewards[active] = reward_np[active]
+                batch_max_rewards[active] = np.maximum(batch_max_rewards[active], reward_np[active])
+                batch_lengths[active] += 1
+                if "success" in info:
+                    success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
+                done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(bool)
+                newly_done = active & done
+                if np.any(newly_done):
+                    completed = int(newly_done.sum())
+                    progress.update(completed)
+                    active[newly_done] = False
+            still_active = np.flatnonzero(active)
+            if len(still_active) > 0:
+                progress.update(len(still_active))
+            successes.extend(float(x) for x in success_once)
+            final_rewards.extend(float(x) for x in batch_final_rewards)
+            max_rewards.extend(float(x) for x in batch_max_rewards)
+            episode_lengths.extend(int(x) for x in batch_lengths)
+        finally:
+            student_env.close()
+            branch_env.close()
+    progress.close()
 
     metrics = {
         "success": float(np.mean(successes)),
@@ -6411,13 +6447,17 @@ def evaluate_phase7_replay_branch_oracle_low_level(
         "teacher_action_mae": float(np.mean(action_maes)) if action_maes else 0.0,
         "policy_latency_s": float(np.mean(policy_latencies)) if policy_latencies else 0.0,
         "branch_generation_latency_s": float(np.mean(branch_latencies)) if branch_latencies else 0.0,
+        "branch_generation_latency_per_env_s": (
+            float(np.mean(branch_latencies_per_env)) if branch_latencies_per_env else 0.0
+        ),
         "episodes": eval_episodes,
+        "num_envs": max_num_envs,
         "seed_start": seed_start,
     }
     visual_success = _phase7_visual_flow_success(config, seed)
     payload = {
         "phase": "7C",
-        "method": "replay_branch_oracle_low_level_eval",
+        "method": "batched_replay_branch_oracle_low_level_eval",
         "variant": variant,
         "latent_dim": latent_dim,
         "horizon_steps": horizon_steps,

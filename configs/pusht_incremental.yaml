@@ -201,5 +201,6 @@ incremental:
     branch_dino_tolerance: 0.000001
     branch_latent_tolerance: 0.000001
     replay_branch_eval_episodes: 10
+    replay_branch_num_envs: 16
     replay_branch_seed: 1200000
     replay_branch_state_tolerance: 0.000001
