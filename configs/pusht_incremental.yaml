@@ -259,3 +259,11 @@ incremental:
     eval_episodes: 100
     eval_num_envs: 64
     eval_seed: 1200000
+  phase10:
+    query_episodes: 10
+    query_num_envs: 16
+    query_seed: 1400000
+    replay_tolerance: 0.000001
+    batch_size: 512
+    epochs: 30
+    lr: 0.0001

@@ -17,6 +17,7 @@ from hcl_poc.incremental import (
     collect_phase6_latent_dagger_queries,
     collect_phase7_oracle_dagger_queries,
     collect_phase8_dagger_queries,
+    collect_phase10_flow_queries,
     evaluate_phase1_bc,
     evaluate_phase2_dagger_bc,
     evaluate_phase2_recovery,
@@ -60,6 +61,7 @@ from hcl_poc.incremental import (
     train_phase8_action_consistent_predictor,
     train_phase8_structured_predictor,
     train_phase9_future_flow,
+    train_phase10_robust_low_level,
     sweep_phase8_deterministic_predictors,
 )
 from hcl_poc.report import build_report
@@ -705,6 +707,41 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "phase10-collect":
+        collect_phase10_flow_queries(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase10-train":
+        train_phase10_robust_low_level(
+            config,
+            method=args.method,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            interpolation_alpha=args.interpolation_alpha,
+            seed=args.seed,
+            query_episodes=args.query_episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase10-eval":
+        evaluate_phase9_future_flow(
+            config,
+            sample_mode="zero",
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            episodes=args.episodes,
+            robust_low_method=args.method,
+            interpolation_alpha=args.interpolation_alpha,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1099,6 +1136,33 @@ def build_parser() -> argparse.ArgumentParser:
     phase9_eval.add_argument("--episodes", type=int)
     phase9_eval.add_argument("--force", action="store_true")
     phase9_eval.set_defaults(func=incremental_cmd)
+    phase10_collect = incremental_sub.add_parser("phase10-collect")
+    add_config_arg(phase10_collect)
+    phase10_collect.add_argument("--latent-dim", type=int)
+    phase10_collect.add_argument("--variant", default=None)
+    phase10_collect.add_argument("--horizon-steps", type=int)
+    phase10_collect.add_argument("--seed", type=int, default=0)
+    phase10_collect.add_argument("--episodes", type=int)
+    phase10_collect.add_argument("--force", action="store_true")
+    phase10_collect.set_defaults(func=incremental_cmd)
+    for command in ["phase10-train", "phase10-eval"]:
+        phase10 = incremental_sub.add_parser(command)
+        add_config_arg(phase10)
+        phase10.add_argument(
+            "--method",
+            choices=["direct", "interpolate", "empirical", "covariance_diag"],
+            required=True,
+        )
+        phase10.add_argument("--latent-dim", type=int)
+        phase10.add_argument("--variant", default=None)
+        phase10.add_argument("--horizon-steps", type=int)
+        phase10.add_argument("--interpolation-alpha", type=float, default=0.5)
+        phase10.add_argument("--seed", type=int, default=0)
+        phase10.add_argument("--query-episodes", type=int)
+        if command == "phase10-eval":
+            phase10.add_argument("--episodes", type=int)
+        phase10.add_argument("--force", action="store_true")
+        phase10.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

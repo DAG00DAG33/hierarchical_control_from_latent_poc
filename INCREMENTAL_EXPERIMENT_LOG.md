@@ -1658,3 +1658,51 @@ The unregularized flow successfully memorizes one and ten trajectories:
   distribution. Keep nominal real-goal data balanced with generated-goal
   learner-state queries so the low level cannot solve the objective by ignoring
   its goal.
+
+### 2026-06-19 - P10-D01: Robust low level under actual flow errors
+
+- **Collection:** Added `phase10-collect`. Ten zero-noise flow-hierarchy
+  episodes generated 741 coherent learner-state queries. Every row contains
+  current latent, actual flow goal, exact local teacher-branch goal, previous
+  action, and teacher action from the same current state. Exact replay max
+  error and failed replay fraction are both `0.0`; collection success is
+  `0.40`.
+- **Error scale:** True local future displacement has mean/median/p90/p99 L2
+  `24.18/23.72/32.54/43.47`. Flow goal error has
+  `17.59/15.92/25.66/35.81`, or `72.8%` of mean true displacement. The tested
+  corruption is therefore calibrated to measured structured high-level error,
+  not arbitrary isotropic noise.
+- **Training protocol:** Every robust low level starts from the same Phase 7
+  base checkpoint and uses a 50/50 balance of uncorrupted nominal causal data
+  and robust samples. Models train for 30 epochs and are selected by nominal
+  validation MSE plus held-out generated-query MSE. The 741 flow queries remain
+  state-query data and are not counted as causal trajectories.
+
+| method | robust training goal | generated MAE | branch MAE | ratio | nominal MAE | goal sensitivity | shuffled gap |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| no corruption | real future latent only | n/a | n/a | n/a | `0.0265` | existing base | existing base |
+| direct | actual generated flow goal at learner state | `0.0512` | `0.0528` | `0.97x` | `0.0286` | `0.851` | `0.386` |
+| interpolate | branch + `0.5*(generated-branch)` | `0.0814` | `0.0450` | `1.81x` | `0.0273` | `0.872` | `0.398` |
+| empirical residual | nominal goal + bootstrapped measured residual | `0.1247` | `0.0969` | `1.29x` | `0.0275` | `0.584` | `0.255` |
+| diagonal covariance | nominal goal + Gaussian matched per-dimension mean/std | `0.1295` | `0.0884` | `1.47x` | `0.0277` | `0.647` | `0.286` |
+
+- **Goal use:** All methods retain a positive shuffled-goal gap, but broad
+  residual corruption substantially reduces sensitivity. Direct and
+  interpolation preserve sensitivity best.
+- **Closed loop:** The base zero-noise flow hierarchy scores `0.42` on 100
+  episodes. Direct generated-goal training falls to `0.30 +/- 0.046` on 100
+  episodes, with rollout teacher-action MAE worsening from `0.1260` to
+  `0.1478`. On 20-episode development runs, interpolation scores `0.30`,
+  empirical residual `0.35`, and diagonal covariance `0.35`. None warrants an
+  additional 100-episode run under the reduced runtime protocol.
+- **Interpretation:** The direct method passes held-out query action and goal-
+  use diagnostics yet fails closed loop, showing that ten learner episodes do
+  not cover the policy-induced distribution after retraining. Empirical and
+  covariance corruption broaden support but teach partial goal invariance and
+  still do not recover success.
+- **Phase 10 gate:** Fail. Although three methods meet the generated/branch
+  action-MAE ratio and all retain some goal sensitivity, the required `80%` of
+  oracle success is `0.576`; the best complete hierarchy remains the unadapted
+  flow at `0.42` (`58.3%` of oracle). Proceed to Phase 11 with the unadapted
+  deterministic and flow hierarchies as the selected learned-high-level
+  methods and report robustness training as a negative ablation.

@@ -10654,6 +10654,8 @@ def evaluate_phase9_future_flow(
     seed: int = 0,
     episodes: int | None = None,
     force: bool = False,
+    robust_low_method: str | None = None,
+    interpolation_alpha: float = 0.5,
 ) -> Path:
     if sample_mode not in {"zero", "random"}:
         raise ValueError(f"Unknown Phase 9 sample mode: {sample_mode}")
@@ -10670,13 +10672,23 @@ def evaluate_phase9_future_flow(
         force=False,
     )
     eval_episodes = int(episodes or config.get("incremental.phase9.eval_episodes", 100))
+    result_phase = "phase10" if robust_low_method is not None else "phase9"
     results_dir = ensure_dir(
         config.path_value("paths.incremental_results_dir")
-        / "phase9"
+        / result_phase
         / f"{variant}_z{latent_dim}_k{horizon_steps}_l1"
         / f"seed{seed}"
     )
-    output_path = results_dir / f"future_flow_{sample_mode}_{eval_episodes}.json"
+    method_label = (
+        "base"
+        if robust_low_method is None
+        else (
+            f"interpolate_a{interpolation_alpha:g}".replace(".", "p")
+            if robust_low_method == "interpolate"
+            else robust_low_method
+        )
+    )
+    output_path = results_dir / f"future_flow_{sample_mode}_{method_label}_{eval_episodes}.json"
     if output_path.exists() and not force:
         console.print(f"Phase 9 future-flow eval exists: {output_path}")
         return output_path
@@ -10696,7 +10708,19 @@ def evaluate_phase9_future_flow(
     latent_norm = Standardizer.from_state_dict(checkpoint["latent_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     low_path = Path(checkpoint["low_level_checkpoint"])
+    if robust_low_method is not None:
+        low_path = train_phase10_robust_low_level(
+            config,
+            method=robust_low_method,
+            latent_dim=latent_dim,
+            variant=variant,
+            horizon_steps=horizon_steps,
+            interpolation_alpha=interpolation_alpha,
+            seed=seed,
+            force=False,
+        )
     low_model, low_checkpoint = _load_phase7_low_level_checkpoint(low_path, device)
+    oracle_low_path = Path(low_checkpoint.get("base_low_checkpoint", low_path))
     low_action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
     if not (
         np.array_equal(action_norm.mean, low_action_norm.mean)
@@ -10816,19 +10840,21 @@ def evaluate_phase9_future_flow(
     for candidate in oracle_result_dir.glob("replay_branch_oracle_eval*.json"):
         with candidate.open("r", encoding="utf-8") as f:
             result = json.load(f)
-        if Path(result.get("checkpoint", "")) == low_path:
+        if Path(result.get("checkpoint", "")) == oracle_low_path:
             oracle_results.append((int(result["closed_loop"]["episodes"]), candidate, result))
     if not oracle_results:
-        raise FileNotFoundError(f"No Phase 7 oracle result matches {low_path}")
+        raise FileNotFoundError(f"No Phase 7 oracle result matches {oracle_low_path}")
     _count, oracle_path, oracle_result = max(oracle_results, key=lambda item: item[0])
     oracle_success = float(oracle_result["closed_loop"]["success"])
     payload = {
-        "phase": 9,
+        "phase": 10 if robust_low_method is not None else 9,
         "method": "conditional_future_latent_flow",
         "variant": variant,
         "latent_dim": latent_dim,
         "horizon_steps": horizon_steps,
         "sample_mode": sample_mode,
+        "robust_low_method": robust_low_method,
+        "interpolation_alpha": interpolation_alpha,
         "seed": seed,
         "checkpoint": str(checkpoint_path),
         "closed_loop": metrics,
@@ -10838,10 +10864,498 @@ def evaluate_phase9_future_flow(
         "success_fraction_of_oracle": metrics["success"] / max(oracle_success, 1e-8),
         "gate_vs_deterministic": metrics["success"] >= 0.46,
         "gate_70pct_oracle": metrics["success"] >= 0.70 * oracle_success,
+        "gate_80pct_oracle": metrics["success"] >= 0.80 * oracle_success,
         "metadata": _runtime_metadata(config),
     }
     write_json(output_path, payload)
     console.print(payload)
+    return output_path
+
+
+@torch.inference_mode()
+def collect_phase10_flow_queries(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    latent_dim, variant, horizon_steps = _phase8_defaults(
+        config, latent_dim, variant, horizon_steps
+    )
+    episodes = int(episodes or config.get("incremental.phase10.query_episodes", 10))
+    flow_path = train_phase9_future_flow(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        seed=seed,
+        force=False,
+    )
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase10"
+        / f"{variant}_z{latent_dim}_k{horizon_steps}"
+        / f"seed{seed}"
+    )
+    output_path = artifact_dir / f"flow_queries_e{episodes}.npz"
+    if output_path.exists() and not force:
+        console.print(f"Phase 10 flow queries exist: {output_path}")
+        return output_path
+    device = default_device()
+    checkpoint = torch.load(flow_path, map_location=device, weights_only=False)
+    flow = FlowModel(
+        int(checkpoint["sample_dim"]),
+        int(checkpoint["condition_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).to(device)
+    flow.load_state_dict(checkpoint["model"])
+    flow.eval()
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    latent_norm = Standardizer.from_state_dict(checkpoint["latent_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    low_model, low_checkpoint = _load_phase7_low_level_checkpoint(
+        Path(checkpoint["low_level_checkpoint"]), device
+    )
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    dino = _phase4_dino_from_config(config, device)
+
+    def make_env(num_envs: int):
+        return gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=num_envs,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+
+    zero_action = action_norm.transform(
+        np.zeros((1, int(low_checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    max_num_envs = min(int(config.get("incremental.phase10.query_num_envs", 16)), episodes)
+    seed_start = int(config.get("incremental.phase10.query_seed", 1_400_000))
+    replay_tolerance = float(config.get("incremental.phase10.replay_tolerance", 1e-6))
+    max_episode_steps = int(config.get("env_max_episode_steps", 100))
+    current_rows = []
+    generated_rows = []
+    branch_rows = []
+    previous_rows = []
+    teacher_action_rows = []
+    successes = []
+    replay_errors = []
+    failed_replay_steps = 0
+    progress = trange(episodes, desc="phase10 collect flow-goal queries")
+    for batch_start in range(0, episodes, max_num_envs):
+        num_envs = min(max_num_envs, episodes - batch_start)
+        reset_seeds = [seed_start + batch_start + i for i in range(num_envs)]
+        student_env = make_env(num_envs)
+        branch_env = make_env(num_envs)
+        action_low_np = np.asarray(student_env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student_env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device, dtype=torch.float32)
+        action_high = torch.as_tensor(action_high_np, device=device, dtype=torch.float32)
+        try:
+            obs, _info = student_env.reset(seed=reset_seeds)
+            action_history = []
+            previous_action = np.repeat(zero_action[None], num_envs, axis=0).astype(np.float32)
+            active = np.ones(num_envs, dtype=bool)
+            success_once = np.zeros(num_envs, dtype=bool)
+            for _step in range(max_episode_steps):
+                if not active.any():
+                    break
+                branch_obs, _branch_info = branch_env.reset(seed=reset_seeds)
+                replay_done = torch.zeros(num_envs, device=device, dtype=torch.bool)
+                for historical_action in action_history:
+                    branch_obs, _reward, term, trunc, _info = branch_env.step(historical_action)
+                    replay_done |= torch.logical_or(term, trunc).view(-1)
+                state_error = torch.max(
+                    torch.abs(student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()),
+                    dim=1,
+                ).values
+                state_error_np = state_error.cpu().numpy()
+                replay_errors.extend(state_error_np[active].tolist())
+                failed_replay_steps += int(
+                    np.sum(
+                        active
+                        & (
+                            replay_done.cpu().numpy().astype(bool)
+                            | (state_error_np > replay_tolerance)
+                        )
+                    )
+                )
+                for _ in range(horizon_steps):
+                    branch_action = torch.clamp(
+                        teacher.actor_mean(branch_obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    branch_obs, _reward, _term, _trunc, _info = branch_env.step(branch_action)
+                current_frame = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                branch_frame = _phase4_frame_inputs(
+                    branch_obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                frames = frame_norm.transform(np.concatenate([current_frame, branch_frame]))
+                pair = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy()
+                current = pair[:num_envs].astype(np.float32)
+                branch_goal = pair[num_envs:].astype(np.float32)
+                high_condition = np.concatenate(
+                    [latent_norm.transform(current), previous_action], axis=-1
+                )
+                generated_goal = latent_norm.inverse(
+                    sample_flow(
+                        flow,
+                        torch.from_numpy(high_condition).to(device).float(),
+                        int(checkpoint["flow_steps"]),
+                        latent_dim,
+                        initial_noise=torch.zeros(
+                            num_envs, latent_dim, device=device, dtype=torch.float32
+                        ),
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                low_condition = np.stack(
+                    [
+                        _phase7_condition(
+                            current[i], generated_goal[i], previous_action[i], "delta"
+                        )
+                        for i in range(num_envs)
+                    ]
+                )
+                raw_action = action_norm.inverse(
+                    low_model(torch.from_numpy(low_condition).to(device).float()).cpu().numpy()
+                ).astype(np.float32)
+                teacher_action = (
+                    torch.clamp(
+                        teacher.actor_mean(obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+                current_rows.append(current[active])
+                generated_rows.append(generated_goal[active])
+                branch_rows.append(branch_goal[active])
+                previous_rows.append(previous_action[active])
+                teacher_action_rows.append(teacher_action[active])
+                action = torch.from_numpy(raw_action).to(device).float()
+                if bool(config.get("policy.clip_actions_to_env_space", True)):
+                    action = torch.clamp(action, action_low, action_high)
+                action[~torch.from_numpy(active).to(device)] = 0.0
+                obs, _reward, terminated, truncated, info = student_env.step(action)
+                action_history.append(action.detach().clone())
+                previous_action = action_norm.transform(action.cpu().numpy().astype(np.float32))
+                if "success" in info:
+                    success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
+                done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(bool)
+                newly_done = active & done
+                if np.any(newly_done):
+                    progress.update(int(newly_done.sum()))
+                    active[newly_done] = False
+            if np.any(active):
+                progress.update(int(active.sum()))
+            successes.extend(success_once.astype(np.float32).tolist())
+        finally:
+            student_env.close()
+            branch_env.close()
+    progress.close()
+    current = np.concatenate(current_rows).astype(np.float32)
+    generated = np.concatenate(generated_rows).astype(np.float32)
+    branch = np.concatenate(branch_rows).astype(np.float32)
+    np.savez_compressed(
+        output_path,
+        current_latents=current,
+        generated_goals=generated,
+        branch_goals=branch,
+        previous_actions_norm=np.concatenate(previous_rows).astype(np.float32),
+        teacher_actions=np.concatenate(teacher_action_rows).astype(np.float32),
+        generated_residuals=(generated - branch).astype(np.float32),
+        future_displacements=(branch - current).astype(np.float32),
+        collection_success=np.asarray(successes, dtype=np.float32),
+        replay_current_state_error_mean=np.asarray(np.mean(replay_errors), dtype=np.float32),
+        replay_current_state_error_max=np.asarray(np.max(replay_errors), dtype=np.float32),
+        replay_failed_step_fraction=np.asarray(
+            failed_replay_steps / max(1, len(replay_errors)), dtype=np.float32
+        ),
+        flow_checkpoint=np.asarray(str(flow_path)),
+        dataset_type=np.asarray("state_query_dataset"),
+        semantics=np.asarray(
+            "flow-hierarchy states with generated goal, exact local branch goal, and teacher action"
+        ),
+    )
+    console.print(f"Wrote Phase 10 flow queries: {output_path}")
+    return output_path
+
+
+def train_phase10_robust_low_level(
+    config: Config,
+    method: str,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    interpolation_alpha: float = 0.5,
+    seed: int = 0,
+    query_episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    if method not in {"direct", "interpolate", "empirical", "covariance_diag"}:
+        raise ValueError(f"Unknown Phase 10 robustness method: {method}")
+    if not 0.0 <= interpolation_alpha <= 1.0:
+        raise ValueError("Phase 10 interpolation alpha must be in [0, 1]")
+    set_seed(seed)
+    latent_dim, variant, horizon_steps = _phase8_defaults(
+        config, latent_dim, variant, horizon_steps
+    )
+    query_episodes = int(query_episodes or config.get("incremental.phase10.query_episodes", 10))
+    query_path = collect_phase10_flow_queries(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        seed=seed,
+        episodes=query_episodes,
+        force=False,
+    )
+    flow_path = train_phase9_future_flow(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        seed=seed,
+        force=False,
+    )
+    flow_checkpoint = torch.load(flow_path, map_location="cpu", weights_only=False)
+    base_low_path = Path(flow_checkpoint["low_level_checkpoint"])
+    method_label = (
+        f"interpolate_a{interpolation_alpha:g}".replace(".", "p")
+        if method == "interpolate"
+        else method
+    )
+    output_path = query_path.parent / f"robust_low_{method_label}.pt"
+    if output_path.exists() and not force:
+        console.print(f"Phase 10 robust low level exists: {output_path}")
+        return output_path
+    device = default_device()
+    base_model, base_checkpoint = _load_phase7_low_level_checkpoint(base_low_path, device)
+    action_norm = Standardizer.from_state_dict(base_checkpoint["action_norm"])
+    cache = torch.load(
+        _phase8_latent_cache_path(config, variant, latent_dim, seed),
+        map_location="cpu",
+        weights_only=False,
+    )
+    nominal_x, nominal_actions = _phase8_nominal_low_level_samples(
+        cache["train"], horizon_steps, action_norm
+    )
+    nominal_val_x, nominal_val_actions = _phase8_nominal_low_level_samples(
+        cache["validation"], horizon_steps, action_norm
+    )
+    with np.load(query_path) as data:
+        current = np.asarray(data["current_latents"], dtype=np.float32)
+        generated = np.asarray(data["generated_goals"], dtype=np.float32)
+        branch = np.asarray(data["branch_goals"], dtype=np.float32)
+        previous = np.asarray(data["previous_actions_norm"], dtype=np.float32)
+        teacher_actions = np.asarray(data["teacher_actions"], dtype=np.float32)
+        residuals = np.asarray(data["generated_residuals"], dtype=np.float32)
+    rng = np.random.default_rng(seed + 10_000)
+    permutation = rng.permutation(len(current))
+    split = max(1, int(0.8 * len(permutation)))
+    query_train = permutation[:split]
+    query_val = permutation[split:]
+    if len(query_val) == 0:
+        raise ValueError("Phase 10 requires at least two generated-goal queries")
+
+    if method in {"direct", "interpolate"}:
+        robust_goal = (
+            generated if method == "direct" else branch + interpolation_alpha * (generated - branch)
+        )
+        robust_x = np.stack(
+            [
+                _phase7_condition(current[i], robust_goal[i], previous[i], "delta")
+                for i in range(len(current))
+            ]
+        ).astype(np.float32)
+        repeat = max(1, int(np.ceil(len(nominal_x) / len(query_train))))
+        robust_train_x = np.tile(robust_x[query_train], (repeat, 1))[: len(nominal_x)]
+        robust_train_y = np.tile(action_norm.transform(teacher_actions[query_train]), (repeat, 1))[
+            : len(nominal_x)
+        ]
+    else:
+        nominal_current = nominal_x[:, :latent_dim]
+        nominal_delta = nominal_x[:, latent_dim : 2 * latent_dim]
+        nominal_previous = nominal_x[:, 2 * latent_dim :]
+        train_residuals = residuals[query_train]
+        if method == "empirical":
+            sampled = train_residuals[rng.integers(0, len(train_residuals), size=len(nominal_x))]
+        else:
+            sampled = rng.normal(
+                train_residuals.mean(axis=0),
+                np.maximum(train_residuals.std(axis=0), 1e-4),
+                size=(len(nominal_x), latent_dim),
+            ).astype(np.float32)
+        robust_train_x = np.concatenate(
+            [nominal_current, nominal_delta + sampled, nominal_previous], axis=-1
+        ).astype(np.float32)
+        robust_train_y = action_norm.transform(nominal_actions)
+    train_x = np.concatenate([nominal_x, robust_train_x])
+    train_y = np.concatenate([action_norm.transform(nominal_actions), robust_train_y])
+    dataset = TensorDataset(torch.from_numpy(train_x), torch.from_numpy(train_y))
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase10.batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    model = MLP(
+        int(base_checkpoint["cond_dim"]),
+        int(base_checkpoint["action_dim"]),
+        int(base_checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(base_model.state_dict())
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(config.get("incremental.phase10.lr", 1e-4))
+    )
+    generated_query_x = np.stack(
+        [
+            _phase7_condition(current[i], generated[i], previous[i], "delta")
+            for i in range(len(current))
+        ]
+    ).astype(np.float32)
+    branch_query_x = np.stack(
+        [
+            _phase7_condition(current[i], branch[i], previous[i], "delta")
+            for i in range(len(current))
+        ]
+    ).astype(np.float32)
+    nominal_val_x_t = torch.from_numpy(nominal_val_x).to(device).float()
+    nominal_val_y_t = (
+        torch.from_numpy(action_norm.transform(nominal_val_actions)).to(device).float()
+    )
+    generated_val_x_t = torch.from_numpy(generated_query_x[query_val]).to(device).float()
+    generated_val_y_t = (
+        torch.from_numpy(action_norm.transform(teacher_actions[query_val])).to(device).float()
+    )
+    best_state = None
+    best_selection = float("inf")
+    history = []
+    timer = Timer()
+    epochs = int(config.get("incremental.phase10.epochs", 30))
+    for epoch in trange(1, epochs + 1, desc=f"phase10 robust low {method_label}"):
+        model.train()
+        total = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            total += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            nominal_mse = float(torch.mean((model(nominal_val_x_t) - nominal_val_y_t) ** 2).cpu())
+            generated_mse = float(
+                torch.mean((model(generated_val_x_t) - generated_val_y_t) ** 2).cpu()
+            )
+        selection = nominal_mse + generated_mse
+        history.append(
+            {
+                "epoch": epoch,
+                "train_mse": total / count,
+                "nominal_validation_mse": nominal_mse,
+                "generated_query_mse": generated_mse,
+                "selection": selection,
+            }
+        )
+        if selection < best_selection:
+            best_selection = selection
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 10 robust low-level training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    nominal_metrics = _phase7_oracle_action_metrics(
+        model,
+        nominal_val_x,
+        nominal_val_actions,
+        action_norm,
+        latent_dim,
+        "delta",
+        int(config.get("incremental.phase7.validation_queries", 10000)),
+        seed + 10_001,
+    )
+
+    def query_actions(conditions: np.ndarray) -> np.ndarray:
+        with torch.inference_mode():
+            normalized = model(torch.from_numpy(conditions[query_val]).to(device).float())
+        return action_norm.inverse(normalized.cpu().numpy())
+
+    generated_prediction = query_actions(generated_query_x)
+    branch_prediction = query_actions(branch_query_x)
+    target = teacher_actions[query_val]
+    generated_mae = float(np.mean(np.abs(generated_prediction - target)))
+    branch_mae = float(np.mean(np.abs(branch_prediction - target)))
+    payload = {
+        **base_checkpoint,
+        "model": model.state_dict(),
+        "training_mode": f"balanced_nominal_and_{method_label}",
+        "robustness_method": method,
+        "interpolation_alpha": interpolation_alpha,
+        "base_low_checkpoint": str(base_low_path),
+        "query_path": str(query_path),
+        "query_episodes": query_episodes,
+        "query_samples": len(current),
+        "query_validation_samples": len(query_val),
+        "validation_metrics": nominal_metrics,
+        "generated_query_metrics": {
+            "generated_goal_action_mae": generated_mae,
+            "branch_goal_action_mae": branch_mae,
+            "generated_to_branch_mae_ratio": generated_mae / max(branch_mae, 1e-8),
+        },
+        "robustness_history": history,
+        "robustness_best_selection": best_selection,
+        "robustness_elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, output_path)
+    write_json(
+        query_path.parent / f"robust_low_{method_label}_metrics.json",
+        {
+            key: payload[key]
+            for key in [
+                "training_mode",
+                "robustness_method",
+                "interpolation_alpha",
+                "query_episodes",
+                "query_samples",
+                "query_validation_samples",
+                "validation_metrics",
+                "generated_query_metrics",
+                "robustness_best_selection",
+                "robustness_elapsed_s",
+                "metadata",
+            ]
+        },
+    )
+    console.print(f"Wrote Phase 10 robust low level: {output_path}")
     return output_path
 
 
