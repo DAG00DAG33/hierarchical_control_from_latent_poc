@@ -1159,3 +1159,34 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   after valid reachable-goal intervention tests. The exact replay branch is
   still expensive, so 20-50 query episodes should be preferred before a full
   200-query-episode collection.
+
+### 2026-06-19 - P7-D13: Valid reachable-goal action sensitivity
+
+- **Implementation:** Added `phase7-goal-use-eval` for Phase 7G. For each
+  learner state, it constructs reachable teacher-branch goals at `k-1`, `k`,
+  and `k+1` from the exact same current state, then compares the low-level
+  actions under those valid goals. This avoids zero and shuffled goals as the
+  primary evidence.
+- **Run:** `phase7-goal-use-eval --latent-dim 256 --variant ae_recon
+  --horizon-steps 2 --action-chunk-steps 1 --goal-encoding delta
+  --dagger-iteration 1 --dagger-query-episodes 10 --episodes 5 --force`.
+- **Policy:** coherent branch DAgger iter1, 10 query episodes.
+- **Reachable horizons tested:** `[1, 2, 3]`.
+
+| samples | rollout success | replay max error | action sensitivity `k-1` to `k+1` | directional cosine | positive directional fraction | farther-progress fraction |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `345` | `0.80` | `0.0` | `0.277` | `0.757` | `0.933` | `0.843` |
+
+- **Other metrics:** center-goal teacher action MAE was `0.0423`; branch
+  generation latency was `0.593 s/env/step`.
+- **Gate status:** Initial Phase 7G action-level gates pass: replay state is
+  exact, valid reachable goals produce nontrivial action changes, and those
+  action changes are usually aligned with the change in future TCP displacement.
+- **Caveat:** This is not the full Phase 7G counterfactual rollout test. It
+  verifies action sensitivity and directional consistency for valid reachable
+  goals. A later subgoal-reaching test should execute the policy toward
+  different valid goals and measure which branch state it approaches.
+- **Next action:** Add the counterfactual subgoal-reaching test or proceed to a
+  small horizon sweep (`k in {2,5,10,20}`) now that branch correctness,
+  matched-flat comparison, coherent DAgger wiring, and action-level goal use are
+  all positive at development scale.

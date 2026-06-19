@@ -6996,6 +6996,382 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     return output_path
 
 
+def _phase7_checkpoint_for_eval(
+    config: Config,
+    latent_dim: int,
+    variant: str,
+    horizon_steps: int,
+    action_chunk_steps: int,
+    goal_encoding: str,
+    goal_dropout_prob: float,
+    seed: int,
+    dagger_iteration: int | None,
+    dagger_query_episodes: int | None,
+) -> tuple[Path, str]:
+    if dagger_iteration is None:
+        checkpoint_path = train_phase7_oracle_low_level(
+            config,
+            latent_dim=latent_dim,
+            variant=variant,
+            horizon_steps=horizon_steps,
+            action_chunk_steps=action_chunk_steps,
+            goal_encoding=goal_encoding,
+            goal_dropout_prob=goal_dropout_prob,
+            seed=seed,
+            force=False,
+        )
+        return checkpoint_path, "base"
+    checkpoint_path = train_phase7_oracle_dagger_low_level(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        action_chunk_steps=action_chunk_steps,
+        goal_encoding=goal_encoding,
+        goal_dropout_prob=goal_dropout_prob,
+        iteration=dagger_iteration,
+        seed=seed,
+        query_episodes=dagger_query_episodes,
+        force=False,
+    )
+    query_episode_count = int(
+        dagger_query_episodes or config.get("incremental.phase7.dagger_episodes", 200)
+    )
+    return checkpoint_path, f"branch_dagger_iter{dagger_iteration}_e{query_episode_count}"
+
+
+@torch.inference_mode()
+def evaluate_phase7_valid_goal_use(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    dagger_iteration: int | None = None,
+    dagger_query_episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    )
+    if action_chunk_steps != 1:
+        raise NotImplementedError("Phase 7G currently supports H=1")
+    horizons = sorted({max(1, horizon_steps - 1), horizon_steps, horizon_steps + 1})
+    checkpoint_path, checkpoint_label = _phase7_checkpoint_for_eval(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+        seed,
+        dagger_iteration,
+        dagger_query_episodes,
+    )
+    results_dir = _phase7_results_dir(
+        config,
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+        seed,
+    )
+    eval_episodes = int(episodes or config.get("incremental.phase7.goal_use_eval_episodes", 10))
+    output_path = results_dir / f"valid_goal_use_{checkpoint_label}_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 7G valid goal-use eval exists: {output_path}")
+        return output_path
+
+    device = default_device()
+    model, checkpoint = _load_phase7_low_level_checkpoint(checkpoint_path, device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+
+    def make_env(num_envs: int):
+        return gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=num_envs,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, int(checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    seed_start = int(config.get("incremental.phase7.replay_branch_seed", 1_200_000))
+    max_num_envs = min(
+        int(config.get("incremental.phase7.replay_branch_num_envs", 16)),
+        eval_episodes,
+    )
+    replay_state_tolerance = float(
+        config.get("incremental.phase7.replay_branch_state_tolerance", 1e-6)
+    )
+    max_episode_steps = int(config.get("env_max_episode_steps", 100))
+    max_steps_per_episode = int(
+        config.get("incremental.phase7.goal_use_max_steps_per_episode", max_episode_steps)
+    )
+    max_horizon = max(horizons)
+    replay_errors: list[float] = []
+    failed_replay_steps = 0
+    action_l2_by_pair: dict[str, list[float]] = {f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])}
+    latent_l2_by_pair: dict[str, list[float]] = {f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])}
+    tcp_l2_by_pair: dict[str, list[float]] = {f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])}
+    action_l2_near_far: list[float] = []
+    latent_l2_near_far: list[float] = []
+    tcp_l2_near_far: list[float] = []
+    directional_cosines: list[float] = []
+    positive_directional = []
+    farther_projection_ge_near = []
+    teacher_action_maes: list[float] = []
+    branch_latencies_per_env: list[float] = []
+    sample_count = 0
+    successes: list[float] = []
+    progress = trange(eval_episodes, desc="phase7G valid reachable goal-use")
+    for batch_start in range(0, eval_episodes, max_num_envs):
+        num_envs = min(max_num_envs, eval_episodes - batch_start)
+        reset_seeds = [seed_start + batch_start + i for i in range(num_envs)]
+        student_env = make_env(num_envs)
+        branch_env = make_env(num_envs)
+        action_low_np = np.asarray(student_env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student_env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device, dtype=torch.float32)
+        action_high = torch.as_tensor(action_high_np, device=device, dtype=torch.float32)
+        try:
+            obs, _info = student_env.reset(seed=reset_seeds)
+            history: list[torch.Tensor] = []
+            prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(
+                np.float32
+            )
+            active = np.ones(num_envs, dtype=bool)
+            success_once = np.zeros(num_envs, dtype=bool)
+            for _step in range(min(max_episode_steps, max_steps_per_episode)):
+                if not active.any():
+                    break
+                active_count = int(active.sum())
+                branch_timer = Timer()
+                branch_obs, _branch_info = branch_env.reset(seed=reset_seeds)
+                replay_done = torch.zeros(num_envs, device=device, dtype=torch.bool)
+                for action_history in history:
+                    branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                        branch_env.step(action_history)
+                    )
+                    replay_done = replay_done | torch.logical_or(branch_term, branch_trunc).view(-1)
+                state_errors = torch.max(
+                    torch.abs(student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()),
+                    dim=1,
+                ).values
+                state_errors_np = state_errors.detach().cpu().numpy()
+                replay_errors.extend(float(x) for x in state_errors_np[active])
+                replay_done_np = replay_done.detach().cpu().numpy().astype(bool)
+                failed_replay_steps += int(
+                    np.sum(active & (replay_done_np | (state_errors_np > replay_state_tolerance)))
+                )
+
+                branch_frames: dict[int, np.ndarray] = {}
+                branch_states: dict[int, np.ndarray] = {}
+                for step_idx in range(1, max_horizon + 1):
+                    teacher_action = torch.clamp(
+                        teacher.actor_mean(branch_obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                        branch_env.step(teacher_action)
+                    )
+                    if step_idx in horizons:
+                        branch_frames[step_idx] = _phase4_frame_inputs(
+                            branch_obs,
+                            dino,
+                            int(config.get("dino.batch_size", 64)),
+                        )
+                        branch_states[step_idx] = branch_obs["state"].detach().cpu().numpy().astype(
+                            np.float32
+                        )
+                    if bool(torch.all(torch.logical_or(branch_term, branch_trunc))):
+                        break
+                branch_latencies_per_env.append(branch_timer.elapsed() / active_count)
+                if set(branch_frames) != set(horizons):
+                    break
+
+                current_frame = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+                all_frames = [current_frame] + [branch_frames[h] for h in horizons]
+                frames = frame_norm.transform(np.concatenate(all_frames, axis=0))
+                z_all = encoder(torch.from_numpy(frames).to(device).float()).detach().cpu().numpy()
+                z = z_all[:num_envs].astype(np.float32)
+                goals = {
+                    h: z_all[(i + 1) * num_envs : (i + 2) * num_envs].astype(np.float32)
+                    for i, h in enumerate(horizons)
+                }
+                actions_by_h: dict[int, np.ndarray] = {}
+                for h in horizons:
+                    cond = np.stack(
+                        [
+                            _phase7_condition(z[i], goals[h][i], prev_action_norm[i], goal_encoding)
+                            for i in range(num_envs)
+                        ],
+                        axis=0,
+                    )
+                    pred_norm = model(torch.from_numpy(cond).to(device).float()).detach()
+                    actions_by_h[h] = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
+
+                current_state = obs["state"].detach().cpu().numpy().astype(np.float32)
+                tcp_by_h = {h: branch_states[h][:, 14:17] for h in horizons}
+                for near_h, far_h in zip(horizons[:-1], horizons[1:]):
+                    key = f"{near_h}_to_{far_h}"
+                    action_delta = actions_by_h[far_h] - actions_by_h[near_h]
+                    latent_delta = goals[far_h] - goals[near_h]
+                    tcp_delta = tcp_by_h[far_h] - tcp_by_h[near_h]
+                    action_l2_by_pair[key].extend(
+                        np.linalg.norm(action_delta[active], axis=-1).tolist()
+                    )
+                    latent_l2_by_pair[key].extend(
+                        np.linalg.norm(latent_delta[active], axis=-1).tolist()
+                    )
+                    tcp_l2_by_pair[key].extend(np.linalg.norm(tcp_delta[active], axis=-1).tolist())
+                near_h = horizons[0]
+                center_h = horizon_steps
+                far_h = horizons[-1]
+                near_far_action_delta = actions_by_h[far_h] - actions_by_h[near_h]
+                near_far_latent_delta = goals[far_h] - goals[near_h]
+                near_far_tcp_delta = tcp_by_h[far_h] - tcp_by_h[near_h]
+                action_l2_near_far.extend(
+                    np.linalg.norm(near_far_action_delta[active], axis=-1).tolist()
+                )
+                latent_l2_near_far.extend(
+                    np.linalg.norm(near_far_latent_delta[active], axis=-1).tolist()
+                )
+                tcp_l2_near_far.extend(np.linalg.norm(near_far_tcp_delta[active], axis=-1).tolist())
+                action_xyz = near_far_action_delta[:, :3]
+                denom = (
+                    np.linalg.norm(action_xyz, axis=-1)
+                    * np.linalg.norm(near_far_tcp_delta, axis=-1)
+                    + 1e-8
+                )
+                cosine = np.sum(action_xyz * near_far_tcp_delta, axis=-1) / denom
+                directional_cosines.extend(cosine[active].tolist())
+                positive_directional.extend((cosine[active] > 0.0).astype(np.float32).tolist())
+                near_vec = tcp_by_h[near_h] - current_state[:, 14:17]
+                far_vec = tcp_by_h[far_h] - current_state[:, 14:17]
+                near_proj = np.sum(actions_by_h[near_h][:, :3] * near_vec, axis=-1) / (
+                    np.linalg.norm(near_vec, axis=-1) + 1e-8
+                )
+                far_proj = np.sum(actions_by_h[far_h][:, :3] * far_vec, axis=-1) / (
+                    np.linalg.norm(far_vec, axis=-1) + 1e-8
+                )
+                farther_projection_ge_near.extend((far_proj[active] >= near_proj[active]).astype(np.float32).tolist())
+                teacher_now = torch.clamp(
+                    teacher.actor_mean(obs["state"].to(device).float()),
+                    action_low,
+                    action_high,
+                ).detach().cpu().numpy().astype(np.float32)
+                teacher_action_maes.extend(
+                    np.mean(np.abs(actions_by_h[center_h][active] - teacher_now[active]), axis=-1).tolist()
+                )
+                sample_count += active_count
+
+                action_t = torch.from_numpy(actions_by_h[center_h]).to(device).float()
+                if bool(config.get("policy.clip_actions_to_env_space", True)):
+                    action_t = torch.clamp(action_t, action_low, action_high)
+                action_t[~torch.from_numpy(active).to(device)] = 0.0
+                obs, _reward, terminated, truncated, info = student_env.step(action_t)
+                history.append(action_t.detach().clone())
+                prev_action_norm = action_norm.transform(action_t.detach().cpu().numpy().astype(np.float32))
+                if "success" in info:
+                    success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
+                done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(bool)
+                newly_done = active & done
+                if np.any(newly_done):
+                    progress.update(int(newly_done.sum()))
+                    active[newly_done] = False
+            if np.any(active):
+                progress.update(int(active.sum()))
+            successes.extend(float(x) for x in success_once)
+        finally:
+            student_env.close()
+            branch_env.close()
+    progress.close()
+
+    def mean_or_zero(values: list[float]) -> float:
+        return float(np.mean(values)) if values else 0.0
+
+    metrics = {
+        "episodes": eval_episodes,
+        "num_envs": max_num_envs,
+        "seed_start": seed_start,
+        "samples": sample_count,
+        "rollout_success": float(np.mean(successes)) if successes else 0.0,
+        "replay_current_state_error_mean": mean_or_zero(replay_errors),
+        "replay_current_state_error_max": float(np.max(replay_errors)) if replay_errors else 0.0,
+        "replay_failed_step_fraction": float(failed_replay_steps / max(1, len(replay_errors))),
+        "branch_generation_latency_per_env_s": mean_or_zero(branch_latencies_per_env),
+        "teacher_action_mae_center_goal": mean_or_zero(teacher_action_maes),
+        "action_sensitivity_l2_near_to_far": mean_or_zero(action_l2_near_far),
+        "latent_goal_l2_near_to_far": mean_or_zero(latent_l2_near_far),
+        "tcp_goal_l2_near_to_far": mean_or_zero(tcp_l2_near_far),
+        "directional_consistency_cosine": mean_or_zero(directional_cosines),
+        "positive_directional_fraction": mean_or_zero(positive_directional),
+        "farther_progress_projection_ge_near_fraction": mean_or_zero(farther_projection_ge_near),
+        "action_sensitivity_l2_by_pair": {
+            key: mean_or_zero(value) for key, value in action_l2_by_pair.items()
+        },
+        "latent_goal_l2_by_pair": {key: mean_or_zero(value) for key, value in latent_l2_by_pair.items()},
+        "tcp_goal_l2_by_pair": {key: mean_or_zero(value) for key, value in tcp_l2_by_pair.items()},
+    }
+    payload = {
+        "phase": "7G",
+        "method": "valid_reachable_goal_use",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "tested_horizons": horizons,
+        "action_chunk_steps": action_chunk_steps,
+        "goal_encoding": goal_encoding,
+        "goal_dropout_prob": goal_dropout_prob,
+        "dagger_iteration": dagger_iteration,
+        "dagger_query_episodes": dagger_query_episodes,
+        "seed": seed,
+        "checkpoint": str(checkpoint_path),
+        "closed_loop": metrics,
+        "matched_replay_state_gate": metrics["replay_failed_step_fraction"] == 0.0,
+        "goal_sensitivity_gate": metrics["action_sensitivity_l2_near_to_far"] > 0.01,
+        "directional_consistency_gate": metrics["positive_directional_fraction"] > 0.5,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
 def _phase7_load_privileged_model(
     checkpoint: dict[str, Any],
     key: str,

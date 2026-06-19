@@ -30,6 +30,7 @@ from hcl_poc.incremental import (
     evaluate_phase7_oracle_dagger_low_level,
     evaluate_phase7_privileged_branch_baselines,
     evaluate_phase7_replay_branch_oracle_low_level,
+    evaluate_phase7_valid_goal_use,
     probe_phase6_representation,
     probe_phase4_visual_history,
     run_phase0,
@@ -457,6 +458,21 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "phase7-goal-use-eval":
+        evaluate_phase7_valid_goal_use(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
+            seed=args.seed,
+            episodes=args.episodes,
+            dagger_iteration=args.dagger_iteration,
+            dagger_query_episodes=args.dagger_query_episodes,
+            force=args.force,
+        )
     elif args.incremental_command == "phase7-priv-train":
         train_phase7_privileged_branch_baselines(
             config,
@@ -727,6 +743,20 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_flat.add_argument("--episodes", type=int)
     phase7_flat.add_argument("--force", action="store_true")
     phase7_flat.set_defaults(func=incremental_cmd)
+    phase7_goal_use = incremental_sub.add_parser("phase7-goal-use-eval")
+    add_config_arg(phase7_goal_use)
+    phase7_goal_use.add_argument("--latent-dim", type=int)
+    phase7_goal_use.add_argument("--variant", default=None)
+    phase7_goal_use.add_argument("--horizon-steps", type=int)
+    phase7_goal_use.add_argument("--action-chunk-steps", type=int)
+    phase7_goal_use.add_argument("--goal-encoding", choices=["absolute", "delta"], default=None)
+    phase7_goal_use.add_argument("--goal-dropout-prob", type=float)
+    phase7_goal_use.add_argument("--seed", type=int, default=0)
+    phase7_goal_use.add_argument("--episodes", type=int)
+    phase7_goal_use.add_argument("--dagger-iteration", type=int)
+    phase7_goal_use.add_argument("--dagger-query-episodes", type=int)
+    phase7_goal_use.add_argument("--force", action="store_true")
+    phase7_goal_use.set_defaults(func=incremental_cmd)
     for command in ["phase7-priv-train", "phase7-priv-eval"]:
         phase7_priv = incremental_sub.add_parser(command)
         add_config_arg(phase7_priv)
