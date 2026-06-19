@@ -5176,17 +5176,52 @@ def _phase7_defaults(
     variant: str | None,
     horizon_steps: int | None,
     action_chunk_steps: int | None,
-) -> tuple[int, str, int, int]:
+    goal_encoding: str | None,
+    goal_dropout_prob: float | None,
+) -> tuple[int, str, int, int, str, float]:
     return (
         int(latent_dim or config.get("incremental.phase7.latent_dim", 256)),
         str(variant or config.get("incremental.phase7.variant", "ae_recon")),
         int(horizon_steps or config.get("incremental.phase7.horizon_steps", 10)),
         int(action_chunk_steps or config.get("incremental.phase7.action_chunk_steps", 1)),
+        str(goal_encoding or config.get("incremental.phase7.goal_encoding", "absolute")),
+        float(
+            config.get("incremental.phase7.goal_dropout_prob", 0.0)
+            if goal_dropout_prob is None
+            else goal_dropout_prob
+        ),
     )
 
 
-def _phase7_tag(variant: str, latent_dim: int, horizon_steps: int, action_chunk_steps: int) -> str:
-    return f"{variant}_z{latent_dim}_k{horizon_steps}_h{action_chunk_steps}"
+def _phase7_tag(
+    variant: str,
+    latent_dim: int,
+    horizon_steps: int,
+    action_chunk_steps: int,
+    goal_encoding: str = "absolute",
+    goal_dropout_prob: float = 0.0,
+) -> str:
+    tag = f"{variant}_z{latent_dim}_k{horizon_steps}_h{action_chunk_steps}"
+    if goal_encoding != "absolute":
+        tag = f"{tag}_{goal_encoding}"
+    if goal_dropout_prob > 0.0:
+        tag = f"{tag}_gd{int(round(100 * goal_dropout_prob))}"
+    return tag
+
+
+def _phase7_condition(
+    z: np.ndarray,
+    goal: np.ndarray,
+    prev_action_norm: np.ndarray,
+    goal_encoding: str,
+) -> np.ndarray:
+    if goal_encoding == "absolute":
+        goal_part = goal
+    elif goal_encoding == "delta":
+        goal_part = goal - z
+    else:
+        raise ValueError(f"Unknown Phase 7 goal encoding: {goal_encoding}")
+    return np.concatenate([z, goal_part, prev_action_norm], axis=-1).astype(np.float32)
 
 
 class _Phase7OracleDataset(torch.utils.data.Dataset):
@@ -5195,19 +5230,26 @@ class _Phase7OracleDataset(torch.utils.data.Dataset):
         conditions: np.ndarray,
         actions: np.ndarray,
         length: int,
+        latent_dim: int,
+        goal_dropout_prob: float = 0.0,
     ) -> None:
         if len(conditions) == 0:
             raise ValueError("Phase 7 oracle dataset is empty")
         self.conditions = conditions.astype(np.float32)
         self.actions = actions.astype(np.float32)
         self.length = length
+        self.latent_dim = latent_dim
+        self.goal_dropout_prob = goal_dropout_prob
 
     def __len__(self) -> int:
         return self.length
 
     def __getitem__(self, _index: int) -> tuple[torch.Tensor, torch.Tensor]:
         i = int(np.random.randint(0, len(self.conditions)))
-        return torch.from_numpy(self.conditions[i]), torch.from_numpy(self.actions[i])
+        condition = self.conditions[i].copy()
+        if self.goal_dropout_prob > 0.0 and np.random.random() < self.goal_dropout_prob:
+            condition[self.latent_dim : 2 * self.latent_dim] = 0.0
+        return torch.from_numpy(condition), torch.from_numpy(self.actions[i])
 
 
 def _phase7_encode_oracle_episodes(
@@ -5217,6 +5259,7 @@ def _phase7_encode_oracle_episodes(
     episodes: list[dict[str, np.ndarray]],
     horizon_steps: int,
     action_chunk_steps: int,
+    goal_encoding: str,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray]:
     if action_chunk_steps != 1:
@@ -5242,7 +5285,9 @@ def _phase7_encode_oracle_episodes(
             prev_actions = action_norm.transform(episode["actions"]).astype(np.float32)
             for t in range(len(episode["actions"]) - horizon_steps):
                 prev_action = prev_actions[t - 1] if t > 0 else zero_action_norm
-                conditions.append(np.concatenate([z[t], z[t + horizon_steps], prev_action], axis=0))
+                conditions.append(
+                    _phase7_condition(z[t], z[t + horizon_steps], prev_action, goal_encoding)
+                )
                 actions.append(episode["actions"][t])
     if not conditions:
         raise ValueError(f"No Phase 7 samples for horizon {horizon_steps}")
@@ -5255,6 +5300,7 @@ def _phase7_oracle_action_metrics(
     actions: np.ndarray,
     action_norm: Standardizer,
     latent_dim: int,
+    goal_encoding: str,
     max_queries: int,
     seed: int,
 ) -> dict[str, Any]:
@@ -5264,11 +5310,18 @@ def _phase7_oracle_action_metrics(
         indices = rng.choice(indices, size=max_queries, replace=False)
     x = conditions[indices].copy()
     y = actions[indices]
+    current = x[:, :latent_dim]
+    goal_part = x[:, latent_dim : 2 * latent_dim]
+    absolute_goal = current + goal_part if goal_encoding == "delta" else goal_part
+    shuffled_order = rng.permutation(len(x))
     shuffled = x.copy()
-    shuffled_goal_order = rng.permutation(len(shuffled))
-    shuffled[:, latent_dim : 2 * latent_dim] = shuffled[shuffled_goal_order, latent_dim : 2 * latent_dim]
+    shuffled[:, latent_dim : 2 * latent_dim] = (
+        absolute_goal[shuffled_order] - current
+        if goal_encoding == "delta"
+        else absolute_goal[shuffled_order]
+    )
     zero_goal = x.copy()
-    zero_goal[:, latent_dim : 2 * latent_dim] = 0.0
+    zero_goal[:, latent_dim : 2 * latent_dim] = -current if goal_encoding == "delta" else 0.0
     device = next(model.parameters()).device
 
     def predict(raw_conditions: np.ndarray) -> np.ndarray:
@@ -5302,16 +5355,38 @@ def train_phase7_oracle_low_level(
     variant: str | None = None,
     horizon_steps: int | None = None,
     action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
     seed: int = 0,
     force: bool = False,
 ) -> Path:
     set_seed(seed)
-    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
-        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
     )
     if action_chunk_steps >= horizon_steps:
         raise ValueError(f"Phase 7 requires H < k, got H={action_chunk_steps}, k={horizon_steps}")
-    tag = _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+    tag = _phase7_tag(
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    )
     artifact_dir = ensure_dir(
         config.path_value("paths.incremental_artifact_dir") / "phase7" / tag / f"seed{seed}"
     )
@@ -5338,6 +5413,7 @@ def train_phase7_oracle_low_level(
         train_episodes,
         horizon_steps,
         action_chunk_steps,
+        goal_encoding,
         device,
     )
     val_cond, val_actions = _phase7_encode_oracle_episodes(
@@ -5347,6 +5423,7 @@ def train_phase7_oracle_low_level(
         val_episodes,
         horizon_steps,
         action_chunk_steps,
+        goal_encoding,
         device,
     )
     train_dataset = _Phase7OracleDataset(
@@ -5354,6 +5431,8 @@ def train_phase7_oracle_low_level(
         action_norm.transform(train_actions).astype(np.float32),
         length=int(config.get("incremental.phase7.batch_size", 512))
         * int(config.get("incremental.phase7.batches_per_epoch", 300)),
+        latent_dim=latent_dim,
+        goal_dropout_prob=goal_dropout_prob,
     )
     loader = DataLoader(
         train_dataset,
@@ -5409,6 +5488,7 @@ def train_phase7_oracle_low_level(
         val_actions,
         action_norm,
         latent_dim,
+        goal_encoding,
         int(config.get("incremental.phase7.validation_queries", 10000)),
         seed + horizon_steps,
     )
@@ -5418,6 +5498,8 @@ def train_phase7_oracle_low_level(
         "latent_dim": latent_dim,
         "horizon_steps": horizon_steps,
         "action_chunk_steps": action_chunk_steps,
+        "goal_encoding": goal_encoding,
+        "goal_dropout_prob": goal_dropout_prob,
         "cond_dim": train_cond.shape[-1],
         "hidden_dim": int(config.get("incremental.phase7.hidden_dim", 1024)),
         "action_dim": train_actions.shape[-1],
@@ -5442,6 +5524,8 @@ def train_phase7_oracle_low_level(
             "latent_dim": latent_dim,
             "horizon_steps": horizon_steps,
             "action_chunk_steps": action_chunk_steps,
+            "goal_encoding": goal_encoding,
+            "goal_dropout_prob": goal_dropout_prob,
             "validation_metrics": validation_metrics,
             "best_validation_mse": best_val,
             "elapsed_s": timer.elapsed(),
@@ -5559,6 +5643,7 @@ def _evaluate_phase7_goal_mode(
     action_dim = int(checkpoint["action_dim"])
     latent_dim = int(checkpoint["latent_dim"])
     horizon_steps = int(checkpoint["horizon_steps"])
+    goal_encoding = str(checkpoint.get("goal_encoding", "absolute"))
     zero_action_norm = action_norm.transform(np.zeros((1, action_dim), dtype=np.float32))[0]
     prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
     active_idx = np.arange(num_envs, dtype=np.int32)
@@ -5591,7 +5676,7 @@ def _evaluate_phase7_goal_mode(
                 raise ValueError(f"Unknown Phase 7 goal mode: {goal_mode}")
             source = oracle_latents[source_idx]
             goals[env_idx] = source[min(t + horizon_steps, len(source) - 1)]
-        cond = np.concatenate([z, goals, prev_action_norm], axis=-1).astype(np.float32)
+        cond = _phase7_condition(z, goals, prev_action_norm, goal_encoding)
         pred_norm = model(torch.from_numpy(cond).to(device).float())
         raw_action = action_norm.inverse(pred_norm.cpu().numpy())
         latencies.append(timer.elapsed() / num_envs)
@@ -5647,13 +5732,28 @@ def evaluate_phase7_oracle_low_level(
     variant: str | None = None,
     horizon_steps: int | None = None,
     action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
     seed: int = 0,
     episodes: int | None = None,
     goal_mode: str = "all",
     force: bool = False,
 ) -> Path:
-    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
-        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
     )
     checkpoint_path = train_phase7_oracle_low_level(
         config,
@@ -5661,6 +5761,8 @@ def evaluate_phase7_oracle_low_level(
         variant=variant,
         horizon_steps=horizon_steps,
         action_chunk_steps=action_chunk_steps,
+        goal_encoding=goal_encoding,
+        goal_dropout_prob=goal_dropout_prob,
         seed=seed,
         force=force,
     )
@@ -5701,7 +5803,14 @@ def evaluate_phase7_oracle_low_level(
     }
     correct_success = closed_loop["correct"]["success"] if "correct" in closed_loop else None
     visual_success = _phase7_visual_flow_success(config, seed)
-    tag = _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+    tag = _phase7_tag(
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    )
     results_dir = ensure_dir(
         config.path_value("paths.incremental_results_dir") / "phase7" / tag / f"seed{seed}"
     )
@@ -5713,6 +5822,8 @@ def evaluate_phase7_oracle_low_level(
         "latent_dim": latent_dim,
         "horizon_steps": horizon_steps,
         "action_chunk_steps": action_chunk_steps,
+        "goal_encoding": goal_encoding,
+        "goal_dropout_prob": goal_dropout_prob,
         "seed": seed,
         "goal_mode": goal_mode,
         "closed_loop": closed_loop,
@@ -5737,12 +5848,21 @@ def _phase7_artifact_dir(
     latent_dim: int,
     horizon_steps: int,
     action_chunk_steps: int,
+    goal_encoding: str,
+    goal_dropout_prob: float,
     seed: int,
 ) -> Path:
     return ensure_dir(
         config.path_value("paths.incremental_artifact_dir")
         / "phase7"
-        / _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+        / _phase7_tag(
+            variant,
+            latent_dim,
+            horizon_steps,
+            action_chunk_steps,
+            goal_encoding,
+            goal_dropout_prob,
+        )
         / f"seed{seed}"
     )
 
@@ -5753,12 +5873,21 @@ def _phase7_results_dir(
     latent_dim: int,
     horizon_steps: int,
     action_chunk_steps: int,
+    goal_encoding: str,
+    goal_dropout_prob: float,
     seed: int,
 ) -> Path:
     return ensure_dir(
         config.path_value("paths.incremental_results_dir")
         / "phase7"
-        / _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+        / _phase7_tag(
+            variant,
+            latent_dim,
+            horizon_steps,
+            action_chunk_steps,
+            goal_encoding,
+            goal_dropout_prob,
+        )
         / f"seed{seed}"
     )
 
@@ -5786,16 +5915,38 @@ def collect_phase7_oracle_dagger_queries(
     variant: str | None = None,
     horizon_steps: int | None = None,
     action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
     iteration: int = 1,
     seed: int = 0,
     episodes: int | None = None,
     force: bool = False,
 ) -> Path:
-    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
-        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
     )
     artifact_dir = _phase7_artifact_dir(
-        config, variant, latent_dim, horizon_steps, action_chunk_steps, seed
+        config,
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+        seed,
     )
     output_path = artifact_dir / f"oracle_dagger_iter{iteration}.npz"
     if output_path.exists() and not force:
@@ -5807,6 +5958,8 @@ def collect_phase7_oracle_dagger_queries(
         variant=variant,
         horizon_steps=horizon_steps,
         action_chunk_steps=action_chunk_steps,
+        goal_encoding=goal_encoding,
+        goal_dropout_prob=goal_dropout_prob,
         seed=seed,
         force=False,
     )
@@ -5851,7 +6004,7 @@ def collect_phase7_oracle_dagger_queries(
                 continue
             source = oracle_latents[episode_idx]
             goals[env_idx] = source[min(int(active_t[env_idx]) + horizon_steps, len(source) - 1)]
-        cond = np.concatenate([z, goals, prev_action_norm], axis=-1).astype(np.float32)
+        cond = _phase7_condition(z, goals, prev_action_norm, goal_encoding)
         teacher_action = torch.clamp(
             teacher.actor_mean(torch.from_numpy(state).to(device).float()),
             action_low,
@@ -5895,6 +6048,8 @@ def collect_phase7_oracle_dagger_queries(
         semantics=np.asarray(
             "phase7 low-level visited current latents with oracle future goals relabeled by privileged teacher"
         ),
+        goal_encoding=np.asarray(goal_encoding),
+        goal_dropout_prob=np.asarray(goal_dropout_prob, dtype=np.float32),
         rollout_checkpoint=np.asarray(str(rollout_checkpoint_path)),
     )
     console.print(f"Wrote Phase 7 oracle DAgger queries: {output_path}")
@@ -5907,16 +6062,38 @@ def train_phase7_oracle_dagger_low_level(
     variant: str | None = None,
     horizon_steps: int | None = None,
     action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
     iteration: int = 1,
     seed: int = 0,
     force: bool = False,
 ) -> Path:
     set_seed(seed)
-    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
-        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
     )
     artifact_dir = _phase7_artifact_dir(
-        config, variant, latent_dim, horizon_steps, action_chunk_steps, seed
+        config,
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+        seed,
     )
     checkpoint_path = artifact_dir / f"oracle_low_level_dagger_iter{iteration}.pt"
     if checkpoint_path.exists() and not force:
@@ -5928,6 +6105,8 @@ def train_phase7_oracle_dagger_low_level(
         variant=variant,
         horizon_steps=horizon_steps,
         action_chunk_steps=action_chunk_steps,
+        goal_encoding=goal_encoding,
+        goal_dropout_prob=goal_dropout_prob,
         iteration=iteration,
         seed=seed,
         force=False,
@@ -5951,6 +6130,7 @@ def train_phase7_oracle_dagger_low_level(
         train_episodes,
         horizon_steps,
         action_chunk_steps,
+        goal_encoding,
         device,
     )
     val_cond, val_actions = _phase7_encode_oracle_episodes(
@@ -5960,6 +6140,7 @@ def train_phase7_oracle_dagger_low_level(
         val_episodes,
         horizon_steps,
         action_chunk_steps,
+        goal_encoding,
         device,
     )
     with np.load(query_path) as data:
@@ -5982,6 +6163,8 @@ def train_phase7_oracle_dagger_low_level(
         action_norm.transform(train_actions).astype(np.float32),
         length=int(config.get("incremental.phase7.batch_size", 512))
         * int(config.get("incremental.phase7.batches_per_epoch", 300)),
+        latent_dim=latent_dim,
+        goal_dropout_prob=goal_dropout_prob,
     )
     loader = DataLoader(
         train_dataset,
@@ -6037,6 +6220,7 @@ def train_phase7_oracle_dagger_low_level(
         val_actions,
         action_norm,
         latent_dim,
+        goal_encoding,
         int(config.get("incremental.phase7.validation_queries", 10000)),
         seed + 100 * iteration + horizon_steps,
     )
@@ -6046,6 +6230,8 @@ def train_phase7_oracle_dagger_low_level(
         "latent_dim": latent_dim,
         "horizon_steps": horizon_steps,
         "action_chunk_steps": action_chunk_steps,
+        "goal_encoding": goal_encoding,
+        "goal_dropout_prob": goal_dropout_prob,
         "iteration": iteration,
         "cond_dim": train_cond.shape[-1],
         "hidden_dim": int(config.get("incremental.phase7.hidden_dim", 1024)),
@@ -6075,6 +6261,8 @@ def train_phase7_oracle_dagger_low_level(
             "latent_dim": latent_dim,
             "horizon_steps": horizon_steps,
             "action_chunk_steps": action_chunk_steps,
+            "goal_encoding": goal_encoding,
+            "goal_dropout_prob": goal_dropout_prob,
             "iteration": iteration,
             "validation_metrics": validation_metrics,
             "best_validation_mse": best_val,
@@ -6092,14 +6280,29 @@ def evaluate_phase7_oracle_dagger_low_level(
     variant: str | None = None,
     horizon_steps: int | None = None,
     action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
     iteration: int = 1,
     seed: int = 0,
     episodes: int | None = None,
     goal_mode: str = "all",
     force: bool = False,
 ) -> Path:
-    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
-        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
     )
     checkpoint_path = train_phase7_oracle_dagger_low_level(
         config,
@@ -6107,6 +6310,8 @@ def evaluate_phase7_oracle_dagger_low_level(
         variant=variant,
         horizon_steps=horizon_steps,
         action_chunk_steps=action_chunk_steps,
+        goal_encoding=goal_encoding,
+        goal_dropout_prob=goal_dropout_prob,
         iteration=iteration,
         seed=seed,
         force=force,
@@ -6141,7 +6346,14 @@ def evaluate_phase7_oracle_dagger_low_level(
     correct_success = closed_loop["correct"]["success"] if "correct" in closed_loop else None
     visual_success = _phase7_visual_flow_success(config, seed)
     results_dir = _phase7_results_dir(
-        config, variant, latent_dim, horizon_steps, action_chunk_steps, seed
+        config,
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+        seed,
     )
     output_path = results_dir / f"oracle_low_level_dagger_iter{iteration}_{goal_mode}.json"
     payload = {
@@ -6151,6 +6363,8 @@ def evaluate_phase7_oracle_dagger_low_level(
         "latent_dim": latent_dim,
         "horizon_steps": horizon_steps,
         "action_chunk_steps": action_chunk_steps,
+        "goal_encoding": goal_encoding,
+        "goal_dropout_prob": goal_dropout_prob,
         "iteration": iteration,
         "seed": seed,
         "goal_mode": goal_mode,

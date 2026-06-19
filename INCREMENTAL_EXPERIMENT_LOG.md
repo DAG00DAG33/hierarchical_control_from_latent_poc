@@ -777,3 +777,67 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   condition. If that still fails, add goal dropout/corruption during training
   so the policy can retain the flat latent controller behavior while still
   exploiting valid future goals.
+
+### 2026-06-19 - P7-D03: Delta-goal low-level conditioning
+
+- **Change:** Added Phase 7 `goal_encoding` with two modes:
+  - `absolute`: `(z_t, z_{t+k}, a_{t-1})`;
+  - `delta`: `(z_t, z_{t+k} - z_t, a_{t-1})`.
+- **Run:** `phase7-eval --latent-dim 256 --variant ae_recon --horizon-steps 2
+  --action-chunk-steps 1 --goal-encoding delta --goal-mode all --force`.
+- **DAgger run:** Same configuration with `phase7-dagger-eval --iteration 1`.
+- **Closed-loop result:**
+
+| policy | goal encoding | correct success | shuffled success | zero success | correct max reward | correct action MAE |
+| --- | --- | --- | --- | --- | --- | --- |
+| offline `k=2` | absolute | `0.33` | `0.00` | `0.00` | `0.487` | `0.0250` |
+| offline `k=2` | delta | `0.38` | `0.00` | `0.01` | `0.522` | `0.0266` |
+| DAgger iter 1 `k=2` | absolute | `0.34` | `0.00` | `0.00` | `0.499` | `0.0389` |
+| DAgger iter 1 `k=2` | delta | `0.39` | `0.01` | `0.00` | `0.527` | `0.0406` |
+
+- **Interpretation:** Delta conditioning is better than absolute conditioning,
+  but the improvement is small and still far below the 66/100 flat visual-flow
+  gate. DAgger again mostly increases closed-loop reward but worsens held-out
+  action MAE, suggesting the low-level objective is still too goal-dominated
+  and brittle.
+- **Gate decision:** Failed.
+- **Next action:** Add goal dropout during low-level training. For delta goals,
+  dropping the goal sets the delta vector to zero while keeping `z_t` and
+  previous action, forcing the model to retain a current-state action mapping
+  instead of depending entirely on the oracle future vector.
+
+### 2026-06-19 - P7-D04: Delta-goal dropout regularization
+
+- **Change:** Added Phase 7 `goal_dropout_prob`. During training only, the
+  goal part of the low-level condition is zeroed for a fraction of minibatch
+  samples. For the delta representation, this means the model sees
+  `(z_t, 0, a_{t-1})` and must predict the teacher action from current latent
+  and previous action alone.
+- **Runs:**
+  - `phase7-eval --goal-encoding delta --goal-dropout-prob 0.5`;
+  - `phase7-eval --goal-encoding delta --goal-dropout-prob 0.2`.
+- **Closed-loop result:**
+
+| policy | goal dropout | correct success | shuffled success | zero success | correct max reward | correct action MAE |
+| --- | --- | --- | --- | --- | --- | --- |
+| delta offline `k=2` | `0.0` | `0.38` | `0.00` | `0.01` | `0.522` | `0.0266` |
+| delta offline `k=2` | `0.2` | `0.36` | `0.00` | `0.00` | `0.506` | `0.0263` |
+| delta offline `k=2` | `0.5` | `0.33` | `0.00` | `0.01` | `0.480` | `0.0268` |
+
+- **Interpretation:** Goal dropout did not improve the oracle low-level
+  policy. A light dropout rate preserves held-out action MAE but still reduces
+  closed-loop success. A heavy dropout rate weakens both correct-goal success
+  and goal-sensitivity. The issue is not solved by simply forcing occasional
+  current-state-only predictions.
+- **Gate decision:** Failed. Best Phase 7 result remains delta offline `k=2`
+  at 38/100, or 39/100 with one DAgger iteration, both well below the 66/100
+  flat visual-flow reference.
+- **Next action:** Debug the oracle interface itself. The next check should
+  compare teacher-oracle future latents against the student's actual future
+  latents under exact teacher replay and under the low-level policy, to
+  quantify whether the provided oracle goal is reachable from the student's
+  deviated state. If the oracle goal is often dynamically inconsistent after
+  early deviation, Phase 7 should switch from absolute teacher-trajectory
+  goals at fixed seed/time to a receding locally reachable target, or train the
+  low level on recovery trajectories with goals sampled from the same perturbed
+  rollout.

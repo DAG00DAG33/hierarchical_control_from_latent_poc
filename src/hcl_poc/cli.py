@@ -399,6 +399,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             variant=args.variant,
             horizon_steps=args.horizon_steps,
             action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
             seed=args.seed,
             force=args.force,
         )
@@ -409,6 +411,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             variant=args.variant,
             horizon_steps=args.horizon_steps,
             action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
             seed=args.seed,
             episodes=args.episodes,
             goal_mode=args.goal_mode,
@@ -421,6 +425,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             variant=args.variant,
             horizon_steps=args.horizon_steps,
             action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
             iteration=args.iteration,
             seed=args.seed,
             episodes=args.episodes,
@@ -433,6 +439,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             variant=args.variant,
             horizon_steps=args.horizon_steps,
             action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
             iteration=args.iteration,
             seed=args.seed,
             force=args.force,
@@ -444,6 +452,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             variant=args.variant,
             horizon_steps=args.horizon_steps,
             action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
             iteration=args.iteration,
             seed=args.seed,
             episodes=args.episodes,
@@ -622,6 +632,8 @@ def build_parser() -> argparse.ArgumentParser:
         phase7.add_argument("--variant", default=None)
         phase7.add_argument("--horizon-steps", type=int)
         phase7.add_argument("--action-chunk-steps", type=int)
+        phase7.add_argument("--goal-encoding", choices=["absolute", "delta"], default=None)
+        phase7.add_argument("--goal-dropout-prob", type=float)
         phase7.add_argument("--seed", type=int, default=0)
         phase7.add_argument("--force", action="store_true")
         if command == "phase7-eval":
@@ -635,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
         phase7_dagger.add_argument("--variant", default=None)
         phase7_dagger.add_argument("--horizon-steps", type=int)
         phase7_dagger.add_argument("--action-chunk-steps", type=int)
+        phase7_dagger.add_argument("--goal-encoding", choices=["absolute", "delta"], default=None)
+        phase7_dagger.add_argument("--goal-dropout-prob", type=float)
         phase7_dagger.add_argument("--iteration", type=int, default=1)
         phase7_dagger.add_argument("--seed", type=int, default=0)
         phase7_dagger.add_argument("--force", action="store_true")

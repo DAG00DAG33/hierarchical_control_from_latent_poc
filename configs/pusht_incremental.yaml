@@ -178,6 +178,8 @@ incremental:
     variant: ae_recon
     horizon_steps: 2
     action_chunk_steps: 1
+    goal_encoding: delta
+    goal_dropout_prob: 0.0
     hidden_dim: 1024
     batch_size: 512
     batches_per_epoch: 300
