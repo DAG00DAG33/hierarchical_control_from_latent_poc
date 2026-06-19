@@ -2509,8 +2509,12 @@ At minimum:
 Use one training seed per method and dataset size, with the same nested data
 subsets and fixed evaluation seeds for paired comparisons.
 
-Use 100 evaluation episodes per method. Report binomial uncertainty and state
-explicitly that the reduced protocol does not measure training-seed
+Use 100 evaluation episodes for every deployable method. The exact local
+branch-oracle hierarchy is a computationally expensive diagnostic, so evaluate
+it on 10 fixed episodes per data budget and show its correspondingly larger
+binomial uncertainty. Report each method's episode count explicitly.
+
+State explicitly that the reduced protocol does not measure training-seed
 robustness. Additional seeds or episodes are optional only for a final selected
 comparison when runtime permits; they are not required for the phase gate.
 

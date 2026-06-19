@@ -267,3 +267,5 @@ incremental:
     batch_size: 512
     epochs: 30
     lr: 0.0001
+  phase12:
+    oracle_eval_episodes: 10

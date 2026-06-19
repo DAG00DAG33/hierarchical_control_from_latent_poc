@@ -11579,6 +11579,7 @@ def run_phase12_budget(
     budgets = [50, 100, 200, 500, 1000, 1800]
     if n_trajectories not in budgets:
         raise ValueError(f"Phase 12 trajectory budget must be one of {budgets}")
+    oracle_episodes = int(config.get("incremental.phase12.oracle_eval_episodes", 10))
     budget_config = _phase12_budget_config(config, n_trajectories)
     output_dir = ensure_dir(
         config.path_value("paths.incremental_results_dir") / "phase12" / f"n{n_trajectories}"
@@ -11631,7 +11632,7 @@ def run_phase12_budget(
         goal_encoding="delta",
         goal_dropout_prob=0.0,
         seed=seed,
-        episodes=episodes,
+        episodes=oracle_episodes,
         force=False,
     )
     train_phase8_deterministic_predictor(
@@ -11711,6 +11712,7 @@ def run_phase12_budget(
         "validation_trajectories": 200,
         "policy_seed": seed,
         "evaluation_episodes": episodes,
+        "oracle_evaluation_episodes": oracle_episodes,
         "evaluation_seed_start": eval_seed_start,
         "rows": rows,
         "artifact_root": str(budget_config.path_value("paths.incremental_artifact_dir")),
