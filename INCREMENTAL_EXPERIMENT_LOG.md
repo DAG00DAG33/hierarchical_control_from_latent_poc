@@ -29,8 +29,8 @@ identify its causal rollout source.
 | --- | --- |
 | Active phase | Phase 7: oracle future-latent low-level policy |
 | Gate | Oracle future-latent low-level should match flat visual flow and degrade under corrupted goals |
-| Gate state | Phases 0-6 passed; Phase 7 initial offline oracle low-level fails closed-loop success |
-| Current blocker | Offline oracle-goal low-level is goal-sensitive but suffers closed-loop distribution shift |
+| Gate state | Phases 0-6 passed; Phase 7 oracle low-level fails closed-loop success |
+| Current blocker | Absolute future-latent conditioning is goal-sensitive but brittle in closed loop |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
 | Canonical controller | `pd_ee_delta_pos`, 20 Hz |
@@ -739,3 +739,41 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   state with the privileged teacher action, and keep the oracle future goal
   fixed as a conditioning variable. These are state-query labels for the
   action head only, not causal future-state labels.
+
+### 2026-06-19 - P7-D02: Oracle low-level DAgger iteration 1
+
+- **Implementation:** Added Phase 7 DAgger commands:
+  - `incremental phase7-dagger-collect`;
+  - `incremental phase7-dagger-train`;
+  - `incremental phase7-dagger-eval`.
+- **Dataset semantics:** `state_query_dataset` for the low-level action head.
+  Each sample stores the student-visited current latent, the oracle future
+  latent from the teacher trajectory for the same initial seed, the previous
+  action, and the privileged teacher action label at the student-visited
+  current state. These samples are not used as causal future-state labels.
+- **Run:** `phase7-dagger-eval --latent-dim 256 --variant ae_recon
+  --horizon-steps 2 --action-chunk-steps 1 --iteration 1 --goal-mode all
+  --force`.
+- **Collection:** 200 student-policy episodes under correct oracle goals.
+- **Closed-loop result:**
+
+| policy | correct success | shuffled success | zero success | correct max reward | correct action MAE |
+| --- | --- | --- | --- | --- | --- |
+| offline `k=2` | `0.33` | `0.00` | `0.00` | `0.487` | `0.0250` |
+| DAgger iter 1 `k=2` | `0.34` | `0.00` | `0.00` | `0.499` | `0.0389` |
+
+- **Goal-sensitivity after DAgger:** Shuffled-goal action MAE `0.2585`,
+  zero-goal action MAE `0.2147`, goal-sensitivity L2 `0.518`.
+- **Gate decision:** Failed. Correct-goal success remains far below the 66/100
+  flat visual-flow reference.
+- **Diagnosis:** One DAgger iteration does not solve the Phase 7 failure and
+  actually worsens held-out correct-goal action MAE. Since corrupted goals
+  still collapse performance, the low level continues to use the goal, but the
+  absolute future-latent conditioning is brittle. The model likely overfits
+  absolute goal identity rather than learning a local displacement/reaching
+  relation that transfers to student-current states.
+- **Next action:** Try a delta-goal low-level condition
+  `(z_t, z_{t+k} - z_t, a_{t-1})` and compare it with the current absolute
+  condition. If that still fails, add goal dropout/corruption during training
+  so the policy can retain the flat latent controller behavior while still
+  exploiting valid future goals.

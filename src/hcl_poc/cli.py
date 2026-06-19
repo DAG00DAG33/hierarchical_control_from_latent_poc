@@ -15,6 +15,7 @@ from hcl_poc.incremental import (
     collect_phase1_query_dataset,
     collect_phase2_dagger_queries,
     collect_phase6_latent_dagger_queries,
+    collect_phase7_oracle_dagger_queries,
     evaluate_phase1_bc,
     evaluate_phase2_dagger_bc,
     evaluate_phase2_recovery,
@@ -25,6 +26,7 @@ from hcl_poc.incremental import (
     evaluate_phase6_latent_dagger_bc,
     evaluate_phase6_latent_flow,
     evaluate_phase7_oracle_low_level,
+    evaluate_phase7_oracle_dagger_low_level,
     probe_phase6_representation,
     probe_phase4_visual_history,
     run_phase0,
@@ -38,6 +40,7 @@ from hcl_poc.incremental import (
     train_phase6_latent_flow,
     train_phase6_representation,
     train_phase7_oracle_low_level,
+    train_phase7_oracle_dagger_low_level,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -411,6 +414,42 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             goal_mode=args.goal_mode,
             force=args.force,
         )
+    elif args.incremental_command == "phase7-dagger-collect":
+        collect_phase7_oracle_dagger_queries(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            action_chunk_steps=args.action_chunk_steps,
+            iteration=args.iteration,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase7-dagger-train":
+        train_phase7_oracle_dagger_low_level(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            action_chunk_steps=args.action_chunk_steps,
+            iteration=args.iteration,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase7-dagger-eval":
+        evaluate_phase7_oracle_dagger_low_level(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            action_chunk_steps=args.action_chunk_steps,
+            iteration=args.iteration,
+            seed=args.seed,
+            episodes=args.episodes,
+            goal_mode=args.goal_mode,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -589,6 +628,25 @@ def build_parser() -> argparse.ArgumentParser:
             phase7.add_argument("--episodes", type=int)
             phase7.add_argument("--goal-mode", choices=["all", "correct", "shuffled", "zero"], default="all")
         phase7.set_defaults(func=incremental_cmd)
+    for command in ["phase7-dagger-collect", "phase7-dagger-train", "phase7-dagger-eval"]:
+        phase7_dagger = incremental_sub.add_parser(command)
+        add_config_arg(phase7_dagger)
+        phase7_dagger.add_argument("--latent-dim", type=int)
+        phase7_dagger.add_argument("--variant", default=None)
+        phase7_dagger.add_argument("--horizon-steps", type=int)
+        phase7_dagger.add_argument("--action-chunk-steps", type=int)
+        phase7_dagger.add_argument("--iteration", type=int, default=1)
+        phase7_dagger.add_argument("--seed", type=int, default=0)
+        phase7_dagger.add_argument("--force", action="store_true")
+        if command in {"phase7-dagger-collect", "phase7-dagger-eval"}:
+            phase7_dagger.add_argument("--episodes", type=int)
+        if command == "phase7-dagger-eval":
+            phase7_dagger.add_argument(
+                "--goal-mode",
+                choices=["all", "correct", "shuffled", "zero"],
+                default="all",
+            )
+        phase7_dagger.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

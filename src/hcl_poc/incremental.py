@@ -5729,3 +5729,443 @@ def evaluate_phase7_oracle_low_level(
     write_json(output_path, payload)
     console.print(payload)
     return output_path
+
+
+def _phase7_artifact_dir(
+    config: Config,
+    variant: str,
+    latent_dim: int,
+    horizon_steps: int,
+    action_chunk_steps: int,
+    seed: int,
+) -> Path:
+    return ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase7"
+        / _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+        / f"seed{seed}"
+    )
+
+
+def _phase7_results_dir(
+    config: Config,
+    variant: str,
+    latent_dim: int,
+    horizon_steps: int,
+    action_chunk_steps: int,
+    seed: int,
+) -> Path:
+    return ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase7"
+        / _phase7_tag(variant, latent_dim, horizon_steps, action_chunk_steps)
+        / f"seed{seed}"
+    )
+
+
+def _load_phase7_low_level_checkpoint(
+    path: Path,
+    device: torch.device,
+) -> tuple[nn.Module, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model = MLP(
+        int(checkpoint["cond_dim"]),
+        int(checkpoint["action_dim"]),
+        int(checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    return model, checkpoint
+
+
+@torch.inference_mode()
+def collect_phase7_oracle_dagger_queries(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    iteration: int = 1,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
+        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    )
+    artifact_dir = _phase7_artifact_dir(
+        config, variant, latent_dim, horizon_steps, action_chunk_steps, seed
+    )
+    output_path = artifact_dir / f"oracle_dagger_iter{iteration}.npz"
+    if output_path.exists() and not force:
+        console.print(f"Phase 7 oracle DAgger queries exist: {output_path}")
+        return output_path
+    base_checkpoint_path = train_phase7_oracle_low_level(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        action_chunk_steps=action_chunk_steps,
+        seed=seed,
+        force=False,
+    )
+    rollout_checkpoint_path = base_checkpoint_path
+    previous_dagger = artifact_dir / f"oracle_low_level_dagger_iter{iteration - 1}.pt"
+    if iteration > 1 and previous_dagger.exists():
+        rollout_checkpoint_path = previous_dagger
+    device = default_device()
+    model, checkpoint = _load_phase7_low_level_checkpoint(rollout_checkpoint_path, device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    eval_episodes = int(episodes or config.get("incremental.phase7.dagger_episodes", 200))
+    seed_start = int(config.get("incremental.phase7.dagger_seed", 740000)) + 1000 * iteration
+    oracle_frames = _phase7_collect_oracle_frames(config, dino, eval_episodes, seed_start)
+    oracle_latents = _phase7_encode_oracle_frame_sequences(encoder, frame_norm, oracle_frames, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = min(int(config.get("incremental.phase7.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    obs, _info = env.reset(seed=seed_start)
+    action_dim = int(checkpoint["action_dim"])
+    zero_action_norm = action_norm.transform(np.zeros((1, action_dim), dtype=np.float32))[0]
+    prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
+    active_idx = np.arange(num_envs, dtype=np.int32)
+    active_t = np.zeros(num_envs, dtype=np.int32)
+    next_idx = num_envs
+    successes: list[float] = []
+    cond_rows = []
+    teacher_action_rows = []
+    while len(successes) < eval_episodes:
+        frames_raw = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        frames = frame_norm.transform(frames_raw)
+        _rgb, state = _phase4_rgb_state(obs)
+        z = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy().astype(np.float32)
+        goals = np.zeros((num_envs, latent_dim), dtype=np.float32)
+        for env_idx in range(num_envs):
+            episode_idx = int(active_idx[env_idx])
+            if episode_idx >= eval_episodes:
+                continue
+            source = oracle_latents[episode_idx]
+            goals[env_idx] = source[min(int(active_t[env_idx]) + horizon_steps, len(source) - 1)]
+        cond = np.concatenate([z, goals, prev_action_norm], axis=-1).astype(np.float32)
+        teacher_action = torch.clamp(
+            teacher.actor_mean(torch.from_numpy(state).to(device).float()),
+            action_low,
+            action_high,
+        ).cpu().numpy().astype(np.float32)
+        active_mask = active_idx < eval_episodes
+        if np.any(active_mask):
+            cond_rows.append(cond[active_mask].copy())
+            teacher_action_rows.append(teacher_action[active_mask].copy())
+        pred_norm = model(torch.from_numpy(cond).to(device).float())
+        raw_action = action_norm.inverse(pred_norm.cpu().numpy())
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        prev_action_norm = action_norm.transform(action.cpu().numpy().astype(np.float32))
+        obs, _reward, _terminated, _truncated, info = env.step(action)
+        active_t += 1
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                episode_info = info["final_info"]["episode"]
+                success_once = _numpy(episode_info["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    active_t[env_idx] = 0
+                    prev_action_norm[env_idx] = zero_action_norm
+                    if next_idx < eval_episodes:
+                        active_idx[env_idx] = next_idx
+                        next_idx += 1
+                    else:
+                        active_idx[env_idx] = eval_episodes
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    np.savez_compressed(
+        output_path,
+        conditions=np.concatenate(cond_rows, axis=0).astype(np.float32),
+        teacher_actions=np.concatenate(teacher_action_rows, axis=0).astype(np.float32),
+        collection_success=np.asarray(successes, dtype=np.float32),
+        dataset_type=np.asarray("state_query_dataset"),
+        semantics=np.asarray(
+            "phase7 low-level visited current latents with oracle future goals relabeled by privileged teacher"
+        ),
+        rollout_checkpoint=np.asarray(str(rollout_checkpoint_path)),
+    )
+    console.print(f"Wrote Phase 7 oracle DAgger queries: {output_path}")
+    return output_path
+
+
+def train_phase7_oracle_dagger_low_level(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    iteration: int = 1,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
+        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    )
+    artifact_dir = _phase7_artifact_dir(
+        config, variant, latent_dim, horizon_steps, action_chunk_steps, seed
+    )
+    checkpoint_path = artifact_dir / f"oracle_low_level_dagger_iter{iteration}.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 7 oracle DAgger low-level policy exists: {checkpoint_path}")
+        return checkpoint_path
+    query_path = collect_phase7_oracle_dagger_queries(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        action_chunk_steps=action_chunk_steps,
+        iteration=iteration,
+        seed=seed,
+        force=False,
+    )
+    encoder_path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(encoder_checkpoint["action_norm"])
+    train_episodes, val_episodes, data_metadata = _load_phase6_train_episodes(config)
+    train_cond, train_actions = _phase7_encode_oracle_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        train_episodes,
+        horizon_steps,
+        action_chunk_steps,
+        device,
+    )
+    val_cond, val_actions = _phase7_encode_oracle_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        val_episodes,
+        horizon_steps,
+        action_chunk_steps,
+        device,
+    )
+    with np.load(query_path) as data:
+        query_cond = np.asarray(data["conditions"], dtype=np.float32)
+        query_actions = np.asarray(data["teacher_actions"], dtype=np.float32)
+    rng = np.random.default_rng(seed + iteration)
+    order = rng.permutation(len(query_cond))
+    split = int(0.8 * len(order))
+    query_train = order[:split]
+    query_val = order[split:]
+    repeats = int(config.get("incremental.phase7.dagger_query_repeats", 4))
+    train_cond = np.concatenate([train_cond, query_cond[np.repeat(query_train, repeats)]], axis=0)
+    train_actions = np.concatenate(
+        [train_actions, query_actions[np.repeat(query_train, repeats)]], axis=0
+    )
+    val_cond = np.concatenate([val_cond, query_cond[query_val]], axis=0)
+    val_actions = np.concatenate([val_actions, query_actions[query_val]], axis=0)
+    train_dataset = _Phase7OracleDataset(
+        train_cond,
+        action_norm.transform(train_actions).astype(np.float32),
+        length=int(config.get("incremental.phase7.batch_size", 512))
+        * int(config.get("incremental.phase7.batches_per_epoch", 300)),
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase7.batch_size", 512)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    model = MLP(
+        train_cond.shape[-1],
+        train_actions.shape[-1],
+        int(config.get("incremental.phase7.hidden_dim", 1024)),
+        depth=4,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("incremental.phase7.lr", 3e-4)),
+    )
+    x_val = torch.from_numpy(val_cond).to(device).float()
+    y_val = torch.from_numpy(action_norm.transform(val_actions)).to(device).float()
+    epochs = int(config.get("incremental.phase7.epochs", 80))
+    best_state = None
+    best_val = float("inf")
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc=f"train phase7 DAgger {iteration}"):
+        model.train()
+        loss_sum = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            val_mse = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+        history.append({"epoch": epoch, "train_mse": loss_sum / count, "validation_mse": val_mse})
+        if val_mse < best_val:
+            best_val = val_mse
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 7 oracle DAgger training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    validation_metrics = _phase7_oracle_action_metrics(
+        model,
+        val_cond,
+        val_actions,
+        action_norm,
+        latent_dim,
+        int(config.get("incremental.phase7.validation_queries", 10000)),
+        seed + 100 * iteration + horizon_steps,
+    )
+    payload = {
+        "model": model.state_dict(),
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "action_chunk_steps": action_chunk_steps,
+        "iteration": iteration,
+        "cond_dim": train_cond.shape[-1],
+        "hidden_dim": int(config.get("incremental.phase7.hidden_dim", 1024)),
+        "action_dim": train_actions.shape[-1],
+        "encoder_checkpoint": str(encoder_path),
+        "action_norm": action_norm.state_dict(),
+        "query_path": str(query_path),
+        "query_train_samples": int(len(query_train)),
+        "query_validation_samples": int(len(query_val)),
+        "query_repeats": repeats,
+        "validation_metrics": validation_metrics,
+        "best_validation_mse": best_val,
+        "history": history,
+        "data": {
+            **data_metadata,
+            "phase7_train_samples": int(len(train_cond)),
+            "phase7_validation_samples": int(len(val_cond)),
+        },
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / f"oracle_low_level_dagger_iter{iteration}_metrics.json",
+        {
+            "variant": variant,
+            "latent_dim": latent_dim,
+            "horizon_steps": horizon_steps,
+            "action_chunk_steps": action_chunk_steps,
+            "iteration": iteration,
+            "validation_metrics": validation_metrics,
+            "best_validation_mse": best_val,
+            "query_path": str(query_path),
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 7 oracle DAgger low-level policy: {checkpoint_path}")
+    return checkpoint_path
+
+
+def evaluate_phase7_oracle_dagger_low_level(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    iteration: int = 1,
+    seed: int = 0,
+    episodes: int | None = None,
+    goal_mode: str = "all",
+    force: bool = False,
+) -> Path:
+    latent_dim, variant, horizon_steps, action_chunk_steps = _phase7_defaults(
+        config, latent_dim, variant, horizon_steps, action_chunk_steps
+    )
+    checkpoint_path = train_phase7_oracle_dagger_low_level(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        action_chunk_steps=action_chunk_steps,
+        iteration=iteration,
+        seed=seed,
+        force=force,
+    )
+    device = default_device()
+    model, checkpoint = _load_phase7_low_level_checkpoint(checkpoint_path, device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    eval_episodes = int(episodes or config.get("incremental.phase7.eval_episodes", 100))
+    seed_start = int(config.get("incremental.phase7.eval_seed", 10000))
+    oracle_frames = _phase7_collect_oracle_frames(config, dino, eval_episodes, seed_start)
+    oracle_latents = _phase7_encode_oracle_frame_sequences(encoder, frame_norm, oracle_frames, device)
+    modes = ["correct", "shuffled", "zero"] if goal_mode == "all" else [goal_mode]
+    closed_loop = {
+        mode: _evaluate_phase7_goal_mode(
+            config,
+            checkpoint,
+            encoder,
+            frame_norm,
+            action_norm,
+            model,
+            dino,
+            oracle_latents,
+            mode,
+            seed_start,
+            eval_episodes,
+        )
+        for mode in modes
+    }
+    correct_success = closed_loop["correct"]["success"] if "correct" in closed_loop else None
+    visual_success = _phase7_visual_flow_success(config, seed)
+    results_dir = _phase7_results_dir(
+        config, variant, latent_dim, horizon_steps, action_chunk_steps, seed
+    )
+    output_path = results_dir / f"oracle_low_level_dagger_iter{iteration}_{goal_mode}.json"
+    payload = {
+        "phase": 7,
+        "method": "oracle_future_latent_low_level_dagger",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "action_chunk_steps": action_chunk_steps,
+        "iteration": iteration,
+        "seed": seed,
+        "goal_mode": goal_mode,
+        "closed_loop": closed_loop,
+        "validation_action_metrics": checkpoint["validation_metrics"],
+        "query_path": checkpoint["query_path"],
+        "direct_visual_flow_success": visual_success,
+        "oracle_gate_visual_flow": (
+            bool(correct_success >= visual_success) if correct_success is not None else None
+        ),
+        "oracle_gate_90pct_visual_flow": (
+            bool(correct_success >= 0.9 * visual_success) if correct_success is not None else None
+        ),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path

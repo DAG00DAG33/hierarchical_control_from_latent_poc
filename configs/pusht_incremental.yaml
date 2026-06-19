@@ -100,6 +100,9 @@ incremental:
     epochs: 50
     lr: 0.0003
     validation_queries: 10000
+    dagger_episodes: 200
+    dagger_seed: 740000
+    dagger_query_repeats: 4
     eval_episodes: 100
     eval_seed: 10000
     eval_num_envs: 64
