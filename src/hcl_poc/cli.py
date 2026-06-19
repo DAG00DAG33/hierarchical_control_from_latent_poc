@@ -34,6 +34,7 @@ from hcl_poc.incremental import (
     evaluate_phase7_valid_goal_use,
     evaluate_phase8_deterministic_hierarchy,
     evaluate_phase8_structured_hierarchy,
+    evaluate_phase9_future_flow,
     probe_phase6_representation,
     probe_phase4_visual_history,
     prepare_phase8_latent_episodes,
@@ -58,6 +59,7 @@ from hcl_poc.incremental import (
     train_phase8_adapted_low_level,
     train_phase8_action_consistent_predictor,
     train_phase8_structured_predictor,
+    train_phase9_future_flow,
     sweep_phase8_deterministic_predictors,
 )
 from hcl_poc.report import build_report
@@ -682,6 +684,27 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             action_consistency_weight=args.action_consistency_weight,
             force=args.force,
         )
+    elif args.incremental_command == "phase9-train":
+        train_phase9_future_flow(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            trajectory_limit=args.trajectory_limit,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase9-eval":
+        evaluate_phase9_future_flow(
+            config,
+            sample_mode=args.sample_mode,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1057,6 +1080,25 @@ def build_parser() -> argparse.ArgumentParser:
     phase8_eval.add_argument("--action-consistency-weight", type=float)
     phase8_eval.add_argument("--force", action="store_true")
     phase8_eval.set_defaults(func=incremental_cmd)
+    phase9_train = incremental_sub.add_parser("phase9-train")
+    add_config_arg(phase9_train)
+    phase9_train.add_argument("--latent-dim", type=int)
+    phase9_train.add_argument("--variant", default=None)
+    phase9_train.add_argument("--horizon-steps", type=int)
+    phase9_train.add_argument("--trajectory-limit", type=int)
+    phase9_train.add_argument("--seed", type=int, default=0)
+    phase9_train.add_argument("--force", action="store_true")
+    phase9_train.set_defaults(func=incremental_cmd)
+    phase9_eval = incremental_sub.add_parser("phase9-eval")
+    add_config_arg(phase9_eval)
+    phase9_eval.add_argument("--sample-mode", choices=["zero", "random"], default="zero")
+    phase9_eval.add_argument("--latent-dim", type=int)
+    phase9_eval.add_argument("--variant", default=None)
+    phase9_eval.add_argument("--horizon-steps", type=int)
+    phase9_eval.add_argument("--seed", type=int, default=0)
+    phase9_eval.add_argument("--episodes", type=int)
+    phase9_eval.add_argument("--force", action="store_true")
+    phase9_eval.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

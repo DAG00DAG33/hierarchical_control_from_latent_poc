@@ -241,3 +241,21 @@ incremental:
     eval_episodes: 100
     eval_num_envs: 64
     eval_seed: 1200000
+  phase9:
+    hidden_dim: 1024
+    batch_size: 512
+    batches_per_epoch: 300
+    epochs: 60
+    lr: 0.0003
+    flow_steps: 24
+    endpoint_consistency_weight: 10.0
+    endpoint_consistency_steps: 4
+    endpoint_consistency_batch: 128
+    validation_interval: 10
+    validation_samples: 5000
+    endpoint_validation_samples: 2048
+    overfit_batches_per_epoch: 50
+    overfit_epochs: 100
+    eval_episodes: 100
+    eval_num_envs: 64
+    eval_seed: 1200000

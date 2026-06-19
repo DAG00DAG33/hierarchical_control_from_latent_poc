@@ -1592,3 +1592,69 @@ development diagnostic.
 - **Runtime/uncertainty:** The project-wide protocol remains one training seed
   and 100 fixed evaluation episodes. Binomial standard errors are reported;
   no training-seed robustness claim is made.
+
+### 2026-06-19 - P9-D01: Conditional future-latent flow
+
+- **Implementation:** Added `phase9-train` and `phase9-eval` using the existing
+  rectified conditional `FlowModel`, flow-matching loss, and 24-step Euler
+  sampler. The flow predicts normalized `z_(t+2)` from the same normalized
+  `[z_t,a_(t-1)]` condition used by the deterministic Phase 8 model. The
+  encoder and Phase 7 delta-goal low level remain frozen.
+- **Data:** Exactly the same cached nested 1,800 train / 200 validation causal
+  teacher trajectories as Phase 8. No branch-query or DAgger data is included
+  in the full flow. Overfit subsets are the first 1, 10, and 100 trajectories
+  from that training set.
+- **Sampling modes:** `zero` fixes initial flow noise to zero for a reproducible
+  central prediction. `random` draws fresh Gaussian noise at every high-level
+  replan. Best-of-N is diagnostic only and is not used by the controller.
+
+#### Overfit ladder
+
+The unregularized flow successfully memorizes one and ten trajectories:
+
+| trajectories | zero-noise latent L2 | persistence L2 | action MAE ratio | stochastic mean L2 | best-of-4 L2 | diversity L2 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | `1.084` | `23.070` | `1.14x` | `2.913` | `2.674` | `3.768` |
+| `10` | `2.092` | `27.001` | `1.54x` | `6.494` | `5.914` | `8.648` |
+| `100`, no endpoint loss | `7.959` | `26.202` | `3.30x` | `12.987` | `11.949` | `14.641` |
+
+- **Capacity diagnosis:** At 100 trajectories, standard flow matching no
+  longer gives an accurate zero-noise endpoint despite 5,000 optimization
+  batches. This is not an implementation failure because the smaller subsets
+  overfit cleanly; it is a scaling/optimization problem in the 256D target.
+- **Endpoint consistency sweep:** Added the same differentiable zero-noise
+  endpoint objective used by the successful visual action flow. At weight `1`,
+  100-trajectory zero-noise L2/action ratio improve to `4.809`/`2.35x`, but
+  stochastic mean L2 worsens to `26.60`. At weight `10`, zero-noise improves to
+  `3.631`/`1.93x`, while stochastic mean L2 worsens further to `30.28`.
+  Endpoint anchoring therefore improves the selected deterministic mode by
+  distorting the stochastic transport; both effects are reported.
+
+#### Full-data result
+
+- **Selected development setting:** Endpoint weight `10`, four differentiable
+  integration steps on 128 samples per batch, 60 epochs, 300 batches per
+  epoch, and 24 evaluation integration steps. Selection uses held-out
+  zero-noise endpoint MSE.
+- **Offline:** Zero-noise latent L2 `14.064` versus persistence `25.272`;
+  action MAE `0.0401` versus oracle-goal `0.0265` (`1.51x`). Stochastic mean
+  latent L2 is `33.61`, best-of-4 is `31.89`, and sample diversity is `42.99`.
+  The deterministic Phase 8 baseline remains slightly better offline at latent
+  L2 `13.946` and action MAE `0.0389`.
+- **Zero-noise closed loop:** On 100 fixed episodes, success `0.42 +/- 0.049`,
+  final reward `0.389`, maximum reward `0.567`, and rollout teacher-action MAE
+  `0.1260`. This is below deterministic success `0.46` and only `58.3%` of the
+  matched base low-level oracle result `0.72`.
+- **Random-sample diagnostic:** On 20 development episodes, success is `0.05`,
+  final reward `0.263`, and teacher-action MAE `0.2047`. This mode was not
+  expanded to 100 episodes because both offline and development evidence
+  reject it.
+- **Phase 9 gate:** Fail. The generative hierarchy is worse than the
+  deterministic hierarchy, random samples are not plausible local goals, and
+  diversity is dominated by error rather than meaningful physical
+  alternatives. The result rejects the simple claim that MSE mode averaging
+  was the only Phase 8 bottleneck.
+- **Next action:** Proceed to Phase 10 using the actual generated-goal error
+  distribution. Keep nominal real-goal data balanced with generated-goal
+  learner-state queries so the low level cannot solve the objective by ignoring
+  its goal.

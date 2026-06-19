@@ -10319,6 +10319,532 @@ def train_phase8_action_consistent_predictor(
     return output_path
 
 
+def train_phase9_future_flow(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    trajectory_limit: int | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    latent_dim, variant, horizon_steps = _phase8_defaults(
+        config, latent_dim, variant, horizon_steps
+    )
+    endpoint_weight = float(config.get("incremental.phase9.endpoint_consistency_weight", 0.0))
+    base_label = "full" if trajectory_limit is None else f"overfit_n{trajectory_limit}"
+    weight_label = f"{endpoint_weight:g}".replace(".", "p")
+    run_label = base_label if endpoint_weight == 0.0 else f"{base_label}_endpointw{weight_label}"
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase9"
+        / f"{variant}_z{latent_dim}_k{horizon_steps}_l1"
+        / f"seed{seed}"
+        / run_label
+    )
+    output_path = artifact_dir / "future_flow.pt"
+    if output_path.exists() and not force:
+        console.print(f"Phase 9 future flow exists: {output_path}")
+        return output_path
+    cache_path = prepare_phase8_latent_episodes(
+        config, latent_dim=latent_dim, variant=variant, seed=seed, force=False
+    )
+    cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+    train_episodes = cached["train"]
+    if trajectory_limit is not None:
+        if trajectory_limit < 1 or trajectory_limit > len(train_episodes):
+            raise ValueError(f"Phase 9 trajectory limit must be in [1, {len(train_episodes)}]")
+        train_episodes = train_episodes[:trajectory_limit]
+        validation_episodes = train_episodes
+    else:
+        validation_episodes = cached["validation"]
+    encoder_checkpoint = torch.load(
+        cached["encoder_checkpoint"], map_location="cpu", weights_only=False
+    )
+    action_norm = Standardizer.from_state_dict(encoder_checkpoint["action_norm"])
+    latent_norm = Standardizer.fit(
+        np.concatenate([episode["latents"] for episode in train_episodes], axis=0)
+    )
+    validation = _phase8_validation_samples(
+        validation_episodes,
+        1,
+        horizon_steps,
+        latent_norm,
+        action_norm,
+        int(config.get("incremental.phase9.validation_samples", 5000)),
+        seed + 9000 + (trajectory_limit or 0),
+    )
+    batch_size = int(config.get("incremental.phase9.batch_size", 512))
+    batches_per_epoch = int(
+        config.get(
+            "incremental.phase9.overfit_batches_per_epoch"
+            if trajectory_limit is not None
+            else "incremental.phase9.batches_per_epoch",
+            50 if trajectory_limit is not None else 300,
+        )
+    )
+    dataset = _Phase8FutureDataset(
+        train_episodes,
+        1,
+        horizon_steps,
+        latent_norm,
+        latent_norm,
+        "absolute",
+        action_norm,
+        length=batch_size * batches_per_epoch,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    device = default_device()
+    hidden_dim = int(config.get("incremental.phase9.hidden_dim", 1024))
+    model = FlowModel(latent_dim, latent_dim + len(action_norm.mean), hidden_dim).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(config.get("incremental.phase9.lr", 3e-4))
+    )
+    epochs = int(
+        config.get(
+            "incremental.phase9.overfit_epochs"
+            if trajectory_limit is not None
+            else "incremental.phase9.epochs",
+            100 if trajectory_limit is not None else 60,
+        )
+    )
+    flow_steps = int(config.get("incremental.phase9.flow_steps", 24))
+    validation_interval = int(config.get("incremental.phase9.validation_interval", 10))
+    validation_limit = min(
+        int(config.get("incremental.phase9.endpoint_validation_samples", 2048)),
+        len(validation["conditions"]),
+    )
+    val_condition = torch.from_numpy(validation["conditions"][:validation_limit]).to(device).float()
+    val_target = (
+        torch.from_numpy(latent_norm.transform(validation["future_latents"][:validation_limit]))
+        .to(device)
+        .float()
+    )
+    best_state = None
+    best_endpoint_mse = float("inf")
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc=f"train phase9 flow {run_label}"):
+        model.train()
+        total = 0.0
+        count = 0
+        for condition, target in loader:
+            condition = condition.to(device, non_blocking=True).float()
+            target = target.to(device, non_blocking=True).float()
+            loss = flow_matching_loss(model, target, condition)
+            if endpoint_weight > 0.0:
+                endpoint_count = min(
+                    int(config.get("incremental.phase9.endpoint_consistency_batch", 128)),
+                    len(condition),
+                )
+                endpoint = _integrate_flow_train(
+                    model,
+                    condition[:endpoint_count],
+                    int(config.get("incremental.phase9.endpoint_consistency_steps", 4)),
+                    latent_dim,
+                    torch.zeros(
+                        endpoint_count,
+                        latent_dim,
+                        device=device,
+                        dtype=condition.dtype,
+                    ),
+                )
+                loss = loss + endpoint_weight * torch.mean(
+                    (endpoint - target[:endpoint_count]) ** 2
+                )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            total += float(loss.detach().cpu()) * len(condition)
+            count += len(condition)
+        row = {"epoch": epoch, "flow_matching_loss": total / count}
+        if epoch % validation_interval == 0 or epoch == epochs:
+            model.eval()
+            with torch.inference_mode():
+                endpoint = sample_flow(
+                    model,
+                    val_condition,
+                    flow_steps,
+                    latent_dim,
+                    initial_noise=torch.zeros_like(val_target),
+                )
+                endpoint_mse = float(torch.mean((endpoint - val_target) ** 2).cpu())
+            row["zero_noise_endpoint_mse"] = endpoint_mse
+            if endpoint_mse < best_endpoint_mse:
+                best_endpoint_mse = endpoint_mse
+                best_state = copy.deepcopy(model.state_dict())
+        history.append(row)
+    if best_state is None:
+        raise RuntimeError("Phase 9 flow training produced no endpoint checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    all_condition = torch.from_numpy(validation["conditions"]).to(device).float()
+    zero_predictions = []
+    with torch.inference_mode():
+        for start in range(0, len(all_condition), 1024):
+            condition = all_condition[start : start + 1024]
+            zero_predictions.append(
+                sample_flow(
+                    model,
+                    condition,
+                    flow_steps,
+                    latent_dim,
+                    initial_noise=torch.zeros(
+                        len(condition), latent_dim, device=device, dtype=condition.dtype
+                    ),
+                )
+                .cpu()
+                .numpy()
+            )
+    predicted = latent_norm.inverse(np.concatenate(zero_predictions))
+    target = validation["future_latents"]
+    persistence = validation["current_latents"]
+    prediction_l2 = np.linalg.norm(predicted - target, axis=-1)
+    persistence_l2 = np.linalg.norm(persistence - target, axis=-1)
+
+    low_path = train_phase7_oracle_low_level(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        action_chunk_steps=1,
+        goal_encoding="delta",
+        goal_dropout_prob=0.0,
+        seed=seed,
+        force=False,
+    )
+    low_model, low_checkpoint = _load_phase7_low_level_checkpoint(low_path, device)
+    low_action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
+    oracle_conditions = np.stack(
+        [
+            _phase7_condition(current, future, previous, "delta")
+            for current, future, previous in zip(
+                validation["current_latents"],
+                target,
+                validation["previous_actions_norm"],
+            )
+        ]
+    )
+    predicted_conditions = np.stack(
+        [
+            _phase7_condition(current, future, previous, "delta")
+            for current, future, previous in zip(
+                validation["current_latents"],
+                predicted,
+                validation["previous_actions_norm"],
+            )
+        ]
+    )
+
+    def low_actions(conditions: np.ndarray) -> np.ndarray:
+        outputs = []
+        with torch.inference_mode():
+            for start in range(0, len(conditions), 4096):
+                outputs.append(
+                    low_model(torch.from_numpy(conditions[start : start + 4096]).to(device).float())
+                    .cpu()
+                    .numpy()
+                )
+        return low_action_norm.inverse(np.concatenate(outputs))
+
+    oracle_actions = low_actions(oracle_conditions)
+    predicted_actions = low_actions(predicted_conditions)
+    teacher_actions = validation["teacher_actions"]
+    oracle_mae = float(np.mean(np.abs(oracle_actions - teacher_actions)))
+    predicted_mae = float(np.mean(np.abs(predicted_actions - teacher_actions)))
+    stochastic_count = min(512, len(all_condition))
+    stochastic_samples = []
+    with torch.inference_mode():
+        for _ in range(4):
+            stochastic_samples.append(
+                latent_norm.inverse(
+                    sample_flow(
+                        model,
+                        all_condition[:stochastic_count],
+                        flow_steps,
+                        latent_dim,
+                    )
+                    .cpu()
+                    .numpy()
+                )
+            )
+    stochastic = np.stack(stochastic_samples, axis=1)
+    stochastic_l2 = np.linalg.norm(stochastic - target[:stochastic_count, None, :], axis=-1)
+    payload = {
+        "model": model.state_dict(),
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "history": 1,
+        "condition_dim": latent_dim + len(action_norm.mean),
+        "sample_dim": latent_dim,
+        "hidden_dim": hidden_dim,
+        "flow_steps": flow_steps,
+        "endpoint_consistency_weight": endpoint_weight,
+        "trajectory_limit": trajectory_limit,
+        "encoder_checkpoint": cached["encoder_checkpoint"],
+        "low_level_checkpoint": str(low_path),
+        "latent_norm": latent_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "offline_metrics": {
+            "zero_noise_raw_latent_l2": float(np.mean(prediction_l2)),
+            "persistence_raw_latent_l2": float(np.mean(persistence_l2)),
+            "zero_noise_better_than_persistence_fraction": float(
+                np.mean(prediction_l2 < persistence_l2)
+            ),
+            "oracle_goal_action_mae": oracle_mae,
+            "zero_noise_goal_action_mae": predicted_mae,
+            "zero_noise_to_oracle_action_mae_ratio": predicted_mae / max(oracle_mae, 1e-8),
+            "stochastic_mean_latent_l2": float(np.mean(stochastic_l2)),
+            "stochastic_best_of_4_latent_l2": float(np.mean(np.min(stochastic_l2, axis=1))),
+            "stochastic_sample_diversity_l2": float(
+                np.mean(np.linalg.norm(stochastic[:, 1:] - stochastic[:, :1], axis=-1))
+            ),
+            "validation_samples": len(target),
+        },
+        "best_zero_noise_endpoint_mse": best_endpoint_mse,
+        "training_history": history,
+        "elapsed_s": timer.elapsed(),
+        "data": {
+            "cache": str(cache_path),
+            "train_trajectories": len(train_episodes),
+            "validation_trajectories": len(validation_episodes),
+        },
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, output_path)
+    write_json(
+        artifact_dir / "future_flow_metrics.json",
+        {
+            key: payload[key]
+            for key in [
+                "variant",
+                "latent_dim",
+                "horizon_steps",
+                "trajectory_limit",
+                "flow_steps",
+                "endpoint_consistency_weight",
+                "offline_metrics",
+                "best_zero_noise_endpoint_mse",
+                "training_history",
+                "elapsed_s",
+                "data",
+                "metadata",
+            ]
+        },
+    )
+    console.print(f"Wrote Phase 9 future flow: {output_path}")
+    return output_path
+
+
+@torch.inference_mode()
+def evaluate_phase9_future_flow(
+    config: Config,
+    sample_mode: str = "zero",
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    if sample_mode not in {"zero", "random"}:
+        raise ValueError(f"Unknown Phase 9 sample mode: {sample_mode}")
+    latent_dim, variant, horizon_steps = _phase8_defaults(
+        config, latent_dim, variant, horizon_steps
+    )
+    checkpoint_path = train_phase9_future_flow(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        trajectory_limit=None,
+        seed=seed,
+        force=False,
+    )
+    eval_episodes = int(episodes or config.get("incremental.phase9.eval_episodes", 100))
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase9"
+        / f"{variant}_z{latent_dim}_k{horizon_steps}_l1"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / f"future_flow_{sample_mode}_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 9 future-flow eval exists: {output_path}")
+        return output_path
+    device = default_device()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    flow = FlowModel(
+        int(checkpoint["sample_dim"]),
+        int(checkpoint["condition_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).to(device)
+    flow.load_state_dict(checkpoint["model"])
+    flow.eval()
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    latent_norm = Standardizer.from_state_dict(checkpoint["latent_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    low_path = Path(checkpoint["low_level_checkpoint"])
+    low_model, low_checkpoint = _load_phase7_low_level_checkpoint(low_path, device)
+    low_action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
+    if not (
+        np.array_equal(action_norm.mean, low_action_norm.mean)
+        and np.array_equal(action_norm.std, low_action_norm.std)
+    ):
+        raise ValueError("Phase 9 flow and low level use different action normalization")
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = min(int(config.get("incremental.phase9.eval_num_envs", 64)), eval_episodes)
+    env = _phase4_make_visual_env(config, num_envs)
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    zero_action = action_norm.transform(
+        np.zeros((1, int(low_checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    previous_action = np.repeat(zero_action[None], num_envs, axis=0).astype(np.float32)
+    seed_start = int(config.get("incremental.phase9.eval_seed", 1_200_000))
+    obs, _info = env.reset(seed=seed_start)
+    successes = []
+    final_rewards = []
+    max_rewards = []
+    episode_lengths = []
+    teacher_maes = []
+    goal_displacements = []
+    latencies = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    while len(successes) < eval_episodes:
+        timer = Timer()
+        frames = frame_norm.transform(
+            _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+        )
+        z = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy().astype(np.float32)
+        condition = np.concatenate([latent_norm.transform(z), previous_action], axis=-1)
+        condition_t = torch.from_numpy(condition).to(device).float()
+        initial_noise = (
+            torch.zeros(num_envs, latent_dim, device=device, dtype=condition_t.dtype)
+            if sample_mode == "zero"
+            else None
+        )
+        predicted_goal = latent_norm.inverse(
+            sample_flow(
+                flow,
+                condition_t,
+                int(checkpoint["flow_steps"]),
+                latent_dim,
+                initial_noise=initial_noise,
+            )
+            .cpu()
+            .numpy()
+        )
+        goal_displacements.extend(np.linalg.norm(predicted_goal - z, axis=-1).tolist())
+        low_condition = np.stack(
+            [
+                _phase7_condition(z[i], predicted_goal[i], previous_action[i], "delta")
+                for i in range(num_envs)
+            ]
+        )
+        raw_action = action_norm.inverse(
+            low_model(torch.from_numpy(low_condition).to(device).float()).cpu().numpy()
+        ).astype(np.float32)
+        teacher_action = (
+            torch.clamp(
+                teacher.actor_mean(obs["state"].to(device).float()), action_low, action_high
+            )
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
+        teacher_maes.extend(np.mean(np.abs(raw_action - teacher_action), axis=-1).tolist())
+        latencies.append(timer.elapsed() / num_envs)
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        previous_action = action_norm.transform(action.cpu().numpy().astype(np.float32))
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                success_once = _numpy(info["final_info"]["episode"]["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    previous_action[env_idx] = zero_action
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    metrics = {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "teacher_action_mae": float(np.mean(teacher_maes)),
+        "predicted_goal_displacement_l2": float(np.mean(goal_displacements)),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "num_envs": num_envs,
+        "seed_start": seed_start,
+    }
+    oracle_result_dir = (
+        config.path_value("paths.incremental_results_dir")
+        / "phase7"
+        / _phase7_tag(variant, latent_dim, horizon_steps, 1, "delta", 0.0)
+        / f"seed{seed}"
+    )
+    import json
+
+    oracle_results = []
+    for candidate in oracle_result_dir.glob("replay_branch_oracle_eval*.json"):
+        with candidate.open("r", encoding="utf-8") as f:
+            result = json.load(f)
+        if Path(result.get("checkpoint", "")) == low_path:
+            oracle_results.append((int(result["closed_loop"]["episodes"]), candidate, result))
+    if not oracle_results:
+        raise FileNotFoundError(f"No Phase 7 oracle result matches {low_path}")
+    _count, oracle_path, oracle_result = max(oracle_results, key=lambda item: item[0])
+    oracle_success = float(oracle_result["closed_loop"]["success"])
+    payload = {
+        "phase": 9,
+        "method": "conditional_future_latent_flow",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "sample_mode": sample_mode,
+        "seed": seed,
+        "checkpoint": str(checkpoint_path),
+        "closed_loop": metrics,
+        "offline_metrics": checkpoint["offline_metrics"],
+        "oracle_result": str(oracle_path),
+        "oracle_success": oracle_success,
+        "success_fraction_of_oracle": metrics["success"] / max(oracle_success, 1e-8),
+        "gate_vs_deterministic": metrics["success"] >= 0.46,
+        "gate_70pct_oracle": metrics["success"] >= 0.70 * oracle_success,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
 def sweep_phase8_deterministic_predictors(
     config: Config,
     latent_dim: int | None = None,
