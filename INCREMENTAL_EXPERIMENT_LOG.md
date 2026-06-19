@@ -611,15 +611,17 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Dataset type:** Successful PPO `causal_dataset`, 1,800 train episodes and
   200 validation episodes for encoder/control; separate 12,000-sample causal
   probe dataset.
-- **Commands:** `phase6-probe --variant ae_recon --latent-dim {256,128,64,32,16}
+- **Commands:** `phase6-probe --variant ae_recon --latent-dim {256,192,128,64,32,16}
   --force`, `phase6-control-eval --variant ae_recon --latent-dim
-  {256,128,64,32,16} --force`, plus `phase6-dagger-eval` for 128D and 256D.
+  {256,192,128,64,32,16} --force`, plus `phase6-dagger-eval` for 128D, 192D,
+  and 256D.
 - **Probe results:**
 
 | dim | obj x/y MAE m | yaw MAE rad | inv action MAE | reward MAE | contact AUROC |
 | --- | --- | --- | --- | --- | --- |
 | 512 | `0.0025/0.0027` | `0.0488` | `0.0183` | `0.0218` | `0.994` |
 | 256 | `0.0027/0.0028` | `0.0512` | `0.0179` | `0.0243` | `0.994` |
+| 192 | `0.0026/0.0029` | `0.0524` | `0.0184` | `0.0250` | `0.994` |
 | 128 | `0.0027/0.0029` | `0.0506` | `0.0192` | `0.0268` | `0.994` |
 | 64 | `0.0028/0.0031` | `0.0542` | `0.0228` | `0.0355` | `0.995` |
 | 32 | `0.0033/0.0035` | `0.0600` | `0.0286` | `0.0555` | `0.993` |
@@ -631,6 +633,7 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 | --- | --- | --- | --- | --- | --- | --- |
 | 512 | `0.44` | `0.589` | `0.0322` | `0.59` | `0.700` | `0.0355` |
 | 256 | `0.53` | `0.651` | `0.0325` | `0.60` | `0.710` | `0.0367` |
+| 192 | `0.50` | `0.625` | `0.0324` | `0.50` | `0.634` | `0.0377` |
 | 128 | `0.37` | `0.524` | `0.0332` | `0.50` | `0.628` | `0.0393` |
 | 64 | `0.27` | `0.458` | `0.0357` | - | - | - |
 | 32 | `0.28` | `0.453` | `0.0386` | - | - | - |
@@ -638,11 +641,11 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 
 - **Interpretation:** Static probes remain deceptively strong down to 64D and
   formally pass even at 16D, but control-relevant information starts degrading
-  below 256D. The 128D encoder has good pose probes but loses enough
-  closed-loop information that one DAgger iteration reaches only 50/100. The
-  256D encoder is the smallest tested latent that matches or slightly exceeds
-  the 512D closed-loop result, reaching 60/100 after DAgger against the 66/100
-  direct visual-flow reference.
+  below 256D. The 192D and 128D encoders both have good pose/inverse probes,
+  yet one DAgger iteration reaches only 50/100 for each. The 256D encoder is
+  the smallest tested latent that matches or slightly exceeds the 512D
+  closed-loop result, reaching 60/100 after DAgger against the 66/100 direct
+  visual-flow reference.
 - **Decision:** Use `ae_recon_z256` as the current Phase 6 default. Keep 512D
   as a capacity reference, not the main representation.
 
