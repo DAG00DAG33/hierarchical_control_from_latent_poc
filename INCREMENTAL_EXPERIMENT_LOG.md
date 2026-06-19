@@ -1436,3 +1436,37 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Runtime protocol:** Continue with 100 fixed episodes and one policy seed.
   The reduced budget reports binomial uncertainty but cannot establish
   training-seed robustness.
+
+### 2026-06-19 - P8-D04: Privileged structured future prediction
+
+- **Implementation:** Added `phase8-structured-train` and
+  `phase8-structured-eval`. The high level receives the current 31D privileged
+  simulator state and previous normalized action, then predicts the exact 14D
+  future-goal representation consumed by the Phase 7D privileged low level:
+  T pose/velocity, TCP pose/velocity, and contact. It uses the existing 1,800
+  training and 200 validation successful causal teacher trajectories; no new
+  simulator collection was needed.
+- **Training:** `k=2`, 67,515 train samples, 7,501 held-out samples, 30 epochs,
+  and about 7 seconds on the available GPU.
+
+| held-out structured metric | prediction | persistence |
+| --- | ---: | ---: |
+| T position L2 | `0.0030 m` | `0.0142 m` |
+| T yaw MAE | `0.0244 rad` | `0.1041 rad` |
+| T velocity L2 | `0.0231 m/s` | `0.1424 m/s` |
+| TCP position L2 | `0.00615 m` | `0.05185 m` |
+| TCP velocity L2 | `0.0477 m/s` | `0.5185 m/s` |
+| contact accuracy | `96.9%` | `87.6%` |
+
+- **Control interface:** Predicted-goal low-level action MAE is `0.0451`
+  versus oracle-goal `0.0397`, a `1.14x` ratio.
+- **100-episode closed loop:** Predicted structured hierarchy success is
+  `0.54 +/- 0.050`, final reward `0.681`, maximum reward `0.685`, and teacher
+  action MAE `0.0674`. The matched structured branch oracle is `0.55`, so the
+  predictor retains `98.2%` of oracle success and passes the 70% gate.
+- **Interpretation:** Deterministic future prediction and the high-level/low-
+  level decomposition are viable. The learned-latent hierarchy's `0.46`
+  success versus its stronger `0.73` oracle is therefore a representation and
+  learned-latent prediction problem, not a general failure of future-state
+  conditioning. Phase 8.1 passes; Phase 8.2 remains open pending structured
+  probe diagnostics on predicted versus real latents.

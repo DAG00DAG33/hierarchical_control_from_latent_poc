@@ -33,6 +33,7 @@ from hcl_poc.incremental import (
     evaluate_phase7_replay_branch_oracle_low_level,
     evaluate_phase7_valid_goal_use,
     evaluate_phase8_deterministic_hierarchy,
+    evaluate_phase8_structured_hierarchy,
     probe_phase6_representation,
     probe_phase4_visual_history,
     prepare_phase8_latent_episodes,
@@ -54,6 +55,7 @@ from hcl_poc.incremental import (
     train_phase8_deterministic_predictor,
     train_phase8_dagger_predictor,
     train_phase8_adapted_low_level,
+    train_phase8_structured_predictor,
     sweep_phase8_deterministic_predictors,
 )
 from hcl_poc.report import build_report
@@ -586,6 +588,21 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             force=args.force,
         )
+    elif args.incremental_command == "phase8-structured-train":
+        train_phase8_structured_predictor(
+            config,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase8-structured-eval":
+        evaluate_phase8_structured_hierarchy(
+            config,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     elif args.incremental_command == "phase8-dagger-train":
         train_phase8_dagger_predictor(
             config,
@@ -935,6 +952,19 @@ def build_parser() -> argparse.ArgumentParser:
     phase8_train.add_argument("--seed", type=int, default=0)
     phase8_train.add_argument("--force", action="store_true")
     phase8_train.set_defaults(func=incremental_cmd)
+    phase8_structured = incremental_sub.add_parser("phase8-structured-train")
+    add_config_arg(phase8_structured)
+    phase8_structured.add_argument("--horizon-steps", type=int)
+    phase8_structured.add_argument("--seed", type=int, default=0)
+    phase8_structured.add_argument("--force", action="store_true")
+    phase8_structured.set_defaults(func=incremental_cmd)
+    phase8_structured_eval = incremental_sub.add_parser("phase8-structured-eval")
+    add_config_arg(phase8_structured_eval)
+    phase8_structured_eval.add_argument("--horizon-steps", type=int)
+    phase8_structured_eval.add_argument("--seed", type=int, default=0)
+    phase8_structured_eval.add_argument("--episodes", type=int)
+    phase8_structured_eval.add_argument("--force", action="store_true")
+    phase8_structured_eval.set_defaults(func=incremental_cmd)
     phase8_dagger = incremental_sub.add_parser("phase8-dagger-train")
     add_config_arg(phase8_dagger)
     phase8_dagger.add_argument("--latent-dim", type=int)

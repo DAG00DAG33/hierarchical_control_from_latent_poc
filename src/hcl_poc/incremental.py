@@ -9523,6 +9523,364 @@ def train_phase8_deterministic_predictor(
     return checkpoint_path
 
 
+def _phase8_structured_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
+    yaw_pred = np.arctan2(predicted[:, 2], predicted[:, 3])
+    yaw_target = np.arctan2(target[:, 2], target[:, 3])
+    yaw_error = np.abs(_wrap_angle(yaw_pred - yaw_target))
+    return {
+        "goal_mae": float(np.mean(np.abs(predicted - target))),
+        "t_position_l2_m": float(np.mean(np.linalg.norm(predicted[:, :2] - target[:, :2], axis=1))),
+        "t_yaw_mae_rad": float(np.mean(yaw_error)),
+        "t_velocity_l2_mps": float(
+            np.mean(np.linalg.norm(predicted[:, 4:6] - target[:, 4:6], axis=1))
+        ),
+        "t_yaw_rate_mae_radps": float(np.mean(np.abs(predicted[:, 6] - target[:, 6]))),
+        "tcp_position_l2_m": float(
+            np.mean(np.linalg.norm(predicted[:, 7:10] - target[:, 7:10], axis=1))
+        ),
+        "tcp_velocity_l2_mps": float(
+            np.mean(np.linalg.norm(predicted[:, 10:13] - target[:, 10:13], axis=1))
+        ),
+        "contact_accuracy": float(np.mean((predicted[:, 13] >= 0.5) == (target[:, 13] >= 0.5))),
+    }
+
+
+def train_phase8_structured_predictor(
+    config: Config,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    """Predict the privileged structured goal used by the Phase 7D low level."""
+    set_seed(seed)
+    horizon_steps = int(horizon_steps or config.get("incremental.phase8.horizon_steps", 2))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase8"
+        / f"structured_k{horizon_steps}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "deterministic_predictor.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 8 structured predictor exists: {checkpoint_path}")
+        return checkpoint_path
+
+    train_episodes, val_episodes, data_metadata = _load_phase7_privileged_episodes(
+        config, horizon_steps
+    )
+    action_norm = Standardizer.fit(
+        np.concatenate([episode["actions"] for episode in train_episodes], axis=0)
+    )
+    zero_action = action_norm.transform(
+        np.zeros((1, train_episodes[0]["actions"].shape[-1]), dtype=np.float32)
+    )[0]
+    control_freq = int(config.get("control_freq", 20))
+
+    def samples(episodes: list[dict[str, np.ndarray]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        conditions = []
+        goals = []
+        actions = []
+        for episode in episodes:
+            states = episode["states"]
+            episode_actions = episode["actions"]
+            normalized_actions = action_norm.transform(episode_actions)
+            for t in range(len(episode_actions) - horizon_steps):
+                previous = normalized_actions[t - 1] if t > 0 else zero_action
+                conditions.append(np.concatenate([states[t], previous]))
+                goals.append(
+                    _phase7_privileged_goal(
+                        states[t], states[t + horizon_steps], horizon_steps, control_freq
+                    )
+                )
+                actions.append(episode_actions[t])
+        return (
+            np.asarray(conditions, dtype=np.float32),
+            np.asarray(goals, dtype=np.float32),
+            np.asarray(actions, dtype=np.float32),
+        )
+
+    train_x, train_y, _train_actions = samples(train_episodes)
+    val_x, val_y, val_actions = samples(val_episodes)
+    max_validation = int(config.get("incremental.phase8.validation_samples", 10000))
+    if len(val_x) > max_validation:
+        indices = np.random.default_rng(seed + 8100).choice(
+            len(val_x), size=max_validation, replace=False
+        )
+        val_x, val_y, val_actions = val_x[indices], val_y[indices], val_actions[indices]
+    input_norm = Standardizer.fit(train_x)
+    target_norm = Standardizer.fit(train_y)
+    dataset = TensorDataset(
+        torch.from_numpy(input_norm.transform(train_x)).float(),
+        torch.from_numpy(target_norm.transform(train_y)).float(),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("incremental.phase8.batch_size", 512)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    device = default_device()
+    hidden_dim = int(config.get("incremental.phase8.structured_hidden_dim", 512))
+    model = MLP(train_x.shape[-1], train_y.shape[-1], hidden_dim, depth=4).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(config.get("incremental.phase8.lr", 3e-4))
+    )
+    val_x_t = torch.from_numpy(input_norm.transform(val_x)).to(device).float()
+    val_y_t = torch.from_numpy(target_norm.transform(val_y)).to(device).float()
+    epochs = int(config.get("incremental.phase8.structured_epochs", 30))
+    best_loss = float("inf")
+    best_state = None
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc="train phase8 structured"):
+        model.train()
+        total = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            total += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            val_loss = float(torch.mean((model(val_x_t) - val_y_t) ** 2).cpu())
+        history.append({"epoch": epoch, "train_mse": total / count, "validation_mse": val_loss})
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 8 structured training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.inference_mode():
+        predicted = target_norm.inverse(model(val_x_t).cpu().numpy())
+    current_states = val_x[:, :31]
+    persistence = _phase7_privileged_goal(
+        current_states, current_states, horizon_steps, control_freq
+    )
+
+    privileged_path = train_phase7_privileged_branch_baselines(
+        config, horizon_steps=horizon_steps, seed=seed, force=False
+    )
+    privileged = torch.load(privileged_path, map_location=device, weights_only=False)
+    low_model, low_cond_norm = _phase7_load_privileged_model(privileged, "branch_goal", device)
+    low_action_norm = Standardizer.from_state_dict(privileged["action_norm"])
+    previous_actions = val_x[:, 31:]
+
+    def low_actions(goals: np.ndarray) -> np.ndarray:
+        cond = _phase7_privileged_condition(current_states, goals, previous_actions)
+        with torch.inference_mode():
+            output = (
+                low_model(torch.from_numpy(low_cond_norm.transform(cond)).to(device).float())
+                .cpu()
+                .numpy()
+            )
+        return low_action_norm.inverse(output)
+
+    oracle_action_mae = float(np.mean(np.abs(low_actions(val_y) - val_actions)))
+    predicted_action_mae = float(np.mean(np.abs(low_actions(predicted) - val_actions)))
+    payload = {
+        "model": model.state_dict(),
+        "condition_dim": int(train_x.shape[-1]),
+        "goal_dim": int(train_y.shape[-1]),
+        "hidden_dim": hidden_dim,
+        "horizon_steps": horizon_steps,
+        "input_norm": input_norm.state_dict(),
+        "target_norm": target_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "offline_metrics": _phase8_structured_metrics(predicted, val_y),
+        "persistence_metrics": _phase8_structured_metrics(persistence, val_y),
+        "low_level_metrics": {
+            "oracle_goal_action_mae": oracle_action_mae,
+            "predicted_goal_action_mae": predicted_action_mae,
+            "predicted_to_oracle_mae_ratio": predicted_action_mae / max(oracle_action_mae, 1e-8),
+        },
+        "best_validation_mse": best_loss,
+        "history": history,
+        "elapsed_s": timer.elapsed(),
+        "data": {**data_metadata, "train_samples": len(train_x), "validation_samples": len(val_x)},
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "deterministic_predictor_metrics.json",
+        {
+            key: payload[key]
+            for key in [
+                "horizon_steps",
+                "offline_metrics",
+                "persistence_metrics",
+                "low_level_metrics",
+                "best_validation_mse",
+                "elapsed_s",
+                "data",
+                "metadata",
+            ]
+        },
+    )
+    console.print(f"Wrote Phase 8 structured predictor: {checkpoint_path}")
+    return checkpoint_path
+
+
+@torch.inference_mode()
+def evaluate_phase8_structured_hierarchy(
+    config: Config,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    horizon_steps = int(horizon_steps or config.get("incremental.phase8.horizon_steps", 2))
+    eval_episodes = int(episodes or config.get("incremental.phase8.eval_episodes", 100))
+    output_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase8"
+        / f"structured_k{horizon_steps}"
+        / f"seed{seed}"
+    )
+    output_path = output_dir / f"deterministic_hierarchy_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 8 structured hierarchy eval exists: {output_path}")
+        return output_path
+    predictor_path = train_phase8_structured_predictor(
+        config, horizon_steps=horizon_steps, seed=seed, force=False
+    )
+    device = default_device()
+    predictor_checkpoint = torch.load(predictor_path, map_location=device, weights_only=False)
+    predictor = MLP(
+        int(predictor_checkpoint["condition_dim"]),
+        int(predictor_checkpoint["goal_dim"]),
+        int(predictor_checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    predictor.load_state_dict(predictor_checkpoint["model"])
+    predictor.eval()
+    input_norm = Standardizer.from_state_dict(predictor_checkpoint["input_norm"])
+    target_norm = Standardizer.from_state_dict(predictor_checkpoint["target_norm"])
+    action_norm = Standardizer.from_state_dict(predictor_checkpoint["action_norm"])
+
+    privileged_path = train_phase7_privileged_branch_baselines(
+        config, horizon_steps=horizon_steps, seed=seed, force=False
+    )
+    privileged = torch.load(privileged_path, map_location=device, weights_only=False)
+    low_model, low_cond_norm = _phase7_load_privileged_model(privileged, "branch_goal", device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    num_envs = min(int(config.get("incremental.phase8.eval_num_envs", 64)), eval_episodes)
+    env = _make_state_env(
+        config,
+        num_envs,
+        record_metrics=True,
+        ignore_terminations=False,
+        reconfiguration_freq=0,
+    )
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    zero_action = action_norm.transform(
+        np.zeros((1, int(privileged["branch_goal"]["action_dim"])), dtype=np.float32)
+    )[0]
+    previous_action = np.repeat(zero_action[None], num_envs, axis=0).astype(np.float32)
+    seed_start = int(config.get("incremental.phase8.eval_seed", 1_200_000))
+    obs, _info = env.reset(seed=seed_start)
+    successes = []
+    final_rewards = []
+    max_rewards = []
+    episode_lengths = []
+    teacher_maes = []
+    latencies = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    active_lengths = np.zeros(num_envs, dtype=np.int32)
+    while len(successes) < eval_episodes:
+        timer = Timer()
+        state_t = _phase7_obs_state_tensor(obs, device)
+        state = state_t.cpu().numpy().astype(np.float32)
+        high_condition = np.concatenate([state, previous_action], axis=-1)
+        predicted_goal = target_norm.inverse(
+            predictor(torch.from_numpy(input_norm.transform(high_condition)).to(device).float())
+            .cpu()
+            .numpy()
+        )
+        low_condition = _phase7_privileged_condition(state, predicted_goal, previous_action)
+        raw_action = action_norm.inverse(
+            low_model(torch.from_numpy(low_cond_norm.transform(low_condition)).to(device).float())
+            .cpu()
+            .numpy()
+        ).astype(np.float32)
+        teacher_action = (
+            torch.clamp(teacher.actor_mean(state_t), action_low, action_high)
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
+        teacher_maes.extend(np.mean(np.abs(raw_action - teacher_action), axis=-1).tolist())
+        latencies.append(timer.elapsed() / num_envs)
+        action = torch.from_numpy(raw_action).to(device).float()
+        if bool(config.get("policy.clip_actions_to_env_space", True)):
+            action = torch.clamp(action, action_low, action_high)
+        previous_action = action_norm.transform(action.cpu().numpy().astype(np.float32))
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        active_lengths += 1
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if mask.any():
+                success_once = _numpy(info["final_info"]["episode"]["success_once"]).reshape(-1)
+                for env_idx in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_idx]))
+                    final_rewards.append(float(reward_np[env_idx]))
+                    max_rewards.append(float(active_max_reward[env_idx]))
+                    episode_lengths.append(int(active_lengths[env_idx]))
+                    active_max_reward[env_idx] = -np.inf
+                    active_lengths[env_idx] = 0
+                    previous_action[env_idx] = zero_action
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    metrics = {
+        "success": float(np.mean(successes[:eval_episodes])),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
+        "teacher_action_mae": float(np.mean(teacher_maes)),
+        "inference_latency_s": float(np.mean(latencies)),
+        "episodes": eval_episodes,
+        "num_envs": num_envs,
+        "seed_start": seed_start,
+    }
+    oracle_path = (
+        _phase7_privileged_results_dir(config, horizon_steps, seed)
+        / "privileged_branch_baselines_eval_100.json"
+    )
+    import json
+
+    with oracle_path.open("r", encoding="utf-8") as f:
+        oracle_success = float(json.load(f)["closed_loop"]["branch_goal"]["success"])
+    payload = {
+        "phase": "8.1",
+        "method": "deterministic_privileged_structured_hierarchy",
+        "horizon_steps": horizon_steps,
+        "seed": seed,
+        "checkpoint": str(predictor_path),
+        "closed_loop": metrics,
+        "offline_metrics": predictor_checkpoint["offline_metrics"],
+        "low_level_metrics": predictor_checkpoint["low_level_metrics"],
+        "oracle_result": str(oracle_path),
+        "oracle_success": oracle_success,
+        "success_fraction_of_oracle": metrics["success"] / max(oracle_success, 1e-8),
+        "gate_70pct_oracle": metrics["success"] >= 0.70 * oracle_success,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
 def sweep_phase8_deterministic_predictors(
     config: Config,
     latent_dim: int | None = None,
