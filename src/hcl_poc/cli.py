@@ -444,6 +444,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             goal_dropout_prob=args.goal_dropout_prob,
             seed=args.seed,
             episodes=args.episodes,
+            dagger_iteration=args.dagger_iteration,
             force=args.force,
         )
     elif args.incremental_command == "phase7-matched-flat-eval":
@@ -711,6 +712,7 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_replay.add_argument("--goal-dropout-prob", type=float)
     phase7_replay.add_argument("--seed", type=int, default=0)
     phase7_replay.add_argument("--episodes", type=int)
+    phase7_replay.add_argument("--dagger-iteration", type=int)
     phase7_replay.add_argument("--force", action="store_true")
     phase7_replay.set_defaults(func=incremental_cmd)
     phase7_flat = incremental_sub.add_parser("phase7-matched-flat-eval")

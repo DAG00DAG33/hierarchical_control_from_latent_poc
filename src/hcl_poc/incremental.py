@@ -6701,6 +6701,7 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     goal_dropout_prob: float | None = None,
     seed: int = 0,
     episodes: int | None = None,
+    dagger_iteration: int | None = None,
     force: bool = False,
 ) -> Path:
     (
@@ -6721,17 +6722,33 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     )
     if action_chunk_steps != 1:
         raise NotImplementedError("Replay branch oracle evaluation currently supports H=1")
-    checkpoint_path = train_phase7_oracle_low_level(
-        config,
-        latent_dim=latent_dim,
-        variant=variant,
-        horizon_steps=horizon_steps,
-        action_chunk_steps=action_chunk_steps,
-        goal_encoding=goal_encoding,
-        goal_dropout_prob=goal_dropout_prob,
-        seed=seed,
-        force=False,
-    )
+    if dagger_iteration is None:
+        checkpoint_path = train_phase7_oracle_low_level(
+            config,
+            latent_dim=latent_dim,
+            variant=variant,
+            horizon_steps=horizon_steps,
+            action_chunk_steps=action_chunk_steps,
+            goal_encoding=goal_encoding,
+            goal_dropout_prob=goal_dropout_prob,
+            seed=seed,
+            force=False,
+        )
+        checkpoint_label = "base"
+    else:
+        checkpoint_path = train_phase7_oracle_dagger_low_level(
+            config,
+            latent_dim=latent_dim,
+            variant=variant,
+            horizon_steps=horizon_steps,
+            action_chunk_steps=action_chunk_steps,
+            goal_encoding=goal_encoding,
+            goal_dropout_prob=goal_dropout_prob,
+            iteration=dagger_iteration,
+            seed=seed,
+            force=False,
+        )
+        checkpoint_label = f"dagger_iter{dagger_iteration}"
     results_dir = _phase7_results_dir(
         config,
         variant,
@@ -6743,7 +6760,12 @@ def evaluate_phase7_replay_branch_oracle_low_level(
         seed,
     )
     eval_episodes = int(episodes or config.get("incremental.phase7.replay_branch_eval_episodes", 10))
-    output_path = results_dir / f"replay_branch_oracle_eval_{eval_episodes}.json"
+    output_name = (
+        f"replay_branch_oracle_eval_{eval_episodes}.json"
+        if dagger_iteration is None
+        else f"replay_branch_oracle_eval_{checkpoint_label}_{eval_episodes}.json"
+    )
+    output_path = results_dir / output_name
     if output_path.exists() and not force:
         console.print(f"Phase 7 replay branch oracle eval exists: {output_path}")
         return output_path
@@ -6952,6 +6974,7 @@ def evaluate_phase7_replay_branch_oracle_low_level(
         "action_chunk_steps": action_chunk_steps,
         "goal_encoding": goal_encoding,
         "goal_dropout_prob": goal_dropout_prob,
+        "dagger_iteration": dagger_iteration,
         "seed": seed,
         "checkpoint": str(checkpoint_path),
         "closed_loop": metrics,
@@ -7306,7 +7329,8 @@ def collect_phase7_oracle_dagger_queries(
         goal_dropout_prob,
         seed,
     )
-    output_path = artifact_dir / f"oracle_dagger_iter{iteration}.npz"
+    eval_episodes = int(episodes or config.get("incremental.phase7.dagger_episodes", 200))
+    output_path = artifact_dir / f"oracle_branch_dagger_iter{iteration}_e{eval_episodes}.npz"
     if output_path.exists() and not force:
         console.print(f"Phase 7 oracle DAgger queries exist: {output_path}")
         return output_path
@@ -7331,72 +7355,144 @@ def collect_phase7_oracle_dagger_queries(
     frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     dino = _phase4_dino_from_config(config, device)
-    eval_episodes = int(episodes or config.get("incremental.phase7.dagger_episodes", 200))
     seed_start = int(config.get("incremental.phase7.dagger_seed", 740000)) + 1000 * iteration
-    oracle_frames = _phase7_collect_oracle_frames(config, dino, eval_episodes, seed_start)
-    oracle_latents = _phase7_encode_oracle_frame_sequences(encoder, frame_norm, oracle_frames, device)
     teacher = load_ppo_agent(_rl_paths(config).best, device)
-    num_envs = min(int(config.get("incremental.phase7.eval_num_envs", 64)), eval_episodes)
-    env = _phase4_make_visual_env(config, num_envs)
-    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
-    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
-    obs, _info = env.reset(seed=seed_start)
     action_dim = int(checkpoint["action_dim"])
     zero_action_norm = action_norm.transform(np.zeros((1, action_dim), dtype=np.float32))[0]
-    prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(np.float32)
-    active_idx = np.arange(num_envs, dtype=np.int32)
-    active_t = np.zeros(num_envs, dtype=np.int32)
-    next_idx = num_envs
-    successes: list[float] = []
     cond_rows = []
     teacher_action_rows = []
-    while len(successes) < eval_episodes:
-        frames_raw = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
-        frames = frame_norm.transform(frames_raw)
-        _rgb, state = _phase4_rgb_state(obs)
-        z = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy().astype(np.float32)
-        goals = np.zeros((num_envs, latent_dim), dtype=np.float32)
-        for env_idx in range(num_envs):
-            episode_idx = int(active_idx[env_idx])
-            if episode_idx >= eval_episodes:
-                continue
-            source = oracle_latents[episode_idx]
-            goals[env_idx] = source[min(int(active_t[env_idx]) + horizon_steps, len(source) - 1)]
-        cond = _phase7_condition(z, goals, prev_action_norm, goal_encoding)
-        teacher_action = torch.clamp(
-            teacher.actor_mean(torch.from_numpy(state).to(device).float()),
-            action_low,
-            action_high,
-        ).cpu().numpy().astype(np.float32)
-        active_mask = active_idx < eval_episodes
-        if np.any(active_mask):
-            cond_rows.append(cond[active_mask].copy())
-            teacher_action_rows.append(teacher_action[active_mask].copy())
-        pred_norm = model(torch.from_numpy(cond).to(device).float())
-        raw_action = action_norm.inverse(pred_norm.cpu().numpy())
-        action = torch.from_numpy(raw_action).to(device).float()
-        if bool(config.get("policy.clip_actions_to_env_space", True)):
-            action = torch.clamp(action, action_low, action_high)
-        prev_action_norm = action_norm.transform(action.cpu().numpy().astype(np.float32))
-        obs, _reward, _terminated, _truncated, info = env.step(action)
-        active_t += 1
-        if "final_info" in info:
-            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
-            if mask.any():
-                episode_info = info["final_info"]["episode"]
-                success_once = _numpy(episode_info["success_once"]).reshape(-1)
-                for env_idx in np.flatnonzero(mask):
-                    successes.append(float(success_once[env_idx]))
-                    active_t[env_idx] = 0
-                    prev_action_norm[env_idx] = zero_action_norm
-                    if next_idx < eval_episodes:
-                        active_idx[env_idx] = next_idx
-                        next_idx += 1
-                    else:
-                        active_idx[env_idx] = eval_episodes
-                    if len(successes) >= eval_episodes:
+    successes: list[float] = []
+    replay_errors: list[float] = []
+    branch_latencies: list[float] = []
+    branch_latencies_per_env: list[float] = []
+    failed_replay_steps = 0
+    max_episode_steps = int(config.get("env_max_episode_steps", 100))
+    replay_state_tolerance = float(
+        config.get("incremental.phase7.replay_branch_state_tolerance", 1e-6)
+    )
+    max_num_envs = min(
+        int(config.get("incremental.phase7.replay_branch_num_envs", 16)),
+        eval_episodes,
+    )
+
+    def make_env(num_envs: int):
+        return gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=num_envs,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+
+    progress = trange(eval_episodes, desc="phase7F collect coherent branch DAgger")
+    for batch_start in range(0, eval_episodes, max_num_envs):
+        num_envs = min(max_num_envs, eval_episodes - batch_start)
+        reset_seeds = [seed_start + batch_start + i for i in range(num_envs)]
+        student_env = make_env(num_envs)
+        branch_env = make_env(num_envs)
+        action_low_np = np.asarray(student_env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student_env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device, dtype=torch.float32)
+        action_high = torch.as_tensor(action_high_np, device=device, dtype=torch.float32)
+        try:
+            obs, _info = student_env.reset(seed=reset_seeds)
+            history: list[torch.Tensor] = []
+            prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(
+                np.float32
+            )
+            active = np.ones(num_envs, dtype=bool)
+            success_once = np.zeros(num_envs, dtype=bool)
+            for _step in range(max_episode_steps):
+                if not active.any():
+                    break
+                active_count = int(active.sum())
+                branch_timer = Timer()
+                branch_obs, _branch_info = branch_env.reset(seed=reset_seeds)
+                replay_done = torch.zeros(num_envs, device=device, dtype=torch.bool)
+                for action_history in history:
+                    branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                        branch_env.step(action_history)
+                    )
+                    replay_done = replay_done | torch.logical_or(branch_term, branch_trunc).view(-1)
+                state_errors = torch.max(
+                    torch.abs(student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()),
+                    dim=1,
+                ).values
+                state_errors_np = state_errors.detach().cpu().numpy()
+                replay_errors.extend(float(x) for x in state_errors_np[active])
+                replay_done_np = replay_done.detach().cpu().numpy().astype(bool)
+                failed_replay_steps += int(
+                    np.sum(active & (replay_done_np | (state_errors_np > replay_state_tolerance)))
+                )
+                for _ in range(horizon_steps):
+                    teacher_action = torch.clamp(
+                        teacher.actor_mean(branch_obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                        branch_env.step(teacher_action)
+                    )
+                    if bool(torch.all(torch.logical_or(branch_term, branch_trunc))):
                         break
-    env.close()
+                branch_elapsed = branch_timer.elapsed()
+                branch_latencies.append(branch_elapsed)
+                branch_latencies_per_env.append(branch_elapsed / active_count)
+
+                current_frame = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+                goal_frame = _phase4_frame_inputs(
+                    branch_obs,
+                    dino,
+                    int(config.get("dino.batch_size", 64)),
+                )
+                frames = frame_norm.transform(np.concatenate([current_frame, goal_frame], axis=0))
+                z_pair = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy()
+                z = z_pair[:num_envs].astype(np.float32)
+                goals = z_pair[num_envs:].astype(np.float32)
+                cond = np.stack(
+                    [
+                        _phase7_condition(z[i], goals[i], prev_action_norm[i], goal_encoding)
+                        for i in range(num_envs)
+                    ],
+                    axis=0,
+                )
+                teacher_now = torch.clamp(
+                    teacher.actor_mean(obs["state"].to(device).float()),
+                    action_low,
+                    action_high,
+                ).cpu().numpy().astype(np.float32)
+                cond_rows.append(cond[active].copy())
+                teacher_action_rows.append(teacher_now[active].copy())
+
+                pred_norm = model(torch.from_numpy(cond).to(device).float())
+                raw_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
+                action_t = torch.from_numpy(raw_action).to(device).float()
+                if bool(config.get("policy.clip_actions_to_env_space", True)):
+                    action_t = torch.clamp(action_t, action_low, action_high)
+                action_t[~torch.from_numpy(active).to(device)] = 0.0
+                obs, _reward, terminated, truncated, info = student_env.step(action_t)
+                history.append(action_t.detach().clone())
+                prev_action_norm = action_norm.transform(action_t.cpu().numpy().astype(np.float32))
+                if "success" in info:
+                    success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
+                done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(bool)
+                newly_done = active & done
+                if np.any(newly_done):
+                    progress.update(int(newly_done.sum()))
+                    active[newly_done] = False
+            if np.any(active):
+                progress.update(int(active.sum()))
+            successes.extend(float(x) for x in success_once)
+        finally:
+            student_env.close()
+            branch_env.close()
+    progress.close()
     np.savez_compressed(
         output_path,
         conditions=np.concatenate(cond_rows, axis=0).astype(np.float32),
@@ -7404,10 +7500,31 @@ def collect_phase7_oracle_dagger_queries(
         collection_success=np.asarray(successes, dtype=np.float32),
         dataset_type=np.asarray("state_query_dataset"),
         semantics=np.asarray(
-            "phase7 low-level visited current latents with oracle future goals relabeled by privileged teacher"
+            "phase7 learner-visited states with exact replay local branch future goals and "
+            "privileged teacher actions from the same current state"
         ),
         goal_encoding=np.asarray(goal_encoding),
         goal_dropout_prob=np.asarray(goal_dropout_prob, dtype=np.float32),
+        replay_current_state_error_mean=np.asarray(
+            float(np.mean(replay_errors)) if replay_errors else 0.0,
+            dtype=np.float32,
+        ),
+        replay_current_state_error_max=np.asarray(
+            float(np.max(replay_errors)) if replay_errors else 0.0,
+            dtype=np.float32,
+        ),
+        replay_failed_step_fraction=np.asarray(
+            float(failed_replay_steps / max(1, len(replay_errors))),
+            dtype=np.float32,
+        ),
+        branch_generation_latency_s=np.asarray(
+            float(np.mean(branch_latencies)) if branch_latencies else 0.0,
+            dtype=np.float32,
+        ),
+        branch_generation_latency_per_env_s=np.asarray(
+            float(np.mean(branch_latencies_per_env)) if branch_latencies_per_env else 0.0,
+            dtype=np.float32,
+        ),
         rollout_checkpoint=np.asarray(str(rollout_checkpoint_path)),
     )
     console.print(f"Wrote Phase 7 oracle DAgger queries: {output_path}")

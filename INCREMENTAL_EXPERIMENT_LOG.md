@@ -1065,3 +1065,40 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Next action:** Train/evaluate residual latent branch controllers and/or move
   to coherent branch-oracle DAgger. Also add valid reachable-goal sensitivity
   tests before any final Phase 7 claim.
+
+### 2026-06-19 - P7-D10: Coherent branch-oracle DAgger collection
+
+- **Issue found:** The existing Phase 7 DAgger collector still used future
+  latents from a precomputed nominal teacher trajectory, while the action label
+  came from the privileged teacher queried at the learner's current state. That
+  is the incoherent combination the revised Phase 7 plan explicitly rejects.
+- **Implementation:** Changed `phase7-dagger-collect` to generate each goal by
+  exact replay from the learner's current state:
+  1. reset a branch environment to the same episode seed;
+  2. replay the learner's executed action history;
+  3. verify branch and student simulator states match;
+  4. roll the privileged teacher for `k` steps;
+  5. encode the reached branch future observation as the goal;
+  6. store the teacher action queried from the same current learner state.
+- **Artifact safety:** New files are named
+  `oracle_branch_dagger_iter{iteration}_e{episodes}.npz`, so small smoke
+  collections cannot be silently reused as full DAgger iterations.
+- **Evaluation hook:** `phase7-replay-branch-eval` now accepts
+  `--dagger-iteration`, so DAgger checkpoints can be evaluated with the same
+  online replay branch oracle instead of the old nominal-goal evaluator.
+- **Smoke run:** `phase7-dagger-collect --latent-dim 256 --variant ae_recon
+  --horizon-steps 2 --action-chunk-steps 1 --goal-encoding delta --iteration 1
+  --episodes 2 --force`.
+
+| queries | collection success | replay max error | failed replay fraction | branch latency/env |
+| ---: | ---: | ---: | ---: | ---: |
+| `108` | `1.00` | `0.0` | `0.0` | `0.513 s` |
+
+- **Gate status:** Phase 7F collection semantics are now correct for a smoke
+  run. This does not yet constitute a DAgger performance gate because the full
+  query budget, training, and replay-branch evaluation of the resulting DAgger
+  checkpoint have not been run.
+- **Next action:** Train/evaluate a small coherent branch-oracle DAgger
+  iteration with `phase7-replay-branch-eval --dagger-iteration 1`. The current
+  `phase7-dagger-eval` path still evaluates DAgger checkpoints with nominal
+  precomputed teacher goals and should not be used as the Phase 7F gate.
