@@ -47,6 +47,7 @@ from hcl_poc.incremental import (
     train_phase7_oracle_low_level,
     train_phase7_oracle_dagger_low_level,
     train_phase7_privileged_branch_baselines,
+    train_phase7_residual_low_level,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -449,6 +450,32 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             dagger_query_episodes=args.dagger_query_episodes,
             force=args.force,
         )
+    elif args.incremental_command == "phase7-residual-train":
+        train_phase7_residual_low_level(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase7-residual-replay-eval":
+        evaluate_phase7_replay_branch_oracle_low_level(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
+            seed=args.seed,
+            episodes=args.episodes,
+            residual=True,
+            force=args.force,
+        )
     elif args.incremental_command == "phase7-matched-flat-eval":
         evaluate_phase7_matched_flat_latent_policy(
             config,
@@ -710,7 +737,9 @@ def build_parser() -> argparse.ArgumentParser:
         phase7.add_argument("--force", action="store_true")
         if command == "phase7-eval":
             phase7.add_argument("--episodes", type=int)
-            phase7.add_argument("--goal-mode", choices=["all", "correct", "shuffled", "zero"], default="all")
+            phase7.add_argument(
+                "--goal-mode", choices=["all", "correct", "shuffled", "zero"], default="all"
+            )
         phase7.set_defaults(func=incremental_cmd)
     phase7_branch = incremental_sub.add_parser("phase7-branch-audit")
     add_config_arg(phase7_branch)
@@ -735,6 +764,20 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_replay.add_argument("--dagger-query-episodes", type=int)
     phase7_replay.add_argument("--force", action="store_true")
     phase7_replay.set_defaults(func=incremental_cmd)
+    for command in ["phase7-residual-train", "phase7-residual-replay-eval"]:
+        phase7_residual = incremental_sub.add_parser(command)
+        add_config_arg(phase7_residual)
+        phase7_residual.add_argument("--latent-dim", type=int)
+        phase7_residual.add_argument("--variant", default=None)
+        phase7_residual.add_argument("--horizon-steps", type=int)
+        phase7_residual.add_argument("--action-chunk-steps", type=int)
+        phase7_residual.add_argument("--goal-encoding", choices=["absolute", "delta"], default=None)
+        phase7_residual.add_argument("--goal-dropout-prob", type=float)
+        phase7_residual.add_argument("--seed", type=int, default=0)
+        phase7_residual.add_argument("--force", action="store_true")
+        if command == "phase7-residual-replay-eval":
+            phase7_residual.add_argument("--episodes", type=int)
+        phase7_residual.set_defaults(func=incremental_cmd)
     phase7_flat = incremental_sub.add_parser("phase7-matched-flat-eval")
     add_config_arg(phase7_flat)
     phase7_flat.add_argument("--latent-dim", type=int)

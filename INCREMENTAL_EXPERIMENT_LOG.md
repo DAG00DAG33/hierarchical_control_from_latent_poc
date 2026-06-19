@@ -1190,3 +1190,58 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   small horizon sweep (`k in {2,5,10,20}`) now that branch correctness,
   matched-flat comparison, coherent DAgger wiring, and action-level goal use are
   all positive at development scale.
+
+### 2026-06-19 - P7-D14: Exact branch-oracle horizon sweep
+
+- **Controlled comparison:** Trained delta-goal `ae_recon_z256` policies for
+  `k in {5,10,20}` using the same encoder, nominal teacher data, MLP, `H=1`,
+  and 80-epoch schedule as the existing `k=2` policy. The older `k=5/10`
+  absolute-goal checkpoints were not reused because that would confound horizon
+  with goal encoding.
+- **Evaluation:** Exact replay branch oracle on the same 10 seeds beginning at
+  `1200000`. These are development results; the existing `k=2` 50-episode
+  result remains the stronger selection evidence.
+
+| horizon `k` | seconds | success | final reward | max reward | teacher action MAE | replay max error |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `2` | `0.10` | `0.70` | `0.800` | `0.801` | `0.0267` | `0.0` |
+| `5` | `0.25` | `0.70` | `0.779` | `0.786` | `0.0536` | `0.0` |
+| `10` | `0.50` | `0.80` | `0.866` | `0.866` | `0.0436` | `0.0` |
+| `20` | `1.00` | `0.40` | `0.537` | `0.581` | `0.1290` | `0.0` |
+
+- **Training trend:** Held-out teacher action MAE increases from `0.0266` at
+  `k=2` to `0.0300`, `0.0333`, and `0.0403` at `k=5,10,20` respectively.
+- **Decision:** Select `k=2` for the Phase 7 gate. It is the shortest horizon,
+  passes the matched-flat gate, has the lowest teacher-action error, and already
+  achieved `0.72` success over 50 exact replay episodes. Although `k=10` is
+  promising on 10 episodes, its uncertainty overlaps `k=2` and it offers no
+  demonstrated performance advantage worth the longer local-control horizon.
+  `k=20` is clearly too long for this interface.
+
+### 2026-06-19 - P7-D15: Frozen-flat residual latent controller
+
+- **Implementation:** Added `phase7-residual-train` and
+  `phase7-residual-replay-eval`. The controller is
+  `pi_flat(z_t,a_{t-1}) + delta_pi(z_t,g_t-z_t,a_{t-1})` in normalized action
+  space. The Phase 6 flat BC is frozen,
+  and the residual MLP output layer is initialized to exactly zero.
+- **Run:** `ae_recon_z256`, `k=2`, `H=1`, delta goal, 80 training epochs,
+  followed by 10 exact replay branch-oracle episodes on seeds starting at
+  `1200000`.
+- **Held-out behavior:** Correct-goal action MAE `0.0315`; mean residual action
+  L2 `0.0203`; valid-vs-shuffled goal action sensitivity only `0.0252`.
+
+| policy | episodes | success | final reward | max reward | teacher action MAE | replay max error |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| matched flat latent | `50` | `0.40` | `0.547` | `0.568` | n/a | n/a |
+| residual branch `k=2` | `10` | `0.30` | `0.468` | `0.494` | `0.1337` | `0.0` |
+| monolithic delta branch `k=2` | `10` | `0.70` | `0.800` | `0.801` | `0.0267` | `0.0` |
+
+- **Decision:** Keep the residual controller as a negative Phase 7E ablation.
+  Freezing the weak flat base and fitting small nominal-distribution corrections
+  largely preserves the flat controller's failure modes and produces negligible
+  goal use. The monolithic delta and coherent DAgger controllers remain the
+  selected candidates.
+- **Next action:** Complete the counterfactual reachable-subgoal rollout test,
+  then run the 100-episode Phase 7 gate for the selected methods. Reserve
+  500-episode evaluation for final selected results only.

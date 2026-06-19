@@ -211,7 +211,9 @@ def _collect_phase0_causal_audit(
             success = False
             while not (terminated or truncated):
                 state_t = torch.from_numpy(observations[-1][None]).to(device).float()
-                raw_action = teacher.actor_mean(state_t).detach().cpu().numpy()[0].astype(np.float32)
+                raw_action = (
+                    teacher.actor_mean(state_t).detach().cpu().numpy()[0].astype(np.float32)
+                )
                 clipped_action = np.clip(raw_action, action_low, action_high).astype(np.float32)
                 executed_action = (
                     clipped_action
@@ -386,7 +388,9 @@ def _replay_causal_transitions(config: Config, dataset_path: Path) -> dict[str, 
             for step, action in enumerate(actions):
                 env.step(action)
                 actual = _numpy(env.unwrapped.get_state()).reshape(-1).astype(np.float32)
-                max_error = max(max_error, float(np.max(np.abs(actual - expected_states[step + 1]))))
+                max_error = max(
+                    max_error, float(np.max(np.abs(actual - expected_states[step + 1])))
+                )
             episode_errors.append(max_error)
     env.close()
     return {
@@ -634,9 +638,9 @@ def run_phase0(config: Config, episodes: int | None = None, force: bool = False)
     eval_episodes = int(episodes or config.get("incremental.phase0.eval_episodes", 500))
     eval_seed = int(config.get("incremental.phase0.eval_seed", 10000))
 
-    comparison_states = np.random.default_rng(0).normal(
-        size=(1024, teacher.obs_dim)
-    ).astype(np.float32)
+    comparison_states = (
+        np.random.default_rng(0).normal(size=(1024, teacher.obs_dim)).astype(np.float32)
+    )
     with torch.inference_mode():
         comparison_t = torch.from_numpy(comparison_states).to(device)
         teacher_outputs = teacher.actor_mean(comparison_t)
@@ -685,7 +689,8 @@ def run_phase0(config: Config, episodes: int | None = None, force: bool = False)
         <= 0.05,
         "copied_output_exact": copied_max_error == 0.0,
         "copied_success_within_1pp": teacher_student_success_gap <= 0.01,
-        "state_action_alignment": alignment["global_shift_0_mae"] < min(
+        "state_action_alignment": alignment["global_shift_0_mae"]
+        < min(
             alignment["global_shift_minus_1_mae"],
             alignment["global_shift_plus_1_mae"],
         ),
@@ -886,9 +891,7 @@ def _action_regression_metrics(prediction: np.ndarray, target: np.ndarray) -> di
         "prediction_out_of_bounds_fraction": float(
             np.mean(np.any((prediction < -1.0) | (prediction > 1.0), axis=-1))
         ),
-        "target_near_bounds_fraction": float(
-            np.mean(np.any(np.abs(target) >= 0.99, axis=-1))
-        ),
+        "target_near_bounds_fraction": float(np.mean(np.any(np.abs(target) >= 0.99, axis=-1))),
     }
 
 
@@ -914,14 +917,12 @@ def train_phase1_bc(
     if checkpoint_path.exists() and not force:
         console.print(f"Phase 1 BC exists: {checkpoint_path}")
         return checkpoint_path
-    train_states, train_actions, val_states, val_actions, data_metadata = (
-        _load_phase1_queries(
-            dataset_path,
-            subset,
-            n_episodes,
-            validation_episodes,
-            label_kind,
-        )
+    train_states, train_actions, val_states, val_actions, data_metadata = _load_phase1_queries(
+        dataset_path,
+        subset,
+        n_episodes,
+        validation_episodes,
+        label_kind,
     )
     normalize_inputs = bool(config.get("incremental.phase1.normalize_inputs", False))
     input_norm = (
@@ -1014,7 +1015,9 @@ def train_phase1_bc(
     return checkpoint_path
 
 
-def _load_phase1_bc(checkpoint_path: Path, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
+def _load_phase1_bc(
+    checkpoint_path: Path, device: torch.device
+) -> tuple[nn.Module, dict[str, Any]]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model = PPOAgent(
         int(checkpoint["obs_dim"]),
@@ -1158,12 +1161,8 @@ def collect_phase2_dagger_queries(
         teacher_raw = teacher.actor_mean(obs)
         take = min(num_envs, required_queries - collected)
         states.append(obs[:take].detach().cpu().numpy().astype(np.float32))
-        teacher_raw_actions.append(
-            teacher_raw[:take].detach().cpu().numpy().astype(np.float32)
-        )
-        learner_raw_actions.append(
-            learner_raw[:take].detach().cpu().numpy().astype(np.float32)
-        )
+        teacher_raw_actions.append(teacher_raw[:take].detach().cpu().numpy().astype(np.float32))
+        learner_raw_actions.append(learner_raw[:take].detach().cpu().numpy().astype(np.float32))
         collected += take
         progress.update(take)
         obs, _reward, _terminated, _truncated, info = env.step(learner_executed)
@@ -1230,14 +1229,12 @@ def train_phase2_dagger_bc(
         return checkpoint_path
 
     dataset_path = collect_phase1_query_dataset(config, force=False)
-    train_states, train_actions, val_states, val_actions, base_metadata = (
-        _load_phase1_queries(
-            dataset_path,
-            "all",
-            int(config.get("incremental.phase1.train_episodes", 2000)),
-            int(config.get("incremental.phase1.validation_episodes", 200)),
-            "deterministic_raw",
-        )
+    train_states, train_actions, val_states, val_actions, base_metadata = _load_phase1_queries(
+        dataset_path,
+        "all",
+        int(config.get("incremental.phase1.train_episodes", 2000)),
+        int(config.get("incremental.phase1.validation_episodes", 200)),
+        "deterministic_raw",
     )
     dagger_states = []
     dagger_actions = []
@@ -1322,9 +1319,9 @@ def train_phase2_dagger_bc(
             {
                 "epoch": epoch,
                 "train_mse": loss_sum / count,
-            "base_validation_mse": val_loss,
-        }
-    )
+                "base_validation_mse": val_loss,
+            }
+        )
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_state = copy.deepcopy(model.state_dict())
@@ -1513,9 +1510,7 @@ def _rollout_recovery_batch(
         executed_action = torch.clamp(raw_action, action_low, action_high)
         if collect_trajectories:
             obs_np = obs.detach().cpu().numpy().astype(np.float32)
-            sim_np = (
-                env.unwrapped.get_state().detach().cpu().numpy().astype(np.float32)
-            )
+            sim_np = env.unwrapped.get_state().detach().cpu().numpy().astype(np.float32)
             action_np = executed_action.detach().cpu().numpy().astype(np.float32)
             for index in np.flatnonzero(active):
                 state_buffers[index].append(obs_np[index])
@@ -1523,9 +1518,7 @@ def _rollout_recovery_batch(
                 action_buffers[index].append(action_np[index])
         obs, _reward, terminated, truncated, info = env.step(executed_action)
         obs = obs.to(default_device()).float()
-        next_simulator_states = (
-            env.unwrapped.get_state().detach().cpu().numpy().astype(np.float32)
-        )
+        next_simulator_states = env.unwrapped.get_state().detach().cpu().numpy().astype(np.float32)
         step_success = _numpy(info.get("success", np.zeros(samples))).reshape(-1).astype(bool)
         success |= step_success
         done = (
@@ -1645,22 +1638,17 @@ def evaluate_phase2_recovery(
         "samples": samples,
         "perturbation": {
             "xy_std_m": float(config.get("incremental.phase2.recovery_xy_std_m", 0.01)),
-            "yaw_std_deg": float(
-                config.get("incremental.phase2.recovery_yaw_std_deg", 5.0)
-            ),
+            "yaw_std_deg": float(config.get("incremental.phase2.recovery_yaw_std_deg", 5.0)),
         },
         "teacher_recovery_success": float(np.mean(teacher_success)),
         "teacher_recoverable_samples": int(teacher_recoverable.sum()),
         "learner_recovery_success_all": float(np.mean(learner_success)),
         "learner_recovery_success_when_teacher_recovers": (
-            float(np.mean(paired_learner_success))
-            if len(paired_learner_success)
-            else float("nan")
+            float(np.mean(paired_learner_success)) if len(paired_learner_success) else float("nan")
         ),
         "causal_dataset": str(causal_path),
         "gate_passed": bool(
-            len(paired_learner_success)
-            and float(np.mean(paired_learner_success)) >= 0.80
+            len(paired_learner_success) and float(np.mean(paired_learner_success)) >= 0.80
         ),
         "metadata": _runtime_metadata(config),
     }
@@ -1759,9 +1747,11 @@ def _phase3_zero_noise_action_metrics(
     batch_size = 8192
     with torch.inference_mode():
         for start in range(0, len(states), batch_size):
-            cond = torch.from_numpy(input_norm.transform(states[start : start + batch_size])).to(
-                device
-            ).float()
+            cond = (
+                torch.from_numpy(input_norm.transform(states[start : start + batch_size]))
+                .to(device)
+                .float()
+            )
             noise = torch.zeros(cond.shape[0], model.sample_dim, device=device, dtype=cond.dtype)
             pred_norm = sample_flow(
                 model,
@@ -1873,9 +1863,7 @@ def train_phase3_flow(
     set_seed(seed)
     iteration = int(config.get("incremental.phase3.dagger_iteration", 3))
     artifact_dir = ensure_dir(
-        config.path_value("paths.incremental_artifact_dir")
-        / "phase3"
-        / f"seed{seed}"
+        config.path_value("paths.incremental_artifact_dir") / "phase3" / f"seed{seed}"
     )
     checkpoint_path = artifact_dir / "one_step_flow.pt"
     if checkpoint_path.exists() and not force:
@@ -1967,7 +1955,10 @@ def train_phase3_flow(
         )
         row = history[-1]
         if epoch % int(config.get("incremental.phase3.validation_action_interval", 10)) == 0:
-            subset = min(int(config.get("incremental.phase3.validation_action_subset", 4096)), len(val_states))
+            subset = min(
+                int(config.get("incremental.phase3.validation_action_subset", 4096)),
+                len(val_states),
+            )
             if str(config.get("incremental.phase3.eval_mode", "sample_mean")) == "zero_noise":
                 action_metrics = _phase3_zero_noise_action_metrics(
                     model,
@@ -2086,9 +2077,12 @@ def evaluate_phase3_flow(
         cond = torch.from_numpy(input_norm.transform(state[None])).to(device).float()
         if eval_mode == "zero_noise":
             noise = torch.zeros(cond.shape[0], sample_dim, device=device, dtype=cond.dtype)
-            action_normed = sample_flow(
-                model, cond, flow_steps, sample_dim, initial_noise=noise
-            ).detach().cpu().numpy()
+            action_normed = (
+                sample_flow(model, cond, flow_steps, sample_dim, initial_noise=noise)
+                .detach()
+                .cpu()
+                .numpy()
+            )
         elif eval_mode == "sample_mean":
             samples = []
             for _ in range(eval_samples):
@@ -2374,7 +2368,9 @@ def train_phase4_visual_bc(
     frame_norm, action_norm = _phase4_fit_standardizers(train_episodes)
     train_norm = _phase4_normalize_episodes(train_episodes, frame_norm, action_norm)
     val_norm = _phase4_normalize_episodes(val_episodes, frame_norm, action_norm)
-    zero_action_norm = action_norm.transform(np.zeros((1, data_metadata["action_dim"]), dtype=np.float32))[0]
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, data_metadata["action_dim"]), dtype=np.float32)
+    )[0]
     step_dim = data_metadata["frame_dim"] + data_metadata["action_dim"]
     hidden_dim = int(config.get("incremental.phase4.hidden_dim", 512))
     model = _make_phase4_policy(
@@ -2616,9 +2612,7 @@ def evaluate_phase4_visual_bc(
                     frame_history[env_idx] = np.repeat(
                         next_frames[env_idx][None, :], history, axis=0
                     )
-                    action_history[env_idx] = np.repeat(
-                        zero_action_norm[None, :], history, axis=0
-                    )
+                    action_history[env_idx] = np.repeat(zero_action_norm[None, :], history, axis=0)
                     active_max_reward[env_idx] = -np.inf
                     active_lengths[env_idx] = 0
                     if len(successes) >= eval_episodes:
@@ -2626,9 +2620,7 @@ def evaluate_phase4_visual_bc(
     env.close()
     metrics = {
         "success": float(np.mean(successes[:eval_episodes])),
-        "success_stderr": float(
-            np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)
-        ),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
         "final_reward": float(np.mean(final_rewards[:eval_episodes])),
         "max_reward": float(np.mean(max_rewards[:eval_episodes])),
         "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
@@ -2829,7 +2821,9 @@ def probe_phase4_visual_history(
     continuous_head = nn.Linear(hidden_dim, y_all.shape[-1]).to(device)
     contact_head = nn.Linear(hidden_dim, 1).to(device)
     optimizer = torch.optim.AdamW(
-        list(trunk.parameters()) + list(continuous_head.parameters()) + list(contact_head.parameters()),
+        list(trunk.parameters())
+        + list(continuous_head.parameters())
+        + list(contact_head.parameters()),
         lr=float(config.get("incremental.phase4.probe_lr", 1e-3)),
     )
     epochs = int(config.get("incremental.phase4.probe_epochs", 100))
@@ -2842,9 +2836,9 @@ def probe_phase4_visual_history(
             hidden = trunk(x)
             pred_y = continuous_head(hidden)
             pred_c = contact_head(hidden)
-            loss = torch.mean((pred_y - y) ** 2) + torch.nn.functional.binary_cross_entropy_with_logits(
-                pred_c, c
-            )
+            loss = torch.mean(
+                (pred_y - y) ** 2
+            ) + torch.nn.functional.binary_cross_entropy_with_logits(pred_c, c)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -2897,9 +2891,7 @@ def probe_phase4_visual_history(
     }
     metrics["gate_support"] = {
         "pose_better_than_mean": bool(mae[0] < baseline_mae[0] and mae[1] < baseline_mae[1]),
-        "velocity_better_than_mean": bool(
-            mae[3] < baseline_mae[3] and mae[4] < baseline_mae[4]
-        ),
+        "velocity_better_than_mean": bool(mae[3] < baseline_mae[3] and mae[4] < baseline_mae[4]),
         "contact_better_than_majority": bool(
             metrics["contact"]["accuracy"] > metrics["contact"]["majority_baseline_accuracy"]
         ),
@@ -3199,7 +3191,9 @@ def evaluate_phase5_visual_flow(
     active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
     active_lengths = np.zeros(num_envs, dtype=np.int32)
     while len(successes) < eval_episodes:
-        policy_input = np.concatenate([frame_history, action_history], axis=-1).reshape(num_envs, -1)
+        policy_input = np.concatenate([frame_history, action_history], axis=-1).reshape(
+            num_envs, -1
+        )
         timer = Timer()
         with torch.inference_mode():
             cond = torch.from_numpy(policy_input).to(device).float()
@@ -3241,9 +3235,7 @@ def evaluate_phase5_visual_flow(
                     frame_history[env_idx] = np.repeat(
                         next_frames[env_idx][None, :], history, axis=0
                     )
-                    action_history[env_idx] = np.repeat(
-                        zero_action_norm[None, :], history, axis=0
-                    )
+                    action_history[env_idx] = np.repeat(zero_action_norm[None, :], history, axis=0)
                     active_max_reward[env_idx] = -np.inf
                     active_lengths[env_idx] = 0
                     if len(successes) >= eval_episodes:
@@ -3251,9 +3243,7 @@ def evaluate_phase5_visual_flow(
     env.close()
     metrics = {
         "success": float(np.mean(successes[:eval_episodes])),
-        "success_stderr": float(
-            np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)
-        ),
+        "success_stderr": float(np.std(successes[:eval_episodes]) / np.sqrt(eval_episodes)),
         "final_reward": float(np.mean(final_rewards[:eval_episodes])),
         "max_reward": float(np.mean(max_rewards[:eval_episodes])),
         "mean_episode_length": float(np.mean(episode_lengths[:eval_episodes])),
@@ -3429,9 +3419,7 @@ def train_phase6_representation(
     )
     encoder_type = "vae" if variant.startswith("vae_") else "deterministic"
     vae_beta = (
-        float(config.get("incremental.phase6.vae_beta", 1e-4))
-        if encoder_type == "vae"
-        else 0.0
+        float(config.get("incremental.phase6.vae_beta", 1e-4)) if encoder_type == "vae" else 0.0
     )
 
     device = default_device()
@@ -3547,10 +3535,7 @@ def train_phase6_representation(
                             * (
                                 torch.mean((recon_t[:, :-proprio_dim] - x_t[:, :-proprio_dim]) ** 2)
                                 + torch.mean(
-                                    (
-                                        recon_future[:, :-proprio_dim]
-                                        - x_future[:, :-proprio_dim]
-                                    )
+                                    (recon_future[:, :-proprio_dim] - x_future[:, :-proprio_dim])
                                     ** 2
                                 )
                             ).cpu()
@@ -3562,10 +3547,7 @@ def train_phase6_representation(
                             * (
                                 torch.mean((recon_t[:, -proprio_dim:] - x_t[:, -proprio_dim:]) ** 2)
                                 + torch.mean(
-                                    (
-                                        recon_future[:, -proprio_dim:]
-                                        - x_future[:, -proprio_dim:]
-                                    )
+                                    (recon_future[:, -proprio_dim:] - x_future[:, -proprio_dim:])
                                     ** 2
                                 )
                             ).cpu()
@@ -3613,8 +3595,7 @@ def train_phase6_representation(
                 recon_t = decoder(z_t)
                 recon_future = decoder(z_future)
                 recon_loss = 0.5 * (
-                    reconstruction_loss(recon_t, x_t)
-                    + reconstruction_loss(recon_future, x_future)
+                    reconstruction_loss(recon_t, x_t) + reconstruction_loss(recon_future, x_future)
                 )
             loss = (
                 prediction_weight * pred_loss
@@ -3828,10 +3809,14 @@ def _phase6_representations(
     if representation == "raw":
         train_episodes, _val_episodes, _metadata = _load_phase6_train_episodes(config)
         frame_norm, _action_norm = _phase4_fit_standardizers(train_episodes)
-        return frame_norm.transform(inputs), frame_norm.transform(next_inputs), {
-            "representation": "raw_spatial_dino_proprio",
-            "dim": int(inputs.shape[-1]),
-        }
+        return (
+            frame_norm.transform(inputs),
+            frame_norm.transform(next_inputs),
+            {
+                "representation": "raw_spatial_dino_proprio",
+                "dim": int(inputs.shape[-1]),
+            },
+        )
     if representation != "latent":
         raise ValueError(f"Unknown Phase 6 representation: {representation}")
     if latent_dim is None:
@@ -3860,12 +3845,16 @@ def _phase6_representations(
                 .cpu()
                 .numpy()
             )
-    return np.concatenate(reps).astype(np.float32), np.concatenate(next_reps).astype(np.float32), {
-        "representation": "latent",
-        "variant": checkpoint["variant"],
-        "latent_dim": int(checkpoint["latent_dim"]),
-        "checkpoint": str(path),
-    }
+    return (
+        np.concatenate(reps).astype(np.float32),
+        np.concatenate(next_reps).astype(np.float32),
+        {
+            "representation": "latent",
+            "variant": checkpoint["variant"],
+            "latent_dim": int(checkpoint["latent_dim"]),
+            "checkpoint": str(path),
+        },
+    )
 
 
 def _phase6_train_probe_heads(
@@ -3882,6 +3871,7 @@ def _phase6_train_probe_heads(
     set_seed(seed)
     device = default_device()
     rng = np.random.default_rng(seed)
+
     def encode_probe_labels(raw_labels: np.ndarray) -> np.ndarray:
         yaw = raw_labels[:, 2]
         return np.concatenate(
@@ -4004,8 +3994,12 @@ def _phase6_train_probe_heads(
         probe_next_labels[train_idx].mean(axis=0, keepdims=True),
         target_next_label_encoded.shape,
     )
-    reward_mean = np.broadcast_to(reward[train_idx].mean(axis=0, keepdims=True), target_reward.shape)
-    action_mean = np.broadcast_to(actions[train_idx].mean(axis=0, keepdims=True), target_action.shape)
+    reward_mean = np.broadcast_to(
+        reward[train_idx].mean(axis=0, keepdims=True), target_reward.shape
+    )
+    action_mean = np.broadcast_to(
+        actions[train_idx].mean(axis=0, keepdims=True), target_action.shape
+    )
     names = [
         "obj_x_m",
         "obj_y_m",
@@ -4018,6 +4012,7 @@ def _phase6_train_probe_heads(
         "tcp_vx_mps",
         "tcp_vy_mps",
     ]
+
     def structured_errors(pred_encoded: np.ndarray, target_raw: np.ndarray) -> np.ndarray:
         pred_yaw = np.arctan2(pred_encoded[:, 2], pred_encoded[:, 3])
         yaw_err = np.abs(
@@ -4058,7 +4053,9 @@ def _phase6_train_probe_heads(
         "train_samples": int(len(train_idx)),
         "validation_samples": int(len(val_idx)),
         "representation_dim": int(reps.shape[-1]),
-        "continuous_mae": {name: float(value) for name, value in zip(names, label_mae, strict=True)},
+        "continuous_mae": {
+            name: float(value) for name, value in zip(names, label_mae, strict=True)
+        },
         "mean_baseline_mae": {
             name: float(value) for name, value in zip(names, baseline_label_mae, strict=True)
         },
@@ -4095,10 +4092,14 @@ def _phase6_train_probe_heads(
                 and label_mae[4] < baseline_label_mae[4]
                 and label_mae[5] < baseline_label_mae[5]
             ),
-            "contact_auroc_over_0_80": bool(_binary_auc(pred_contact_logit, target_contact) >= 0.80),
+            "contact_auroc_over_0_80": bool(
+                _binary_auc(pred_contact_logit, target_contact) >= 0.80
+            ),
             "inverse_better_than_mean": bool(inverse_metrics["mae"] < inverse_baseline["mae"]),
             "reward_better_than_mean": bool(reward_mae < reward_baseline_mae),
-            "forward_better_than_mean": bool(np.mean(next_label_mae) < np.mean(baseline_next_label_mae)),
+            "forward_better_than_mean": bool(
+                np.mean(next_label_mae) < np.mean(baseline_next_label_mae)
+            ),
         },
         "elapsed_s": timer.elapsed(),
     }
@@ -4112,12 +4113,13 @@ def probe_phase6_representation(
     seed: int = 0,
     force: bool = False,
 ) -> Path:
-    variant_tag = "raw" if representation == "raw" else f"{variant or config.get('incremental.phase6.default_variant', 'wm_recon')}_z{latent_dim}"
+    variant_tag = (
+        "raw"
+        if representation == "raw"
+        else f"{variant or config.get('incremental.phase6.default_variant', 'wm_recon')}_z{latent_dim}"
+    )
     results_dir = ensure_dir(
-        config.path_value("paths.incremental_results_dir")
-        / "phase6"
-        / variant_tag
-        / f"seed{seed}"
+        config.path_value("paths.incremental_results_dir") / "phase6" / variant_tag / f"seed{seed}"
     )
     output_path = results_dir / "representation_probe.json"
     if output_path.exists() and not force:
@@ -4313,7 +4315,9 @@ def run_phase7_branch_audit(
                 student_obs, _reward, terminated, truncated, _info = student_env.step(
                     action_t.detach().cpu().numpy()[0]
                 )
-                if bool(_numpy(terminated).reshape(-1)[0]) or bool(_numpy(truncated).reshape(-1)[0]):
+                if bool(_numpy(terminated).reshape(-1)[0]) or bool(
+                    _numpy(truncated).reshape(-1)[0]
+                ):
                     break
 
             source_state_dict = student_env.unwrapped.get_state_dict()
@@ -4404,7 +4408,9 @@ def run_phase7_branch_audit(
         "copied_component_error": float(
             config.get("incremental.phase7.branch_state_tolerance", 1e-6)
         ),
-        "teacher_action_error": float(config.get("incremental.phase7.branch_action_tolerance", 1e-6)),
+        "teacher_action_error": float(
+            config.get("incremental.phase7.branch_action_tolerance", 1e-6)
+        ),
         "transition_state_error": float(
             config.get("incremental.phase7.branch_transition_tolerance", 1e-5)
         ),
@@ -4662,9 +4668,7 @@ def evaluate_phase6_latent_bc(
             z = encoder(torch.from_numpy(frames).to(device).float())
             prev_action_t = torch.from_numpy(prev_action_norm).to(device).float()
             pred_norm = model(torch.cat([z, prev_action_t], dim=-1))
-            raw_action = action_norm.inverse(
-                pred_norm.cpu().numpy()
-            )
+            raw_action = action_norm.inverse(pred_norm.cpu().numpy())
         latencies.append(timer.elapsed() / num_envs)
         action = torch.from_numpy(raw_action).to(device).float()
         if bool(config.get("policy.clip_actions_to_env_space", True)):
@@ -5605,7 +5609,9 @@ def _load_phase7_privileged_episodes(
     subset = str(config.get("incremental.phase7.privileged_subset", "successful"))
     train_episodes = int(config.get("incremental.phase7.privileged_train_episodes", 1800))
     validation_episodes = int(config.get("incremental.phase7.privileged_validation_episodes", 200))
-    label_kind = str(config.get("incremental.phase7.privileged_label_kind", "deterministic_clipped"))
+    label_kind = str(
+        config.get("incremental.phase7.privileged_label_kind", "deterministic_clipped")
+    )
     label_dataset = {
         "deterministic_clipped": "teacher_clipped_actions",
         "deterministic_raw": "teacher_raw_actions",
@@ -5665,7 +5671,9 @@ def _phase7_build_privileged_conditions(
         for t in range(len(episode_actions) - horizon_steps):
             prev_action = prev_actions[t - 1] if t > 0 else zero_prev
             goal = (
-                _phase7_privileged_goal(states[t], states[t + horizon_steps], horizon_steps, control_freq)
+                _phase7_privileged_goal(
+                    states[t], states[t + horizon_steps], horizon_steps, control_freq
+                )
                 if include_goal
                 else None
             )
@@ -5725,7 +5733,9 @@ def _phase7_train_privileged_model(
         model.eval()
         with torch.inference_mode():
             val_mse = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
-        history.append({"epoch": epoch, "train_mse": train_sum / train_count, "validation_mse": val_mse})
+        history.append(
+            {"epoch": epoch, "train_mse": train_sum / train_count, "validation_mse": val_mse}
+        )
         if val_mse < best_val:
             best_val = val_mse
             best_state = copy.deepcopy(model.state_dict())
@@ -5736,7 +5746,11 @@ def _phase7_train_privileged_model(
     preds = []
     with torch.inference_mode():
         for start in range(0, len(val_cond), 8192):
-            x = torch.from_numpy(cond_norm.transform(val_cond[start : start + 8192])).to(device).float()
+            x = (
+                torch.from_numpy(cond_norm.transform(val_cond[start : start + 8192]))
+                .to(device)
+                .float()
+            )
             pred_norm = model(x).cpu().numpy()
             preds.append(action_norm.inverse(pred_norm))
     validation_metrics = _action_regression_metrics(np.concatenate(preds), val_actions)
@@ -5950,7 +5964,9 @@ def _phase7_oracle_action_metrics(
         preds = []
         with torch.inference_mode():
             for start in range(0, len(raw_conditions), 4096):
-                pred_norm = model(torch.from_numpy(raw_conditions[start : start + 4096]).to(device).float())
+                pred_norm = model(
+                    torch.from_numpy(raw_conditions[start : start + 4096]).to(device).float()
+                )
                 preds.append(action_norm.inverse(pred_norm.cpu().numpy()))
         return np.concatenate(preds).astype(np.float32)
 
@@ -5964,7 +5980,9 @@ def _phase7_oracle_action_metrics(
         "correct_goal": correct,
         "shuffled_goal": shuffled_metrics,
         "zero_goal": zero_metrics,
-        "goal_sensitivity_l2": float(np.mean(np.linalg.norm(correct_pred - shuffled_pred, axis=-1))),
+        "goal_sensitivity_l2": float(
+            np.mean(np.linalg.norm(correct_pred - shuffled_pred, axis=-1))
+        ),
         "mae_gap_shuffled_minus_correct": float(shuffled_metrics["mae"] - correct["mae"]),
         "mae_gap_zero_minus_correct": float(zero_metrics["mae"] - correct["mae"]),
         "queries": int(len(indices)),
@@ -6154,6 +6172,239 @@ def train_phase7_oracle_low_level(
         },
     )
     console.print(f"Wrote Phase 7 oracle low-level policy: {checkpoint_path}")
+    return checkpoint_path
+
+
+def train_phase7_residual_low_level(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    set_seed(seed)
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    )
+    if action_chunk_steps >= horizon_steps:
+        raise ValueError(f"Phase 7 requires H < k, got H={action_chunk_steps}, k={horizon_steps}")
+    artifact_dir = _phase7_artifact_dir(
+        config,
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+        seed,
+    )
+    checkpoint_path = artifact_dir / "oracle_low_level_residual.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 7 residual low-level policy exists: {checkpoint_path}")
+        return checkpoint_path
+
+    encoder_path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    flat_checkpoint_path = train_phase6_latent_bc(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    device = default_device()
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    flat_checkpoint = torch.load(flat_checkpoint_path, map_location=device, weights_only=False)
+    if Path(flat_checkpoint["encoder_checkpoint"]) != encoder_path:
+        raise ValueError("Residual controller flat policy and goal encoder checkpoints differ")
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(encoder_checkpoint["action_norm"])
+    flat_action_norm = Standardizer.from_state_dict(flat_checkpoint["action_norm"])
+    if not (
+        np.array_equal(action_norm.mean, flat_action_norm.mean)
+        and np.array_equal(action_norm.std, flat_action_norm.std)
+    ):
+        raise ValueError("Residual controller flat and Phase 7 action normalization differ")
+
+    train_episodes, val_episodes, data_metadata = _load_phase6_train_episodes(config)
+    train_cond, train_actions = _phase7_encode_oracle_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        train_episodes,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        device,
+    )
+    val_cond, val_actions = _phase7_encode_oracle_episodes(
+        encoder,
+        frame_norm,
+        action_norm,
+        val_episodes,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        device,
+    )
+    train_dataset = _Phase7OracleDataset(
+        train_cond,
+        action_norm.transform(train_actions),
+        length=int(config.get("incremental.phase7.batch_size", 512))
+        * int(config.get("incremental.phase7.batches_per_epoch", 300)),
+        latent_dim=latent_dim,
+        goal_dropout_prob=goal_dropout_prob,
+    )
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(config.get("incremental.phase7.batch_size", 512)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    action_dim = int(flat_checkpoint["action_dim"])
+    flat_model = MLP(
+        int(flat_checkpoint["cond_dim"]),
+        action_dim,
+        int(flat_checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    flat_model.load_state_dict(flat_checkpoint["model"])
+    residual_model = MLP(
+        train_cond.shape[-1],
+        action_dim,
+        int(config.get("incremental.phase7.hidden_dim", 1024)),
+        depth=4,
+    ).to(device)
+    final_layer = residual_model.net[-1]
+    if not isinstance(final_layer, nn.Linear):
+        raise TypeError("Expected the residual MLP to end with a linear layer")
+    nn.init.zeros_(final_layer.weight)
+    nn.init.zeros_(final_layer.bias)
+    model = _Phase7ResidualController(flat_model, residual_model, latent_dim, action_dim).to(device)
+    optimizer = torch.optim.AdamW(
+        residual_model.parameters(),
+        lr=float(config.get("incremental.phase7.lr", 3e-4)),
+    )
+    x_val = torch.from_numpy(val_cond).to(device).float()
+    y_val = torch.from_numpy(action_norm.transform(val_actions)).to(device).float()
+    epochs = int(config.get("incremental.phase7.epochs", 80))
+    best_state = None
+    best_val = float("inf")
+    history = []
+    timer = Timer()
+    for epoch in trange(1, epochs + 1, desc="train phase7 residual low level"):
+        model.train()
+        flat_model.eval()
+        loss_sum = 0.0
+        count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            loss_sum += float(loss.detach().cpu()) * len(x)
+            count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            val_mse = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+        history.append({"epoch": epoch, "train_mse": loss_sum / count, "validation_mse": val_mse})
+        if val_mse < best_val:
+            best_val = val_mse
+            best_state = copy.deepcopy(residual_model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase 7 residual training produced no checkpoint")
+    residual_model.load_state_dict(best_state)
+    model.eval()
+    validation_metrics = _phase7_oracle_action_metrics(
+        model,
+        val_cond,
+        val_actions,
+        action_norm,
+        latent_dim,
+        goal_encoding,
+        int(config.get("incremental.phase7.validation_queries", 10000)),
+        seed + horizon_steps,
+    )
+    with torch.inference_mode():
+        residual_norm = residual_model(x_val).cpu().numpy()
+    residual_action = residual_norm * action_norm.std
+    residual_metrics = {
+        "mean_l2": float(np.mean(np.linalg.norm(residual_action, axis=-1))),
+        "mean_abs": float(np.mean(np.abs(residual_action))),
+        "max_abs": float(np.max(np.abs(residual_action))),
+    }
+    payload = {
+        "controller_type": "residual",
+        "flat_model": flat_model.state_dict(),
+        "residual_model": residual_model.state_dict(),
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "action_chunk_steps": action_chunk_steps,
+        "goal_encoding": goal_encoding,
+        "goal_dropout_prob": goal_dropout_prob,
+        "cond_dim": train_cond.shape[-1],
+        "flat_cond_dim": int(flat_checkpoint["cond_dim"]),
+        "hidden_dim": int(config.get("incremental.phase7.hidden_dim", 1024)),
+        "flat_hidden_dim": int(flat_checkpoint["hidden_dim"]),
+        "action_dim": action_dim,
+        "encoder_checkpoint": str(encoder_path),
+        "flat_checkpoint": str(flat_checkpoint_path),
+        "action_norm": action_norm.state_dict(),
+        "validation_metrics": validation_metrics,
+        "validation_residual_metrics": residual_metrics,
+        "best_validation_mse": best_val,
+        "history": history,
+        "data": {
+            **data_metadata,
+            "phase7_train_samples": int(len(train_cond)),
+            "phase7_validation_samples": int(len(val_cond)),
+        },
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "oracle_low_level_residual_metrics.json",
+        {
+            "variant": variant,
+            "latent_dim": latent_dim,
+            "horizon_steps": horizon_steps,
+            "action_chunk_steps": action_chunk_steps,
+            "goal_encoding": goal_encoding,
+            "goal_dropout_prob": goal_dropout_prob,
+            "validation_metrics": validation_metrics,
+            "validation_residual_metrics": residual_metrics,
+            "best_validation_mse": best_val,
+            "elapsed_s": timer.elapsed(),
+        },
+    )
+    console.print(f"Wrote Phase 7 residual low-level policy: {checkpoint_path}")
     return checkpoint_path
 
 
@@ -6390,7 +6641,9 @@ def evaluate_phase7_oracle_low_level(
     )
     device = default_device()
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
     frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     model = MLP(
@@ -6405,7 +6658,9 @@ def evaluate_phase7_oracle_low_level(
     eval_episodes = int(episodes or config.get("incremental.phase7.eval_episodes", 100))
     seed_start = int(config.get("incremental.phase7.eval_seed", 10000))
     oracle_frames = _phase7_collect_oracle_frames(config, dino, eval_episodes, seed_start)
-    oracle_latents = _phase7_encode_oracle_frame_sequences(encoder, frame_norm, oracle_frames, device)
+    oracle_latents = _phase7_encode_oracle_frame_sequences(
+        encoder, frame_norm, oracle_frames, device
+    )
     modes = ["correct", "shuffled", "zero"] if goal_mode == "all" else [goal_mode]
     closed_loop = {
         mode: _evaluate_phase7_goal_mode(
@@ -6514,18 +6769,64 @@ def _phase7_results_dir(
     )
 
 
+class _Phase7ResidualController(nn.Module):
+    def __init__(
+        self,
+        flat_model: nn.Module,
+        residual_model: nn.Module,
+        latent_dim: int,
+        action_dim: int,
+    ) -> None:
+        super().__init__()
+        self.flat_model = flat_model
+        self.residual_model = residual_model
+        self.latent_dim = latent_dim
+        self.action_dim = action_dim
+        for parameter in self.flat_model.parameters():
+            parameter.requires_grad_(False)
+
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+        flat_condition = torch.cat(
+            [condition[:, : self.latent_dim], condition[:, -self.action_dim :]],
+            dim=-1,
+        )
+        return self.flat_model(flat_condition) + self.residual_model(condition)
+
+
 def _load_phase7_low_level_checkpoint(
     path: Path,
     device: torch.device,
 ) -> tuple[nn.Module, dict[str, Any]]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    model = MLP(
-        int(checkpoint["cond_dim"]),
-        int(checkpoint["action_dim"]),
-        int(checkpoint["hidden_dim"]),
-        depth=4,
-    ).to(device)
-    model.load_state_dict(checkpoint["model"])
+    if checkpoint.get("controller_type") == "residual":
+        flat_model = MLP(
+            int(checkpoint["flat_cond_dim"]),
+            int(checkpoint["action_dim"]),
+            int(checkpoint["flat_hidden_dim"]),
+            depth=4,
+        )
+        flat_model.load_state_dict(checkpoint["flat_model"])
+        residual_model = MLP(
+            int(checkpoint["cond_dim"]),
+            int(checkpoint["action_dim"]),
+            int(checkpoint["hidden_dim"]),
+            depth=4,
+        )
+        residual_model.load_state_dict(checkpoint["residual_model"])
+        model = _Phase7ResidualController(
+            flat_model,
+            residual_model,
+            int(checkpoint["latent_dim"]),
+            int(checkpoint["action_dim"]),
+        ).to(device)
+    else:
+        model = MLP(
+            int(checkpoint["cond_dim"]),
+            int(checkpoint["action_dim"]),
+            int(checkpoint["hidden_dim"]),
+            depth=4,
+        ).to(device)
+        model.load_state_dict(checkpoint["model"])
     model.eval()
     return model, checkpoint
 
@@ -6563,7 +6864,9 @@ def evaluate_phase7_matched_flat_latent_policy(
 
     device = default_device()
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
     frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     model = MLP(
@@ -6642,7 +6945,9 @@ def evaluate_phase7_matched_flat_latent_policy(
                     action_t = torch.clamp(action_t, action_low, action_high)
                 action_t[~torch.from_numpy(active).to(device)] = 0.0
                 obs, reward, terminated, truncated, info = env.step(action_t)
-                prev_action_norm = action_norm.transform(action_t.detach().cpu().numpy().astype(np.float32))
+                prev_action_norm = action_norm.transform(
+                    action_t.detach().cpu().numpy().astype(np.float32)
+                )
                 reward_np = _numpy(reward).reshape(-1).astype(np.float32)
                 batch_final_rewards[active] = reward_np[active]
                 batch_max_rewards[active] = np.maximum(batch_max_rewards[active], reward_np[active])
@@ -6702,6 +7007,7 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     episodes: int | None = None,
     dagger_iteration: int | None = None,
     dagger_query_episodes: int | None = None,
+    residual: bool = False,
     force: bool = False,
 ) -> Path:
     (
@@ -6722,7 +7028,22 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     )
     if action_chunk_steps != 1:
         raise NotImplementedError("Replay branch oracle evaluation currently supports H=1")
-    if dagger_iteration is None:
+    if residual and dagger_iteration is not None:
+        raise ValueError("Residual and DAgger checkpoints are separate Phase 7 evaluations")
+    if residual:
+        checkpoint_path = train_phase7_residual_low_level(
+            config,
+            latent_dim=latent_dim,
+            variant=variant,
+            horizon_steps=horizon_steps,
+            action_chunk_steps=action_chunk_steps,
+            goal_encoding=goal_encoding,
+            goal_dropout_prob=goal_dropout_prob,
+            seed=seed,
+            force=False,
+        )
+        checkpoint_label = "residual"
+    elif dagger_iteration is None:
         checkpoint_path = train_phase7_oracle_low_level(
             config,
             latent_dim=latent_dim,
@@ -6763,10 +7084,12 @@ def evaluate_phase7_replay_branch_oracle_low_level(
         goal_dropout_prob,
         seed,
     )
-    eval_episodes = int(episodes or config.get("incremental.phase7.replay_branch_eval_episodes", 10))
+    eval_episodes = int(
+        episodes or config.get("incremental.phase7.replay_branch_eval_episodes", 10)
+    )
     output_name = (
         f"replay_branch_oracle_eval_{eval_episodes}.json"
-        if dagger_iteration is None
+        if checkpoint_label == "base"
         else f"replay_branch_oracle_eval_{checkpoint_label}_{eval_episodes}.json"
     )
     output_path = results_dir / output_name
@@ -6776,7 +7099,9 @@ def evaluate_phase7_replay_branch_oracle_low_level(
 
     device = default_device()
     model, checkpoint = _load_phase7_low_level_checkpoint(checkpoint_path, device)
-    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
     frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     dino = _phase4_dino_from_config(config, device)
@@ -6861,7 +7186,13 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                 replay_errors.extend(float(x) for x in active_state_errors)
                 replay_done_np = replay_done.detach().cpu().numpy().astype(bool)
                 failed_replay_steps += int(
-                    np.sum(active & (replay_done_np | (state_errors.detach().cpu().numpy() > replay_state_tolerance)))
+                    np.sum(
+                        active
+                        & (
+                            replay_done_np
+                            | (state_errors.detach().cpu().numpy() > replay_state_tolerance)
+                        )
+                    )
                 )
 
                 for _ in range(horizon_steps):
@@ -6891,12 +7222,12 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                     int(config.get("dino.batch_size", 64)),
                 )
                 frames = frame_norm.transform(np.concatenate([current_frame, goal_frame], axis=0))
-                z_pair = (
-                    encoder(torch.from_numpy(frames).to(device).float()).detach().cpu().numpy()
-                )
+                z_pair = encoder(torch.from_numpy(frames).to(device).float()).detach().cpu().numpy()
                 z = z_pair[:num_envs].astype(np.float32)
                 goals = z_pair[num_envs:].astype(np.float32)
-                current_to_goal_l2.extend(np.linalg.norm(z[active] - goals[active], axis=-1).tolist())
+                current_to_goal_l2.extend(
+                    np.linalg.norm(z[active] - goals[active], axis=-1).tolist()
+                )
                 cond = np.stack(
                     [
                         _phase7_condition(z[i], goals[i], prev_action_norm[i], goal_encoding)
@@ -6906,11 +7237,17 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                 )
                 pred_norm = model(torch.from_numpy(cond).to(device).float()).detach()
                 raw_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
-                teacher_now = torch.clamp(
-                    teacher.actor_mean(obs["state"].to(device).float()),
-                    action_low,
-                    action_high,
-                ).detach().cpu().numpy().astype(np.float32)
+                teacher_now = (
+                    torch.clamp(
+                        teacher.actor_mean(obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
                 action_maes.extend(
                     np.mean(np.abs(raw_action[active] - teacher_now[active]), axis=-1).tolist()
                 )
@@ -6962,7 +7299,9 @@ def evaluate_phase7_replay_branch_oracle_low_level(
         ),
         "teacher_action_mae": float(np.mean(action_maes)) if action_maes else 0.0,
         "policy_latency_s": float(np.mean(policy_latencies)) if policy_latencies else 0.0,
-        "branch_generation_latency_s": float(np.mean(branch_latencies)) if branch_latencies else 0.0,
+        "branch_generation_latency_s": float(np.mean(branch_latencies))
+        if branch_latencies
+        else 0.0,
         "branch_generation_latency_per_env_s": (
             float(np.mean(branch_latencies_per_env)) if branch_latencies_per_env else 0.0
         ),
@@ -6981,6 +7320,7 @@ def evaluate_phase7_replay_branch_oracle_low_level(
         "goal_encoding": goal_encoding,
         "goal_dropout_prob": goal_dropout_prob,
         "dagger_iteration": dagger_iteration,
+        "controller_type": "residual" if residual else "monolithic",
         "seed": seed,
         "checkpoint": str(checkpoint_path),
         "closed_loop": metrics,
@@ -7104,7 +7444,9 @@ def evaluate_phase7_valid_goal_use(
 
     device = default_device()
     model, checkpoint = _load_phase7_low_level_checkpoint(checkpoint_path, device)
-    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
     frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     dino = _phase4_dino_from_config(config, device)
@@ -7140,9 +7482,15 @@ def evaluate_phase7_valid_goal_use(
     max_horizon = max(horizons)
     replay_errors: list[float] = []
     failed_replay_steps = 0
-    action_l2_by_pair: dict[str, list[float]] = {f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])}
-    latent_l2_by_pair: dict[str, list[float]] = {f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])}
-    tcp_l2_by_pair: dict[str, list[float]] = {f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])}
+    action_l2_by_pair: dict[str, list[float]] = {
+        f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])
+    }
+    latent_l2_by_pair: dict[str, list[float]] = {
+        f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])
+    }
+    tcp_l2_by_pair: dict[str, list[float]] = {
+        f"{a}_to_{b}": [] for a, b in zip(horizons[:-1], horizons[1:])
+    }
     action_l2_near_far: list[float] = []
     latent_l2_near_far: list[float] = []
     tcp_l2_near_far: list[float] = []
@@ -7214,8 +7562,8 @@ def evaluate_phase7_valid_goal_use(
                             dino,
                             int(config.get("dino.batch_size", 64)),
                         )
-                        branch_states[step_idx] = branch_obs["state"].detach().cpu().numpy().astype(
-                            np.float32
+                        branch_states[step_idx] = (
+                            branch_obs["state"].detach().cpu().numpy().astype(np.float32)
                         )
                     if bool(torch.all(torch.logical_or(branch_term, branch_trunc))):
                         break
@@ -7223,7 +7571,9 @@ def evaluate_phase7_valid_goal_use(
                 if set(branch_frames) != set(horizons):
                     break
 
-                current_frame = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+                current_frame = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
                 all_frames = [current_frame] + [branch_frames[h] for h in horizons]
                 frames = frame_norm.transform(np.concatenate(all_frames, axis=0))
                 z_all = encoder(torch.from_numpy(frames).to(device).float()).detach().cpu().numpy()
@@ -7242,7 +7592,9 @@ def evaluate_phase7_valid_goal_use(
                         axis=0,
                     )
                     pred_norm = model(torch.from_numpy(cond).to(device).float()).detach()
-                    actions_by_h[h] = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
+                    actions_by_h[h] = action_norm.inverse(pred_norm.cpu().numpy()).astype(
+                        np.float32
+                    )
 
                 current_state = obs["state"].detach().cpu().numpy().astype(np.float32)
                 tcp_by_h = {h: branch_states[h][:, 14:17] for h in horizons}
@@ -7288,14 +7640,24 @@ def evaluate_phase7_valid_goal_use(
                 far_proj = np.sum(actions_by_h[far_h][:, :3] * far_vec, axis=-1) / (
                     np.linalg.norm(far_vec, axis=-1) + 1e-8
                 )
-                farther_projection_ge_near.extend((far_proj[active] >= near_proj[active]).astype(np.float32).tolist())
-                teacher_now = torch.clamp(
-                    teacher.actor_mean(obs["state"].to(device).float()),
-                    action_low,
-                    action_high,
-                ).detach().cpu().numpy().astype(np.float32)
+                farther_projection_ge_near.extend(
+                    (far_proj[active] >= near_proj[active]).astype(np.float32).tolist()
+                )
+                teacher_now = (
+                    torch.clamp(
+                        teacher.actor_mean(obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
                 teacher_action_maes.extend(
-                    np.mean(np.abs(actions_by_h[center_h][active] - teacher_now[active]), axis=-1).tolist()
+                    np.mean(
+                        np.abs(actions_by_h[center_h][active] - teacher_now[active]), axis=-1
+                    ).tolist()
                 )
                 sample_count += active_count
 
@@ -7305,7 +7667,9 @@ def evaluate_phase7_valid_goal_use(
                 action_t[~torch.from_numpy(active).to(device)] = 0.0
                 obs, _reward, terminated, truncated, info = student_env.step(action_t)
                 history.append(action_t.detach().clone())
-                prev_action_norm = action_norm.transform(action_t.detach().cpu().numpy().astype(np.float32))
+                prev_action_norm = action_norm.transform(
+                    action_t.detach().cpu().numpy().astype(np.float32)
+                )
                 if "success" in info:
                     success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
                 done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(bool)
@@ -7344,7 +7708,9 @@ def evaluate_phase7_valid_goal_use(
         "action_sensitivity_l2_by_pair": {
             key: mean_or_zero(value) for key, value in action_l2_by_pair.items()
         },
-        "latent_goal_l2_by_pair": {key: mean_or_zero(value) for key, value in latent_l2_by_pair.items()},
+        "latent_goal_l2_by_pair": {
+            key: mean_or_zero(value) for key, value in latent_l2_by_pair.items()
+        },
         "tcp_goal_l2_by_pair": {key: mean_or_zero(value) for key, value in tcp_l2_by_pair.items()},
     }
     payload = {
@@ -7490,7 +7856,9 @@ def _evaluate_phase7_privileged_mode(
                         branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
                             branch_env.step(action_history)
                         )
-                        replay_done = replay_done | torch.logical_or(branch_term, branch_trunc).view(-1)
+                        replay_done = replay_done | torch.logical_or(
+                            branch_term, branch_trunc
+                        ).view(-1)
                     state_errors = torch.max(
                         torch.abs(
                             student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()
@@ -7501,7 +7869,9 @@ def _evaluate_phase7_privileged_mode(
                     replay_errors.extend(float(x) for x in state_errors_np[active])
                     replay_done_np = replay_done.detach().cpu().numpy().astype(bool)
                     failed_replay_steps += int(
-                        np.sum(active & (replay_done_np | (state_errors_np > replay_state_tolerance)))
+                        np.sum(
+                            active & (replay_done_np | (state_errors_np > replay_state_tolerance))
+                        )
                     )
                     for _ in range(horizon_steps):
                         teacher_action = torch.clamp(
@@ -7517,7 +7887,9 @@ def _evaluate_phase7_privileged_mode(
                     branch_elapsed = branch_timer.elapsed()
                     branch_latencies.append(branch_elapsed)
                     branch_latencies_per_env.append(branch_elapsed / active_count)
-                    future_state = _phase7_obs_state_tensor(branch_obs, device).detach().cpu().numpy()
+                    future_state = (
+                        _phase7_obs_state_tensor(branch_obs, device).detach().cpu().numpy()
+                    )
                     goal = _phase7_privileged_goal(
                         current_state,
                         future_state,
@@ -7531,16 +7903,25 @@ def _evaluate_phase7_privileged_mode(
                 cond_t = torch.from_numpy(cond_norm.transform(cond)).to(device).float()
                 raw_action = action_norm.inverse(model(cond_t).cpu().numpy()).astype(np.float32)
                 policy_latencies.append(policy_timer.elapsed() / active_count)
-                teacher_now = torch.clamp(
-                    teacher.actor_mean(state_t),
-                    action_low,
-                    action_high,
-                ).cpu().numpy().astype(np.float32)
+                teacher_now = (
+                    torch.clamp(
+                        teacher.actor_mean(state_t),
+                        action_low,
+                        action_high,
+                    )
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
                 teacher_action_maes.extend(
                     np.mean(np.abs(raw_action[active] - teacher_now[active]), axis=-1).tolist()
                 )
                 action_saturation.extend(
-                    np.any((raw_action[active] < action_low_np) | (raw_action[active] > action_high_np), axis=-1)
+                    np.any(
+                        (raw_action[active] < action_low_np)
+                        | (raw_action[active] > action_high_np),
+                        axis=-1,
+                    )
                     .astype(np.float32)
                     .tolist()
                 )
@@ -7550,7 +7931,9 @@ def _evaluate_phase7_privileged_mode(
                 action_t[~torch.from_numpy(active).to(device)] = 0.0
                 obs, reward, terminated, truncated, info = student_env.step(action_t)
                 history.append(action_t.detach().clone())
-                prev_action_norm = action_norm.transform(action_t.detach().cpu().numpy().astype(np.float32))
+                prev_action_norm = action_norm.transform(
+                    action_t.detach().cpu().numpy().astype(np.float32)
+                )
                 reward_np = _numpy(reward).reshape(-1).astype(np.float32)
                 batch_final_rewards[active] = reward_np[active]
                 batch_max_rewards[active] = np.maximum(batch_max_rewards[active], reward_np[active])
@@ -7582,7 +7965,9 @@ def _evaluate_phase7_privileged_mode(
         "teacher_action_mae": float(np.mean(teacher_action_maes)) if teacher_action_maes else 0.0,
         "action_saturation_rate": float(np.mean(action_saturation)) if action_saturation else 0.0,
         "policy_latency_s": float(np.mean(policy_latencies)) if policy_latencies else 0.0,
-        "branch_generation_latency_s": float(np.mean(branch_latencies)) if branch_latencies else 0.0,
+        "branch_generation_latency_s": float(np.mean(branch_latencies))
+        if branch_latencies
+        else 0.0,
         "branch_generation_latency_per_env_s": (
             float(np.mean(branch_latencies_per_env)) if branch_latencies_per_env else 0.0
         ),
@@ -7733,7 +8118,9 @@ def collect_phase7_oracle_dagger_queries(
         rollout_checkpoint_path = previous_dagger
     device = default_device()
     model, checkpoint = _load_phase7_low_level_checkpoint(rollout_checkpoint_path, device)
-    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
     frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     dino = _phase4_dino_from_config(config, device)
@@ -7827,7 +8214,9 @@ def collect_phase7_oracle_dagger_queries(
                 branch_latencies.append(branch_elapsed)
                 branch_latencies_per_env.append(branch_elapsed / active_count)
 
-                current_frame = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+                current_frame = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
                 goal_frame = _phase4_frame_inputs(
                     branch_obs,
                     dino,
@@ -7844,11 +8233,16 @@ def collect_phase7_oracle_dagger_queries(
                     ],
                     axis=0,
                 )
-                teacher_now = torch.clamp(
-                    teacher.actor_mean(obs["state"].to(device).float()),
-                    action_low,
-                    action_high,
-                ).cpu().numpy().astype(np.float32)
+                teacher_now = (
+                    torch.clamp(
+                        teacher.actor_mean(obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
                 cond_rows.append(cond[active].copy())
                 teacher_action_rows.append(teacher_now[active].copy())
 
@@ -7953,7 +8347,9 @@ def train_phase7_oracle_dagger_low_level(
         goal_dropout_prob,
         seed,
     )
-    query_episode_count = int(query_episodes or config.get("incremental.phase7.dagger_episodes", 200))
+    query_episode_count = int(
+        query_episodes or config.get("incremental.phase7.dagger_episodes", 200)
+    )
     checkpoint_path = artifact_dir / (
         f"oracle_low_level_branch_dagger_iter{iteration}_e{query_episode_count}.pt"
     )
@@ -8118,7 +8514,8 @@ def train_phase7_oracle_dagger_low_level(
     }
     torch.save(payload, checkpoint_path)
     write_json(
-        artifact_dir / f"oracle_low_level_branch_dagger_iter{iteration}_e{query_episode_count}_metrics.json",
+        artifact_dir
+        / f"oracle_low_level_branch_dagger_iter{iteration}_e{query_episode_count}_metrics.json",
         {
             "variant": variant,
             "latent_dim": latent_dim,
@@ -8184,14 +8581,18 @@ def evaluate_phase7_oracle_dagger_low_level(
     )
     device = default_device()
     model, checkpoint = _load_phase7_low_level_checkpoint(checkpoint_path, device)
-    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(
+        Path(checkpoint["encoder_checkpoint"]), device
+    )
     frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     dino = _phase4_dino_from_config(config, device)
     eval_episodes = int(episodes or config.get("incremental.phase7.eval_episodes", 100))
     seed_start = int(config.get("incremental.phase7.eval_seed", 10000))
     oracle_frames = _phase7_collect_oracle_frames(config, dino, eval_episodes, seed_start)
-    oracle_latents = _phase7_encode_oracle_frame_sequences(encoder, frame_norm, oracle_frames, device)
+    oracle_latents = _phase7_encode_oracle_frame_sequences(
+        encoder, frame_norm, oracle_frames, device
+    )
     modes = ["correct", "shuffled", "zero"] if goal_mode == "all" else [goal_mode]
     closed_loop = {
         mode: _evaluate_phase7_goal_mode(
