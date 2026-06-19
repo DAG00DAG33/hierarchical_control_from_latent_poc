@@ -841,3 +841,87 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   goals at fixed seed/time to a receding locally reachable target, or train the
   low level on recovery trajectories with goals sampled from the same perturbed
   rollout.
+
+### 2026-06-19 - P6-D06: VAE representation candidate
+
+- **Plan update:** Reopened Phase 6 to include a VAE encoder candidate. The
+  VAE uses reconstruction loss plus a small KL penalty and uses the latent mean
+  for probes and downstream policies.
+- **Implementation:** Added `VariationalObservationEncoder` and Phase 6
+  `vae_recon` support. Checkpoints store `encoder_type: vae`; existing
+  downstream loaders keep calling `encoder(x)` and therefore receive the
+  deterministic latent mean.
+- **Config:** `incremental.phase6.vae_beta = 1e-4`.
+- **Run:** `phase6-probe --representation latent --variant vae_recon
+  --latent-dim 256 --force`.
+- **Representation training metrics:**
+  - reconstruction MSE `0.0447`;
+  - DINO reconstruction MSE `0.0423`;
+  - proprio reconstruction MSE `0.00234`;
+  - KL `3.324`.
+- **Probe comparison against `ae_recon_z256`:**
+
+| representation | T x/y MAE | T yaw MAE | T velocity MAE | TCP x/y MAE | contact AUROC | inverse action MAE |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ae_recon_z256` | `0.00272/0.00278` | `0.0512` | `0.0160/0.0183` | `0.00295/0.00348` | `0.994` | `0.0179` |
+| `vae_recon_z256` | `0.00245/0.00273` | `0.0504` | `0.0169/0.0192` | `0.00305/0.00389` | `0.993` | `0.0200` |
+
+- **Control run:** `phase6-control-eval --variant vae_recon --latent-dim 256
+  --episodes 100 --force`.
+- **Closed-loop result:** success `0.37`, final reward `0.458`, max reward
+  `0.541`, held-out action MAE `0.0336`.
+- **Decision:** Do not replace `ae_recon_z256` as the default. The VAE static
+  probes are competitive and reconstruction is better, but closed-loop BC is
+  substantially worse than the current AE latent DAgger reference (`0.60`) and
+  the direct visual flow reference (`0.66`). If VAE is revisited, try a smaller
+  KL weight or a mean-reconstruction variant before spending on DAgger.
+
+### 2026-06-19 - P7-D05: Local branch-oracle plan and branch-copy audit
+
+- **Plan update:** Replaced the old Phase 7 nominal teacher-trajectory oracle
+  with the local branch-oracle protocol:
+  - nominal teacher-trajectory goal remains only a hard tracking diagnostic;
+  - primary oracle goal must come from a teacher branch rolled from the
+    student's exact current state;
+  - privileged structured branch goals are required to separate interface
+    failure from latent-representation failure.
+- **Implementation:** Added `phase7-branch-audit`. The audit creates paired
+  CUDA PushT envs, copies the student state into the branch env, and measures:
+  copied state equality, teacher action parity, one-step transition parity,
+  RGB parity, DINO feature parity, and latent parity.
+- **Run:** `phase7-branch-audit --latent-dim 256 --variant ae_recon --trials 3
+  --warmup-steps 4 --force`.
+- **Result:** State copying and observations match, but transition parity
+  fails.
+
+| KPI | max error | tolerance | pass |
+| --- | ---: | ---: | --- |
+| copied flat state | `1.19e-7` | `1e-6` | yes |
+| copied component state | `1.19e-7` | `1e-6` | yes |
+| deterministic teacher action | `1.19e-7` | `1e-6` | yes |
+| one-step transition state | `7.04e-3` | `1e-5` | no |
+| reward | `4.77e-7` | `1e-6` | yes |
+| RGB pixels | `0.0` | `0.0` | yes |
+| DINO feature | `0.0` | `1e-6` | yes |
+| latent | `2.86e-6` | `1e-6` | no |
+
+- **Deeper checks:**
+  - `agent.get_controller_state()` returns `{}` for this controller, so there
+    is no exposed accumulated controller target to copy.
+  - `scene.get_sim_state()` is the same actors/articulations state as
+    `get_state_dict`; it does not include hidden contact/solver state.
+  - Explicit GPU fetch/apply around the copy does not fix transition parity.
+  - Same reset seed plus identical action replay across two CUDA envs gives
+    exact transition parity (`0.0`), so the CUDA dynamics are deterministic
+    when history is reproduced.
+  - The large failure is in `actors.Tee` after a contact-sensitive transition
+    (`7 mm`); smaller non-contact mismatches were `1.6e-5` to `3.6e-5`.
+- **Gate decision:** Phase 7B fails for arbitrary `set_state_dict` forking.
+  The correct branch oracle cannot yet rely on this state-copy mechanism.
+- **Next action:** Implement the first branch-oracle diagnostic using an exact
+  replay fallback: reconstruct the branch env from the episode reset seed and
+  the student's executed action history before rolling the teacher branch.
+  This is slower than state-copy forking, but it preserves solver/contact
+  history and should provide a valid oracle for the Phase 7 gate. In parallel,
+  test whether a vectorized same-scene fork exposes a lower-level copy path;
+  do not proceed with `set_state_dict` branch evaluation as the primary oracle.

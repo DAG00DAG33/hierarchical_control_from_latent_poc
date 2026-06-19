@@ -30,6 +30,7 @@ from hcl_poc.incremental import (
     probe_phase6_representation,
     probe_phase4_visual_history,
     run_phase0,
+    run_phase7_branch_audit,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -418,6 +419,16 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             goal_mode=args.goal_mode,
             force=args.force,
         )
+    elif args.incremental_command == "phase7-branch-audit":
+        run_phase7_branch_audit(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            seed=args.seed,
+            trials=args.trials,
+            warmup_steps=args.warmup_steps,
+            force=args.force,
+        )
     elif args.incremental_command == "phase7-dagger-collect":
         collect_phase7_oracle_dagger_queries(
             config,
@@ -640,6 +651,15 @@ def build_parser() -> argparse.ArgumentParser:
             phase7.add_argument("--episodes", type=int)
             phase7.add_argument("--goal-mode", choices=["all", "correct", "shuffled", "zero"], default="all")
         phase7.set_defaults(func=incremental_cmd)
+    phase7_branch = incremental_sub.add_parser("phase7-branch-audit")
+    add_config_arg(phase7_branch)
+    phase7_branch.add_argument("--latent-dim", type=int)
+    phase7_branch.add_argument("--variant", default=None)
+    phase7_branch.add_argument("--seed", type=int, default=0)
+    phase7_branch.add_argument("--trials", type=int)
+    phase7_branch.add_argument("--warmup-steps", type=int)
+    phase7_branch.add_argument("--force", action="store_true")
+    phase7_branch.set_defaults(func=incremental_cmd)
     for command in ["phase7-dagger-collect", "phase7-dagger-train", "phase7-dagger-eval"]:
         phase7_dagger = incremental_sub.add_parser(command)
         add_config_arg(phase7_dagger)

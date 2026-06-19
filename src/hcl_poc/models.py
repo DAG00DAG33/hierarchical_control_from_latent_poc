@@ -44,6 +44,29 @@ class ObservationEncoder(nn.Module):
         return self.net(x)
 
 
+class VariationalObservationEncoder(nn.Module):
+    def __init__(self, input_dim: int, latent_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.trunk = MLP(input_dim, hidden_dim, hidden_dim, depth=2)
+        self.mean = nn.Linear(hidden_dim, latent_dim)
+        self.logvar = nn.Linear(hidden_dim, latent_dim)
+
+    def encode_stats(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.trunk(x)
+        logvar = torch.clamp(self.logvar(h), -8.0, 4.0)
+        return self.mean(h), logvar
+
+    def sample(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean, logvar = self.encode_stats(x)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mean + eps * std, mean, logvar
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean, _logvar = self.encode_stats(x)
+        return mean
+
+
 class ActionSequenceEncoder(nn.Module):
     def __init__(self, action_dim: int, hidden_dim: int) -> None:
         super().__init__()
@@ -78,4 +101,3 @@ class FlowModel(nn.Module):
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         t_emb = sinusoidal_time_embedding(t, self.time_dim)
         return self.net(torch.cat([x_t, t_emb, cond], dim=-1))
-

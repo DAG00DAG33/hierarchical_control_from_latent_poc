@@ -19,7 +19,13 @@ from tqdm import trange
 from hcl_poc.config import Config
 from hcl_poc.features import DinoExtractor, batched
 from hcl_poc.flow import flow_matching_loss, sample_flow
-from hcl_poc.models import FlowModel, MLP, ObservationEncoder, RepresentationWorldModel
+from hcl_poc.models import (
+    FlowModel,
+    MLP,
+    ObservationEncoder,
+    RepresentationWorldModel,
+    VariationalObservationEncoder,
+)
 from hcl_poc.rl import (
     PPOAgent,
     _make_state_env,
@@ -3348,6 +3354,8 @@ def _phase6_variant_weights(config: Config, variant: str) -> tuple[float, float,
         return prediction_weight, sigreg_weight, 0.0
     if variant == "ae_recon":
         return 0.0, 0.0, reconstruction_weight
+    if variant == "vae_recon":
+        return 0.0, 0.0, reconstruction_weight
     raise ValueError(f"Unknown Phase 6 variant: {variant}")
 
 
@@ -3419,9 +3427,18 @@ def train_phase6_representation(
     prediction_weight, sigreg_weight, reconstruction_weight = _phase6_variant_weights(
         config, variant
     )
+    encoder_type = "vae" if variant.startswith("vae_") else "deterministic"
+    vae_beta = (
+        float(config.get("incremental.phase6.vae_beta", 1e-4))
+        if encoder_type == "vae"
+        else 0.0
+    )
 
     device = default_device()
-    encoder = ObservationEncoder(input_dim, latent_dim, hidden_dim).to(device)
+    if encoder_type == "vae":
+        encoder = VariationalObservationEncoder(input_dim, latent_dim, hidden_dim).to(device)
+    else:
+        encoder = ObservationEncoder(input_dim, latent_dim, hidden_dim).to(device)
     world_model = RepresentationWorldModel(latent_dim, action_dim, hidden_dim).to(device)
     decoder = (
         MLP(latent_dim, input_dim, hidden_dim, depth=3).to(device)
@@ -3466,6 +3483,15 @@ def train_phase6_representation(
         proprio_loss = torch.mean((pred[:, -proprio_dim:] - target[:, -proprio_dim:]) ** 2)
         return dino_loss + proprio_reconstruction_weight * proprio_loss
 
+    def vae_kl_loss(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        return -0.5 * torch.mean(1.0 + logvar - mean.square() - torch.exp(logvar))
+
+    def encode_for_training(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if encoder_type != "vae":
+            return encoder(x), torch.zeros((), device=x.device)
+        z, mean, logvar = encoder.sample(x)
+        return z, vae_kl_loss(mean, logvar)
+
     def validation_metrics() -> dict[str, float]:
         probe_dataset = _Phase6RepresentationDataset(
             val_norm,
@@ -3483,6 +3509,7 @@ def train_phase6_representation(
         recon_losses = []
         dino_recon_losses = []
         proprio_recon_losses = []
+        kl_losses = []
         with torch.inference_mode():
             for batch in probe_loader:
                 x_t = batch["x_t"].to(device).float()
@@ -3491,6 +3518,18 @@ def train_phase6_representation(
                 horizon = batch["horizon"].to(device)
                 z_t = encoder(x_t)
                 z_future = encoder(x_future)
+                if encoder_type == "vae":
+                    mean_t, logvar_t = encoder.encode_stats(x_t)
+                    mean_future, logvar_future = encoder.encode_stats(x_future)
+                    kl_losses.append(
+                        float(
+                            0.5
+                            * (
+                                vae_kl_loss(mean_t, logvar_t)
+                                + vae_kl_loss(mean_future, logvar_future)
+                            ).cpu()
+                        )
+                    )
                 if prediction_weight > 0.0:
                     pred = world_model(z_t, actions, horizon)
                     pred_losses.append(float(torch.mean((pred - z_future) ** 2).cpu()))
@@ -3541,6 +3580,7 @@ def train_phase6_representation(
             "proprio_reconstruction_mse": (
                 float(np.mean(proprio_recon_losses)) if proprio_recon_losses else 0.0
             ),
+            "kl": float(np.mean(kl_losses)) if kl_losses else 0.0,
         }
 
     for epoch in trange(1, epochs + 1, desc=f"train phase6 {variant} z={latent_dim}"):
@@ -3552,14 +3592,16 @@ def train_phase6_representation(
         pred_sum = 0.0
         sig_sum = 0.0
         recon_sum = 0.0
+        kl_sum = 0.0
         count = 0
         for batch in loader:
             x_t = batch["x_t"].to(device, non_blocking=True).float()
             x_future = batch["x_future"].to(device, non_blocking=True).float()
             actions = batch["actions"].to(device, non_blocking=True).float()
             horizon = batch["horizon"].to(device, non_blocking=True)
-            z_t = encoder(x_t)
-            z_future = encoder(x_future)
+            z_t, kl_t = encode_for_training(x_t)
+            z_future, kl_future = encode_for_training(x_future)
+            kl_loss = 0.5 * (kl_t + kl_future)
             pred_loss = torch.zeros((), device=device)
             if prediction_weight > 0.0:
                 pred = world_model(z_t, actions, horizon)
@@ -3578,6 +3620,7 @@ def train_phase6_representation(
                 prediction_weight * pred_loss
                 + sigreg_weight * sigreg
                 + reconstruction_weight * recon_loss
+                + vae_beta * kl_loss
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -3587,19 +3630,21 @@ def train_phase6_representation(
             pred_sum += float(pred_loss.detach().cpu()) * batch_count
             sig_sum += float(sigreg.detach().cpu()) * batch_count
             recon_sum += float(recon_loss.detach().cpu()) * batch_count
+            kl_sum += float(kl_loss.detach().cpu()) * batch_count
             count += batch_count
         encoder.eval()
         world_model.eval()
         if decoder is not None:
             decoder.eval()
         val = validation_metrics()
-        selection = val["prediction_mse"] + val["reconstruction_mse"]
+        selection = val["prediction_mse"] + val["reconstruction_mse"] + vae_beta * val["kl"]
         row = {
             "epoch": epoch,
             "train_loss": loss_sum / count,
             "train_prediction_mse": pred_sum / count,
             "train_sigreg": sig_sum / count,
             "train_reconstruction_mse": recon_sum / count,
+            "train_kl": kl_sum / count,
             **{f"validation_{key}": value for key, value in val.items()},
         }
         history.append(row)
@@ -3622,6 +3667,7 @@ def train_phase6_representation(
         "world_model": world_model.state_dict(),
         "decoder": decoder.state_dict() if decoder is not None else None,
         "variant": variant,
+        "encoder_type": encoder_type,
         "input_dim": input_dim,
         "action_dim": action_dim,
         "latent_dim": latent_dim,
@@ -3633,6 +3679,7 @@ def train_phase6_representation(
         "prediction_weight": prediction_weight,
         "sigreg_weight": sigreg_weight,
         "reconstruction_weight": reconstruction_weight,
+        "vae_beta": vae_beta,
         "validation_metrics": final_val,
         "history": history,
         "data": data_metadata,
@@ -3644,8 +3691,10 @@ def train_phase6_representation(
         artifact_dir / "encoder_metrics.json",
         {
             "variant": variant,
+            "encoder_type": encoder_type,
             "latent_dim": latent_dim,
             "validation_metrics": final_val,
+            "vae_beta": vae_beta,
             "elapsed_s": timer.elapsed(),
             "data": data_metadata,
         },
@@ -3654,9 +3703,14 @@ def train_phase6_representation(
     return checkpoint_path
 
 
-def _load_phase6_encoder(path: Path, device: torch.device) -> tuple[ObservationEncoder, dict[str, Any]]:
+def _load_phase6_encoder(path: Path, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    encoder = ObservationEncoder(
+    encoder_cls = (
+        VariationalObservationEncoder
+        if checkpoint.get("encoder_type") == "vae"
+        else ObservationEncoder
+    )
+    encoder = encoder_cls(
         int(checkpoint["input_dim"]),
         int(checkpoint["latent_dim"]),
         int(checkpoint["hidden_dim"]),
@@ -4139,6 +4193,246 @@ def _phase6_encode_control_episodes(
             conds.append(np.concatenate([latents, prev_action_norm], axis=-1))
             actions.append(episode["actions"])
     return np.concatenate(conds).astype(np.float32), np.concatenate(actions).astype(np.float32)
+
+
+def _clone_mani_state_dict(state: dict[str, Any]) -> dict[str, Any]:
+    cloned: dict[str, Any] = {}
+    for key, value in state.items():
+        if isinstance(value, dict):
+            cloned[key] = _clone_mani_state_dict(value)
+        elif isinstance(value, torch.Tensor):
+            cloned[key] = value.detach().clone()
+        else:
+            raise TypeError(f"Unsupported ManiSkill state value for key {key}: {type(value)}")
+    return cloned
+
+
+def _nested_state_max_abs_errors(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    prefix: str = "",
+) -> dict[str, float]:
+    errors: dict[str, float] = {}
+    if set(left) != set(right):
+        raise ValueError(f"State dict keys differ at {prefix}: {set(left)} != {set(right)}")
+    for key in left:
+        name = f"{prefix}.{key}" if prefix else key
+        if isinstance(left[key], dict):
+            errors.update(_nested_state_max_abs_errors(left[key], right[key], name))
+        else:
+            diff = torch.max(torch.abs(left[key] - right[key])).detach().cpu()
+            errors[name] = float(diff)
+    return errors
+
+
+@torch.inference_mode()
+def run_phase7_branch_audit(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    seed: int = 0,
+    trials: int | None = None,
+    warmup_steps: int | None = None,
+    force: bool = False,
+) -> Path:
+    if _rl_backend(config) != "physx_cuda":
+        raise RuntimeError("Phase 7 branch audit requires the canonical CUDA backend")
+    latent_dim = int(latent_dim or config.get("incremental.phase7.latent_dim", 256))
+    variant = str(variant or config.get("incremental.phase7.variant", "ae_recon"))
+    trials = int(trials or config.get("incremental.phase7.branch_audit_trials", 8))
+    warmup_steps = int(
+        warmup_steps or config.get("incremental.phase7.branch_audit_warmup_steps", 8)
+    )
+    results_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase7"
+        / "branch_audit"
+        / f"{variant}_z{latent_dim}"
+        / f"seed{seed}"
+    )
+    output_path = results_dir / "branch_state_parity.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 7 branch audit exists: {output_path}")
+        return output_path
+
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    encoder_path = train_phase6_representation(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        seed=seed,
+        force=False,
+    )
+    encoder, encoder_checkpoint = _load_phase6_encoder(encoder_path, device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    dino = DinoExtractor(
+        str(config.get("dino.model_name")),
+        device,
+        feature_type=str(config.get("dino.feature_type", "cls")),
+        spatial_pool=int(config.get("dino.spatial_pool", 4)),
+    )
+    dino_batch_size = int(config.get("dino.batch_size", 32))
+
+    def make_env():
+        return gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=1,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+
+    student_env = make_env()
+    branch_env = make_env()
+    action_low = torch.as_tensor(student_env.action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(student_env.action_space.high, device=device, dtype=torch.float32)
+    per_trial: list[dict[str, Any]] = []
+    max_values = {
+        "copied_flat_state_error": 0.0,
+        "copied_component_error": 0.0,
+        "teacher_action_error": 0.0,
+        "transition_state_error": 0.0,
+        "reward_error": 0.0,
+        "rgb_pixel_error": 0.0,
+        "dino_feature_error": 0.0,
+        "latent_error": 0.0,
+    }
+    try:
+        for trial in trange(trials, desc="phase7 branch audit"):
+            reset_seed = int(config.get("incremental.phase7.branch_audit_seed", 910000))
+            student_obs, _student_info = student_env.reset(seed=reset_seed + seed * 1000 + trial)
+            branch_env.reset(seed=reset_seed + seed * 1000 + 100000 + trial)
+            actual_warmup_steps = warmup_steps + trial % 5
+            for _step in range(actual_warmup_steps):
+                state_t = student_obs["state"].to(device).float()
+                action_t = torch.clamp(teacher.actor_mean(state_t), action_low, action_high)
+                student_obs, _reward, terminated, truncated, _info = student_env.step(
+                    action_t.detach().cpu().numpy()[0]
+                )
+                if bool(_numpy(terminated).reshape(-1)[0]) or bool(_numpy(truncated).reshape(-1)[0]):
+                    break
+
+            source_state_dict = student_env.unwrapped.get_state_dict()
+            branch_env.unwrapped.set_state_dict(_clone_mani_state_dict(source_state_dict))
+            student_obs = student_env.unwrapped.get_obs()
+            branch_obs = branch_env.unwrapped.get_obs()
+
+            copied_flat_error = float(
+                torch.max(
+                    torch.abs(student_env.unwrapped.get_state() - branch_env.unwrapped.get_state())
+                )
+                .detach()
+                .cpu()
+            )
+            component_errors = _nested_state_max_abs_errors(
+                source_state_dict,
+                branch_env.unwrapped.get_state_dict(),
+            )
+            copied_component_error = float(max(component_errors.values()))
+
+            student_action = teacher.actor_mean(student_obs["state"].to(device).float())
+            branch_action = teacher.actor_mean(branch_obs["state"].to(device).float())
+            teacher_action_error = float(
+                torch.max(torch.abs(student_action - branch_action)).detach().cpu()
+            )
+            action = torch.clamp(student_action, action_low, action_high).detach().cpu().numpy()[0]
+
+            student_rgb, _student_state_obs = _phase4_rgb_state(student_obs)
+            branch_rgb, _branch_state_obs = _phase4_rgb_state(branch_obs)
+            rgb_pixel_error = float(
+                np.max(np.abs(student_rgb.astype(np.int16) - branch_rgb.astype(np.int16)))
+            )
+            rgbs = np.concatenate([student_rgb, branch_rgb], axis=0)
+            features = np.concatenate(
+                [dino.encode_batch(chunk) for chunk in batched(rgbs, dino_batch_size)],
+                axis=0,
+            )
+            dino_feature_error = float(np.max(np.abs(features[0] - features[1])))
+            proprio = (
+                torch.cat([student_obs["state"], branch_obs["state"]], dim=0)
+                .detach()
+                .cpu()
+                .numpy()[:, :21]
+                .astype(np.float32)
+            )
+            frame_inputs = np.concatenate([features, proprio], axis=-1).astype(np.float32)
+            z = encoder(torch.from_numpy(frame_norm.transform(frame_inputs)).to(device).float())
+            latent_error = float(torch.max(torch.abs(z[0] - z[1])).detach().cpu())
+
+            _student_next, student_reward, _student_term, _student_trunc, _student_info = (
+                student_env.step(action)
+            )
+            _branch_next, branch_reward, _branch_term, _branch_trunc, _branch_info = (
+                branch_env.step(action)
+            )
+            transition_state_error = float(
+                torch.max(
+                    torch.abs(student_env.unwrapped.get_state() - branch_env.unwrapped.get_state())
+                )
+                .detach()
+                .cpu()
+            )
+            reward_error = float(abs(_scalar(student_reward) - _scalar(branch_reward)))
+            row = {
+                "trial": trial,
+                "warmup_steps": actual_warmup_steps,
+                "copied_flat_state_error": copied_flat_error,
+                "copied_component_errors": component_errors,
+                "copied_component_error": copied_component_error,
+                "teacher_action_error": teacher_action_error,
+                "transition_state_error": transition_state_error,
+                "reward_error": reward_error,
+                "rgb_pixel_error": rgb_pixel_error,
+                "dino_feature_error": dino_feature_error,
+                "latent_error": latent_error,
+            }
+            per_trial.append(row)
+            for key in max_values:
+                max_values[key] = max(max_values[key], float(row[key]))
+    finally:
+        student_env.close()
+        branch_env.close()
+
+    tolerances = {
+        "copied_flat_state_error": float(
+            config.get("incremental.phase7.branch_state_tolerance", 1e-6)
+        ),
+        "copied_component_error": float(
+            config.get("incremental.phase7.branch_state_tolerance", 1e-6)
+        ),
+        "teacher_action_error": float(config.get("incremental.phase7.branch_action_tolerance", 1e-6)),
+        "transition_state_error": float(
+            config.get("incremental.phase7.branch_transition_tolerance", 1e-5)
+        ),
+        "reward_error": float(config.get("incremental.phase7.branch_reward_tolerance", 1e-6)),
+        "rgb_pixel_error": float(config.get("incremental.phase7.branch_rgb_tolerance", 0.0)),
+        "dino_feature_error": float(config.get("incremental.phase7.branch_dino_tolerance", 1e-6)),
+        "latent_error": float(config.get("incremental.phase7.branch_latent_tolerance", 1e-6)),
+    }
+    gates = {key: max_values[key] <= tolerances[key] for key in tolerances}
+    payload = {
+        "phase": "7B",
+        "method": "branch_state_parity_audit",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "seed": seed,
+        "trials": trials,
+        "warmup_steps": warmup_steps,
+        "checkpoint": str(encoder_path),
+        "max": max_values,
+        "tolerances": tolerances,
+        "gates": gates,
+        "passed": bool(all(gates.values())),
+        "per_trial": per_trial,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
 
 
 def _phase6_latent_flow_action_metrics(

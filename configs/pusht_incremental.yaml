@@ -106,6 +106,16 @@ incremental:
     eval_episodes: 100
     eval_seed: 10000
     eval_num_envs: 64
+    branch_audit_trials: 8
+    branch_audit_warmup_steps: 8
+    branch_audit_seed: 910000
+    branch_state_tolerance: 0.000001
+    branch_action_tolerance: 0.000001
+    branch_transition_tolerance: 0.00001
+    branch_reward_tolerance: 0.000001
+    branch_rgb_tolerance: 0.0
+    branch_dino_tolerance: 0.000001
+    branch_latent_tolerance: 0.000001
     probe_samples: 8000
     probe_epochs: 100
     probe_batch_size: 512
@@ -144,6 +154,7 @@ incremental:
     sigreg_weight: 0.05
     prediction_weight: 1.0
     reconstruction_weight: 0.1
+    vae_beta: 0.0001
     proprio_dim: 21
     proprio_reconstruction_weight: 1.0
     validation_samples: 8192
