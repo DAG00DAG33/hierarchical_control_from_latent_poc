@@ -1132,3 +1132,30 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   with a modest query budget before spending on the full 200-episode collection.
   Given the exact-replay cost observed here, a practical next budget is around
   10-20 query episodes followed by a 20-50 episode replay-branch evaluation.
+
+### 2026-06-19 - P7-D12: Coherent branch-oracle DAgger development run
+
+- **Bug fixed:** Removing wrapper-level `torch.inference_mode` from
+  `phase7-replay-branch-eval` was necessary because that command can now trigger
+  DAgger training. The replay rollout now explicitly detaches encoder, policy,
+  and teacher tensors before converting to NumPy.
+- **Run:** `phase7-replay-branch-eval --latent-dim 256 --variant ae_recon
+  --horizon-steps 2 --action-chunk-steps 1 --goal-encoding delta
+  --dagger-iteration 1 --dagger-query-episodes 10 --episodes 20 --force`.
+- **Collection:** `10` learner episodes produced `496` coherent branch-query
+  samples. Collection success was `0.80`; replay max error was `0.0`; failed
+  replay fraction was `0.0`.
+
+| policy | query episodes | eval episodes | success | final reward | max reward | replay max error | teacher action MAE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| branch DAgger iter1 | `10` | `20` | `0.75` | `0.833` | `0.834` | `0.0` | `0.0304` |
+
+- **Comparison:** This is consistent with the earlier base branch-oracle
+  result (`0.72` over 50 episodes) and remains above the matched flat latent
+  development baseline (`0.40` over the same replay seed family). The small
+  query/eval budget is not enough to claim improvement from DAgger, but it
+  validates the coherent 7F path at development scale.
+- **Next action:** Increase the coherent branch DAgger budget only if needed
+  after valid reachable-goal intervention tests. The exact replay branch is
+  still expensive, so 20-50 query episodes should be preferred before a full
+  200-query-episode collection.

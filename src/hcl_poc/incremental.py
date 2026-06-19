@@ -6690,7 +6690,6 @@ def evaluate_phase7_matched_flat_latent_policy(
     return output_path
 
 
-@torch.inference_mode()
 def evaluate_phase7_replay_branch_oracle_low_level(
     config: Config,
     latent_dim: int | None = None,
@@ -6870,7 +6869,7 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                         teacher.actor_mean(branch_obs["state"].to(device).float()),
                         action_low,
                         action_high,
-                    )
+                    ).detach()
                     branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
                         branch_env.step(teacher_action)
                     )
@@ -6892,7 +6891,9 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                     int(config.get("dino.batch_size", 64)),
                 )
                 frames = frame_norm.transform(np.concatenate([current_frame, goal_frame], axis=0))
-                z_pair = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy()
+                z_pair = (
+                    encoder(torch.from_numpy(frames).to(device).float()).detach().cpu().numpy()
+                )
                 z = z_pair[:num_envs].astype(np.float32)
                 goals = z_pair[num_envs:].astype(np.float32)
                 current_to_goal_l2.extend(np.linalg.norm(z[active] - goals[active], axis=-1).tolist())
@@ -6903,13 +6904,13 @@ def evaluate_phase7_replay_branch_oracle_low_level(
                     ],
                     axis=0,
                 )
-                pred_norm = model(torch.from_numpy(cond).to(device).float())
+                pred_norm = model(torch.from_numpy(cond).to(device).float()).detach()
                 raw_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
                 teacher_now = torch.clamp(
                     teacher.actor_mean(obs["state"].to(device).float()),
                     action_low,
                     action_high,
-                ).cpu().numpy().astype(np.float32)
+                ).detach().cpu().numpy().astype(np.float32)
                 action_maes.extend(
                     np.mean(np.abs(raw_action[active] - teacher_now[active]), axis=-1).tolist()
                 )
