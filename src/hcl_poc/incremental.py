@@ -7393,6 +7393,7 @@ def evaluate_phase7_valid_goal_use(
     episodes: int | None = None,
     dagger_iteration: int | None = None,
     dagger_query_episodes: int | None = None,
+    counterfactual_queries: int = 0,
     force: bool = False,
 ) -> Path:
     (
@@ -7437,7 +7438,11 @@ def evaluate_phase7_valid_goal_use(
         seed,
     )
     eval_episodes = int(episodes or config.get("incremental.phase7.goal_use_eval_episodes", 10))
-    output_path = results_dir / f"valid_goal_use_{checkpoint_label}_{eval_episodes}.json"
+    counterfactual_suffix = f"_cf{counterfactual_queries}" if counterfactual_queries > 0 else ""
+    output_path = (
+        results_dir
+        / f"valid_goal_use_{checkpoint_label}_{eval_episodes}{counterfactual_suffix}.json"
+    )
     if output_path.exists() and not force:
         console.print(f"Phase 7G valid goal-use eval exists: {output_path}")
         return output_path
@@ -7479,6 +7484,9 @@ def evaluate_phase7_valid_goal_use(
     max_steps_per_episode = int(
         config.get("incremental.phase7.goal_use_max_steps_per_episode", max_episode_steps)
     )
+    counterfactual_stride = int(config.get("incremental.phase7.counterfactual_query_stride", 10))
+    if counterfactual_queries < 0:
+        raise ValueError("counterfactual_queries must be non-negative")
     max_horizon = max(horizons)
     replay_errors: list[float] = []
     failed_replay_steps = 0
@@ -7499,6 +7507,19 @@ def evaluate_phase7_valid_goal_use(
     farther_projection_ge_near = []
     teacher_action_maes: list[float] = []
     branch_latencies_per_env: list[float] = []
+    counterfactual_replay_errors: list[float] = []
+    counterfactual_initial_latent_errors: list[float] = []
+    counterfactual_final_latent_errors: list[float] = []
+    counterfactual_initial_object_position_errors: list[float] = []
+    counterfactual_final_object_position_errors: list[float] = []
+    counterfactual_initial_yaw_errors: list[float] = []
+    counterfactual_final_yaw_errors: list[float] = []
+    counterfactual_initial_tcp_errors: list[float] = []
+    counterfactual_final_tcp_errors: list[float] = []
+    counterfactual_latent_closest: list[float] = []
+    counterfactual_physical_closest: list[float] = []
+    counterfactual_done_before_goal: list[float] = []
+    counterfactual_samples = 0
     sample_count = 0
     successes: list[float] = []
     progress = trange(eval_episodes, desc="phase7G valid reachable goal-use")
@@ -7597,6 +7618,257 @@ def evaluate_phase7_valid_goal_use(
                     )
 
                 current_state = obs["state"].detach().cpu().numpy().astype(np.float32)
+                if (
+                    counterfactual_samples < counterfactual_queries
+                    and _step % counterfactual_stride == 0
+                ):
+                    remaining = counterfactual_queries - counterfactual_samples
+                    query_indices = np.flatnonzero(active)[:remaining]
+                    query_count = len(query_indices)
+                    if query_count > 0:
+                        target_count = len(horizons)
+                        target_goals = np.stack(
+                            [goals[h][env_idx] for env_idx in query_indices for h in horizons],
+                            axis=0,
+                        ).astype(np.float32)
+                        target_states = np.stack(
+                            [
+                                branch_states[h][env_idx]
+                                for env_idx in query_indices
+                                for h in horizons
+                            ],
+                            axis=0,
+                        ).astype(np.float32)
+                        initial_states = current_state[query_indices].repeat(target_count, axis=0)
+                        final_states = np.zeros_like(target_states)
+                        final_latents = np.zeros_like(target_goals)
+                        captured = np.zeros(len(target_goals), dtype=bool)
+                        done_before_capture = np.zeros(len(target_goals), dtype=bool)
+
+                        for target_idx, target_horizon in enumerate(horizons):
+                            counter_env = make_env(num_envs)
+                            try:
+                                counter_obs, _counter_info = counter_env.reset(seed=reset_seeds)
+                                counter_done = torch.zeros(
+                                    num_envs,
+                                    device=device,
+                                    dtype=torch.bool,
+                                )
+                                for action_history in history:
+                                    (
+                                        counter_obs,
+                                        _counter_reward,
+                                        counter_term,
+                                        counter_trunc,
+                                        _counter_info,
+                                    ) = counter_env.step(action_history)
+                                    counter_done |= torch.logical_or(
+                                        counter_term, counter_trunc
+                                    ).view(-1)
+                                counter_replay_error = torch.max(
+                                    torch.abs(
+                                        student_env.unwrapped.get_state()
+                                        - counter_env.unwrapped.get_state()
+                                    ),
+                                    dim=1,
+                                ).values
+                                selected_replay_error = counter_replay_error[query_indices]
+                                counterfactual_replay_errors.extend(
+                                    selected_replay_error.cpu().numpy().tolist()
+                                )
+                                if bool(torch.any(selected_replay_error > replay_state_tolerance)):
+                                    raise RuntimeError(
+                                        "Counterfactual replay did not reproduce the learner state: "
+                                        f"errors={selected_replay_error.cpu().numpy().tolist()}"
+                                    )
+
+                                counter_prev_action_norm = prev_action_norm.copy()
+                                counter_frames = frame_norm.transform(
+                                    _phase4_frame_inputs(
+                                        counter_obs,
+                                        dino,
+                                        int(config.get("dino.batch_size", 64)),
+                                    )
+                                )
+                                counter_z = (
+                                    encoder(torch.from_numpy(counter_frames).to(device).float())
+                                    .detach()
+                                    .cpu()
+                                    .numpy()
+                                    .astype(np.float32)
+                                )
+                                for _counter_step in range(target_horizon):
+                                    counter_cond = np.stack(
+                                        [
+                                            _phase7_condition(
+                                                counter_z[i],
+                                                goals[target_horizon][i],
+                                                counter_prev_action_norm[i],
+                                                goal_encoding,
+                                            )
+                                            for i in range(num_envs)
+                                        ],
+                                        axis=0,
+                                    )
+                                    counter_pred_norm = model(
+                                        torch.from_numpy(counter_cond).to(device).float()
+                                    ).detach()
+                                    counter_action_np = action_norm.inverse(
+                                        counter_pred_norm.cpu().numpy()
+                                    ).astype(np.float32)
+                                    counter_action = (
+                                        torch.from_numpy(counter_action_np).to(device).float()
+                                    )
+                                    if bool(config.get("policy.clip_actions_to_env_space", True)):
+                                        counter_action = torch.clamp(
+                                            counter_action, action_low, action_high
+                                        )
+                                    counter_action[counter_done] = 0.0
+                                    (
+                                        counter_obs,
+                                        _counter_reward,
+                                        counter_term,
+                                        counter_trunc,
+                                        _counter_info,
+                                    ) = counter_env.step(counter_action)
+                                    counter_prev_action_norm = action_norm.transform(
+                                        counter_action.cpu().numpy().astype(np.float32)
+                                    )
+                                    counter_done |= torch.logical_or(
+                                        counter_term, counter_trunc
+                                    ).view(-1)
+                                    counter_frames = frame_norm.transform(
+                                        _phase4_frame_inputs(
+                                            counter_obs,
+                                            dino,
+                                            int(config.get("dino.batch_size", 64)),
+                                        )
+                                    )
+                                    counter_z = (
+                                        encoder(torch.from_numpy(counter_frames).to(device).float())
+                                        .detach()
+                                        .cpu()
+                                        .numpy()
+                                        .astype(np.float32)
+                                    )
+
+                                flat_indices = (
+                                    np.arange(query_count, dtype=np.int32) * target_count
+                                    + target_idx
+                                )
+                                final_states[flat_indices] = (
+                                    counter_obs["state"]
+                                    .detach()
+                                    .cpu()
+                                    .numpy()
+                                    .astype(np.float32)[query_indices]
+                                )
+                                final_latents[flat_indices] = counter_z[query_indices]
+                                captured[flat_indices] = True
+                                done_before_capture[flat_indices] = (
+                                    counter_done[query_indices].cpu().numpy()
+                                )
+                            finally:
+                                counter_env.close()
+                        valid = captured & ~done_before_capture
+                        counterfactual_done_before_goal.extend(
+                            done_before_capture.astype(np.float32).tolist()
+                        )
+                        if np.any(valid):
+                            initial_latent_error = np.linalg.norm(
+                                z[query_indices].repeat(target_count, axis=0) - target_goals,
+                                axis=-1,
+                            )
+                            final_latent_error = np.linalg.norm(
+                                final_latents - target_goals, axis=-1
+                            )
+                            initial_object_error = np.linalg.norm(
+                                initial_states[:, 24:26] - target_states[:, 24:26],
+                                axis=-1,
+                            )
+                            final_object_error = np.linalg.norm(
+                                final_states[:, 24:26] - target_states[:, 24:26],
+                                axis=-1,
+                            )
+                            initial_yaw_error = np.abs(
+                                _wrap_angle(
+                                    _phase7_privileged_yaw(initial_states)
+                                    - _phase7_privileged_yaw(target_states)
+                                )
+                            )
+                            final_yaw_error = np.abs(
+                                _wrap_angle(
+                                    _phase7_privileged_yaw(final_states)
+                                    - _phase7_privileged_yaw(target_states)
+                                )
+                            )
+                            initial_tcp_error = np.linalg.norm(
+                                initial_states[:, 14:17] - target_states[:, 14:17], axis=-1
+                            )
+                            final_tcp_error = np.linalg.norm(
+                                final_states[:, 14:17] - target_states[:, 14:17], axis=-1
+                            )
+                            counterfactual_initial_latent_errors.extend(
+                                initial_latent_error[valid].tolist()
+                            )
+                            counterfactual_final_latent_errors.extend(
+                                final_latent_error[valid].tolist()
+                            )
+                            counterfactual_initial_object_position_errors.extend(
+                                initial_object_error[valid].tolist()
+                            )
+                            counterfactual_final_object_position_errors.extend(
+                                final_object_error[valid].tolist()
+                            )
+                            counterfactual_initial_yaw_errors.extend(
+                                initial_yaw_error[valid].tolist()
+                            )
+                            counterfactual_final_yaw_errors.extend(final_yaw_error[valid].tolist())
+                            counterfactual_initial_tcp_errors.extend(
+                                initial_tcp_error[valid].tolist()
+                            )
+                            counterfactual_final_tcp_errors.extend(final_tcp_error[valid].tolist())
+
+                            for local_idx in range(query_count):
+                                row = slice(
+                                    local_idx * target_count,
+                                    (local_idx + 1) * target_count,
+                                )
+                                local_goals = target_goals[row]
+                                local_targets = target_states[row]
+                                for target_idx in range(target_count):
+                                    flat_idx = local_idx * target_count + target_idx
+                                    if not valid[flat_idx]:
+                                        continue
+                                    latent_distances = np.linalg.norm(
+                                        local_goals - final_latents[flat_idx], axis=-1
+                                    )
+                                    counterfactual_latent_closest.append(
+                                        float(np.argmin(latent_distances) == target_idx)
+                                    )
+                                    object_distances = np.linalg.norm(
+                                        local_targets[:, 24:26] - final_states[flat_idx, 24:26],
+                                        axis=-1,
+                                    )
+                                    yaw_distances = np.abs(
+                                        _wrap_angle(
+                                            _phase7_privileged_yaw(local_targets)
+                                            - _phase7_privileged_yaw(
+                                                final_states[flat_idx : flat_idx + 1]
+                                            )[0]
+                                        )
+                                    )
+                                    tcp_distances = np.linalg.norm(
+                                        local_targets[:, 14:17] - final_states[flat_idx, 14:17],
+                                        axis=-1,
+                                    )
+                                    physical_distances = (
+                                        object_distances + 0.1 * yaw_distances + tcp_distances
+                                    )
+                                    counterfactual_physical_closest.append(
+                                        float(np.argmin(physical_distances) == target_idx)
+                                    )
+                        counterfactual_samples += query_count
                 tcp_by_h = {h: branch_states[h][:, 14:17] for h in horizons}
                 for near_h, far_h in zip(horizons[:-1], horizons[1:]):
                     key = f"{near_h}_to_{far_h}"
@@ -7688,6 +7960,49 @@ def evaluate_phase7_valid_goal_use(
     def mean_or_zero(values: list[float]) -> float:
         return float(np.mean(values)) if values else 0.0
 
+    def reduction_fraction(initial: list[float], final: list[float]) -> float:
+        if not initial:
+            return 0.0
+        return float(np.mean(np.asarray(final) < np.asarray(initial)))
+
+    counterfactual_metrics = {
+        "requested_source_queries": counterfactual_queries,
+        "completed_source_queries": counterfactual_samples,
+        "goal_rollouts": counterfactual_samples * len(horizons),
+        "valid_goal_rollouts": len(counterfactual_final_latent_errors),
+        "replay_current_state_error_max": (
+            float(np.max(counterfactual_replay_errors)) if counterfactual_replay_errors else 0.0
+        ),
+        "done_before_goal_fraction": mean_or_zero(counterfactual_done_before_goal),
+        "initial_latent_error": mean_or_zero(counterfactual_initial_latent_errors),
+        "final_latent_error": mean_or_zero(counterfactual_final_latent_errors),
+        "latent_error_reduced_fraction": reduction_fraction(
+            counterfactual_initial_latent_errors,
+            counterfactual_final_latent_errors,
+        ),
+        "initial_object_position_error": mean_or_zero(
+            counterfactual_initial_object_position_errors
+        ),
+        "final_object_position_error": mean_or_zero(counterfactual_final_object_position_errors),
+        "object_position_error_reduced_fraction": reduction_fraction(
+            counterfactual_initial_object_position_errors,
+            counterfactual_final_object_position_errors,
+        ),
+        "initial_yaw_error": mean_or_zero(counterfactual_initial_yaw_errors),
+        "final_yaw_error": mean_or_zero(counterfactual_final_yaw_errors),
+        "yaw_error_reduced_fraction": reduction_fraction(
+            counterfactual_initial_yaw_errors,
+            counterfactual_final_yaw_errors,
+        ),
+        "initial_tcp_position_error": mean_or_zero(counterfactual_initial_tcp_errors),
+        "final_tcp_position_error": mean_or_zero(counterfactual_final_tcp_errors),
+        "tcp_position_error_reduced_fraction": reduction_fraction(
+            counterfactual_initial_tcp_errors,
+            counterfactual_final_tcp_errors,
+        ),
+        "assigned_latent_goal_closest_fraction": mean_or_zero(counterfactual_latent_closest),
+        "assigned_physical_goal_closest_fraction": mean_or_zero(counterfactual_physical_closest),
+    }
     metrics = {
         "episodes": eval_episodes,
         "num_envs": max_num_envs,
@@ -7712,6 +8027,7 @@ def evaluate_phase7_valid_goal_use(
             key: mean_or_zero(value) for key, value in latent_l2_by_pair.items()
         },
         "tcp_goal_l2_by_pair": {key: mean_or_zero(value) for key, value in tcp_l2_by_pair.items()},
+        "counterfactual": counterfactual_metrics,
     }
     payload = {
         "phase": "7G",
@@ -7731,6 +8047,14 @@ def evaluate_phase7_valid_goal_use(
         "matched_replay_state_gate": metrics["replay_failed_step_fraction"] == 0.0,
         "goal_sensitivity_gate": metrics["action_sensitivity_l2_near_to_far"] > 0.01,
         "directional_consistency_gate": metrics["positive_directional_fraction"] > 0.5,
+        "counterfactual_goal_approach_gate": (
+            counterfactual_queries == 0
+            or (
+                counterfactual_metrics["valid_goal_rollouts"] > 0
+                and counterfactual_metrics["latent_error_reduced_fraction"] > 0.5
+                and counterfactual_metrics["tcp_position_error_reduced_fraction"] > 0.5
+            )
+        ),
         "metadata": _runtime_metadata(config),
     }
     write_json(output_path, payload)

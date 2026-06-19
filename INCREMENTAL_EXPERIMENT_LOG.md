@@ -1245,3 +1245,44 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Next action:** Complete the counterfactual reachable-subgoal rollout test,
   then run the 100-episode Phase 7 gate for the selected methods. Reserve
   500-episode evaluation for final selected results only.
+
+### 2026-06-19 - P7-D16: Counterfactual reachable-subgoal rollouts
+
+- **Implementation:** Extended `phase7-goal-use-eval` with
+  `--counterfactual-queries`. At sampled learner states, the evaluator creates
+  separate exact-replay environments for the reachable `k-1`, `k`, and `k+1`
+  teacher goals. Each low-level rollout starts from the same learner state,
+  receives a fixed reachable goal, executes for that goal's own horizon, and is
+  compared with all three target states.
+- **Invalid optimization rejected:** A single environment with three repeated
+  copies of each reset seed changed simulator state by `0.02` to `1.48` because
+  changing CUDA vector-environment cardinality is not state-equivalent. The
+  valid implementation uses one counterfactual environment per goal horizon
+  with exactly the same `num_envs` and seed vector as the learner. Replay error
+  is then exactly zero.
+- **Run:** Coherent branch DAgger iter1 e10, `ae_recon_z256`, `k=2`, `H=1`,
+  delta goals, five learner episodes, 15 sampled learner states, and 45 total
+  counterfactual goal rollouts.
+
+| metric | initial | final | reduced fraction |
+| --- | ---: | ---: | ---: |
+| latent L2 | `25.660` | `16.354` | `0.956` |
+| T position | `0.00468` | `0.00121` | `0.511` |
+| T yaw | `0.0409` | `0.00661` | `0.378` |
+| TCP position | `0.0513` | `0.0100` | `1.000` |
+
+- **Goal identification:** The endpoint is closest to its assigned target in
+  `0.756` of latent comparisons and `0.911` of privileged physical-state
+  comparisons. All 45 rollouts are valid, none terminate before their goal
+  horizon, and counterfactual replay max error is `0.0`.
+- **Interpretation:** The learned low level does more than react to a goal at
+  the action level: it generally moves toward the supplied reachable goal and
+  produces goal-specific endpoint states. Per-sample T position/yaw reduction
+  fractions are weaker because many 0.05-0.15 s teacher branches have almost
+  no object motion; their mean errors still decrease substantially.
+- **Gate status:** Phase 7G passes at development scale. Action sensitivity,
+  directional consistency, assigned-goal approach, and exact replay invariants
+  are all positive.
+- **Next action:** Run the 100-episode Phase 7I gate for selected methods and
+  assemble the matched Phase 7 table. Do not spend 100 exact-branch episodes on
+  clearly rejected ablations.

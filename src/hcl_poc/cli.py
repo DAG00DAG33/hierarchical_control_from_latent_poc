@@ -498,6 +498,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             dagger_iteration=args.dagger_iteration,
             dagger_query_episodes=args.dagger_query_episodes,
+            counterfactual_queries=args.counterfactual_queries,
             force=args.force,
         )
     elif args.incremental_command == "phase7-priv-train":
@@ -798,6 +799,7 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_goal_use.add_argument("--episodes", type=int)
     phase7_goal_use.add_argument("--dagger-iteration", type=int)
     phase7_goal_use.add_argument("--dagger-query-episodes", type=int)
+    phase7_goal_use.add_argument("--counterfactual-queries", type=int, default=0)
     phase7_goal_use.add_argument("--force", action="store_true")
     phase7_goal_use.set_defaults(func=incremental_cmd)
     for command in ["phase7-priv-train", "phase7-priv-eval"]:
