@@ -2502,13 +2502,13 @@ At minimum:
 
 ## Seeds
 
-Use at least:
+Use one training seed per method and dataset size, with the same nested data
+subsets and fixed evaluation seeds for paired comparisons.
 
-$$3$$
-
-training seeds per method and dataset size.
-
-Use 500 evaluation episodes per seed.
+Use 100 evaluation episodes per method. Report binomial uncertainty and state
+explicitly that the reduced protocol does not measure training-seed
+robustness. Additional seeds or episodes are optional only for a final selected
+comparison when runtime permits; they are not required for the phase gate.
 
 ## Main plot
 

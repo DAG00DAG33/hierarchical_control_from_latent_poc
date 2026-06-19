@@ -1375,3 +1375,64 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
 - **Gate status:** Phase 8 does not yet pass. The next experiment is coherent
   high-level DAgger collected under the learned hierarchy, with local branch
   targets generated from each actual learner state.
+
+### 2026-06-19 - P8-D02: Learned-hierarchy distribution-shift interventions
+
+- **Implementation:** Added exact-replay `phase8-dagger-collect`, high-level
+  DAgger training, balanced `phase8-low-adapt`, absolute/delta prediction
+  targets, and low-level flat/branch action blending. High-level DAgger samples
+  contain the learned hierarchy's current latent/history and the reachable
+  local teacher-branch future latent from that exact simulator state.
+- **Fresh collection:** Ten learned-hierarchy episodes produced 783 coherent
+  queries. Exact replay max error and failed replay fraction are both `0.0`;
+  collection-policy success was `0.30`.
+- **Distribution diagnosis:** On fresh learner states, the original low-level
+  controller has oracle-goal teacher action MAE `0.0838`, over three times its
+  nominal teacher-state MAE `0.0268`. The fresh high-level predictor reaches
+  predicted-goal MAE `0.0896`, only `1.07x` its oracle-goal error. This means
+  future prediction is no longer the dominant error on those states: the
+  low-level policy itself is outside its training distribution.
+- **Adapted low level:** Balanced nominal/fresh-query training reduces held-out
+  fresh-query MAE to `0.0454` while retaining nominal MAE `0.0266`.
+
+| intervention, `k=2`, `L=1` | episodes | success | rollout teacher MAE |
+| --- | ---: | ---: | ---: |
+| base predictor + base low | `100` | `0.46` | `0.1329` |
+| old oracle-query high fine-tune | `100` | `0.40` | `0.1358` |
+| fresh learned-hierarchy high DAgger | `100` | `0.37` | `0.1301` |
+| base predictor + adapted low | `100` | `0.47` | `0.1265` |
+| fresh high DAgger + adapted low | `100` | `0.38` | `0.1394` |
+| 25% branch / 75% flat action blend | `100` | `0.44` | `0.1004` |
+| delta-target predictor | `100` | `0.30` | `0.1478` |
+
+- **Decision:** None passes the `0.511` gate. Fresh-query adaptation improves
+  supervised error but does not produce a stable closed-loop distribution;
+  high-level DAgger on ten already-poor rollouts reinforces that distribution.
+  Action blending lowers teacher MAE without improving task success, so action
+  MAE alone is not a sufficient selection metric. Reject delta targets and the
+  tested one-iteration DAgger/adaptation variants.
+
+### 2026-06-19 - P8-D03: Longer deterministic horizon
+
+- **Implementation correction:** Phase 8 now reuses a horizon-matched Phase 7
+  DAgger low-level checkpoint only when one already exists. Otherwise it uses
+  the existing base low-level checkpoint instead of silently starting an
+  expensive DAgger collection. Evaluation selects the largest existing oracle
+  result that matches the exact low-level checkpoint.
+- **Run:** Absolute predictor, `ae_recon_z256`, `k=5` (0.25 s), `L=1`, 60
+  epochs, followed by 100 fixed evaluation episodes. The matched Phase 7 base
+  branch oracle scored `0.70` on its existing 10-episode exact-replay run.
+- **Offline:** Future-latent L2 `14.991` versus persistence `33.428` (`55.2%`
+  improvement); predicted-goal action MAE `0.0352` versus oracle-goal `0.0300`
+  (`1.17x`). Nearest-reference mean distance is `7.63` for predictions versus
+  `9.33` for real held-out targets.
+- **Closed loop:** Success `0.31 +/- 0.046`, final reward `0.369`, maximum
+  reward `0.488`, and rollout teacher-action MAE `0.1250`. This is `44.3%` of
+  the `0.70` oracle and fails the required 70% fraction (`0.49`).
+- **Decision:** Reject `k=5`. Its offline control-interface metrics improve
+  over `k=2`, but its closed-loop success is 15 percentage points lower. A
+  larger horizon increases the consequence of prediction and distribution
+  errors rather than providing useful temporal abstraction in this setup.
+- **Runtime protocol:** Continue with 100 fixed episodes and one policy seed.
+  The reduced budget reports binomial uncertainty but cannot establish
+  training-seed robustness.

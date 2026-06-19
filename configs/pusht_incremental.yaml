@@ -230,6 +230,9 @@ incremental:
     dagger_batches_per_epoch: 100
     dagger_batch_size: 512
     dagger_lr: 0.0001
+    dagger_seed: 1300000
+    dagger_num_envs: 16
+    dagger_replay_tolerance: 0.000001
     eval_episodes: 100
     eval_num_envs: 64
     eval_seed: 1200000
