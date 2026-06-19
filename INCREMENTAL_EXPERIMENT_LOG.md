@@ -925,3 +925,42 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   history and should provide a valid oracle for the Phase 7 gate. In parallel,
   test whether a vectorized same-scene fork exposes a lower-level copy path;
   do not proceed with `set_state_dict` branch evaluation as the primary oracle.
+
+### 2026-06-19 - P7-D06: Exact replay branch-oracle evaluation
+
+- **Implementation:** Added `phase7-replay-branch-eval`. At each student
+  control step, the branch environment is reset to the same episode seed, the
+  student's executed action history is replayed exactly, and the privileged
+  teacher is rolled for `k` steps from that replayed state to produce a local
+  reachable future latent. This avoids the invalid `set_state_dict` fork that
+  missed hidden contact/solver state.
+- **Config fix:** Moved branch-audit defaults from the accidentally placed
+  Phase 4 block into `incremental.phase7`.
+- **Small sanity run:** `phase7-replay-branch-eval --latent-dim 256 --variant
+  ae_recon --horizon-steps 2 --action-chunk-steps 1 --goal-encoding delta
+  --episodes 3 --force`.
+  - success `0.667`;
+  - replay current-state max error `0.0`;
+  - branch generation latency `0.938 s/step`.
+- **Development run:** Same command with `--episodes 10 --force`.
+
+| oracle definition | policy | success | max reward | teacher action MAE | replay state max error | branch latency |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| old nominal trajectory | delta `k=2` | `0.38` | `0.522` | `0.0266` validation | n/a | vectorized |
+| exact replay branch | delta `k=2` | `0.80` | `0.866` | `0.0274` rollout | `0.0` | `0.902 s/step` |
+
+- **Result:** The replay branch oracle is a strong positive signal. The same
+  low-level policy that failed with nominal teacher-trajectory goals performs
+  far better when the future goal is locally reachable from the student's
+  actual current state. This supports the hypothesis that the previous Phase 7
+  failure was primarily an invalid oracle definition, not an inherent failure
+  of future-latent conditioning.
+- **Gate status:** Phase 7C gets a positive diagnostic signal, but not yet a
+  final gate pass because the run is only 10 episodes and branch generation is
+  too slow for 100-500 episode evaluation in its current exact-replay form.
+- **Next action:** Implement a faster coherent branch-oracle path for larger
+  evaluations and training. The immediate options are:
+  - find a same-scene/vectorized fork that preserves contact solver history;
+  - cache/reuse replay prefixes where possible;
+  - train/evaluate the privileged structured branch-oracle baseline on replay
+    generated coherent samples while keeping development evaluations small.

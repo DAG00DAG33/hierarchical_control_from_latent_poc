@@ -6203,6 +6203,243 @@ def _load_phase7_low_level_checkpoint(
 
 
 @torch.inference_mode()
+def evaluate_phase7_replay_branch_oracle_low_level(
+    config: Config,
+    latent_dim: int | None = None,
+    variant: str | None = None,
+    horizon_steps: int | None = None,
+    action_chunk_steps: int | None = None,
+    goal_encoding: str | None = None,
+    goal_dropout_prob: float | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    (
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    ) = _phase7_defaults(
+        config,
+        latent_dim,
+        variant,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+    )
+    if action_chunk_steps != 1:
+        raise NotImplementedError("Replay branch oracle evaluation currently supports H=1")
+    checkpoint_path = train_phase7_oracle_low_level(
+        config,
+        latent_dim=latent_dim,
+        variant=variant,
+        horizon_steps=horizon_steps,
+        action_chunk_steps=action_chunk_steps,
+        goal_encoding=goal_encoding,
+        goal_dropout_prob=goal_dropout_prob,
+        seed=seed,
+        force=False,
+    )
+    results_dir = _phase7_results_dir(
+        config,
+        variant,
+        latent_dim,
+        horizon_steps,
+        action_chunk_steps,
+        goal_encoding,
+        goal_dropout_prob,
+        seed,
+    )
+    eval_episodes = int(episodes or config.get("incremental.phase7.replay_branch_eval_episodes", 10))
+    output_path = results_dir / f"replay_branch_oracle_eval_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 7 replay branch oracle eval exists: {output_path}")
+        return output_path
+
+    device = default_device()
+    model, checkpoint = _load_phase7_low_level_checkpoint(checkpoint_path, device)
+    encoder, encoder_checkpoint = _load_phase6_encoder(Path(checkpoint["encoder_checkpoint"]), device)
+    frame_norm = Standardizer.from_state_dict(encoder_checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+
+    def make_env():
+        return gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=1,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+
+    student_env = make_env()
+    branch_env = make_env()
+    action_low = torch.as_tensor(student_env.action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(student_env.action_space.high, device=device, dtype=torch.float32)
+    zero_action_norm = action_norm.transform(
+        np.zeros((1, int(checkpoint["action_dim"])), dtype=np.float32)
+    )[0]
+    seed_start = int(config.get("incremental.phase7.replay_branch_seed", 1_200_000))
+    replay_state_tolerance = float(
+        config.get("incremental.phase7.replay_branch_state_tolerance", 1e-6)
+    )
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    replay_errors: list[float] = []
+    current_to_goal_l2: list[float] = []
+    action_maes: list[float] = []
+    policy_latencies: list[float] = []
+    branch_latencies: list[float] = []
+    failed_replay_steps = 0
+
+    try:
+        for episode in trange(eval_episodes, desc="phase7 replay branch oracle eval"):
+            reset_seed = seed_start + episode
+            obs, _info = student_env.reset(seed=reset_seed)
+            executed_actions: list[np.ndarray] = []
+            prev_action_norm = zero_action_norm.copy()
+            terminated = truncated = False
+            success = False
+            final_reward = 0.0
+            max_reward = -float("inf")
+            steps = 0
+            while not (terminated or truncated):
+                branch_timer = Timer()
+                branch_obs, _branch_info = branch_env.reset(seed=reset_seed)
+                replay_done = False
+                for action_history in executed_actions:
+                    branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                        branch_env.step(action_history)
+                    )
+                    replay_done = replay_done or bool(_scalar(branch_term)) or bool(_scalar(branch_trunc))
+                    if replay_done:
+                        break
+                current_replay_error = float(
+                    torch.max(
+                        torch.abs(
+                            student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()
+                        )
+                    )
+                    .detach()
+                    .cpu()
+                )
+                replay_errors.append(current_replay_error)
+                if replay_done or current_replay_error > replay_state_tolerance:
+                    failed_replay_steps += 1
+
+                for _ in range(horizon_steps):
+                    teacher_action = torch.clamp(
+                        teacher.actor_mean(branch_obs["state"].to(device).float()),
+                        action_low,
+                        action_high,
+                    )
+                    branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                        branch_env.step(teacher_action.detach().cpu().numpy()[0])
+                    )
+                    if bool(_scalar(branch_term)) or bool(_scalar(branch_trunc)):
+                        break
+                branch_latencies.append(branch_timer.elapsed())
+
+                policy_timer = Timer()
+                current_frame = _phase4_frame_inputs(
+                    obs,
+                    dino,
+                    int(config.get("dino.batch_size", 64)),
+                )
+                goal_frame = _phase4_frame_inputs(
+                    branch_obs,
+                    dino,
+                    int(config.get("dino.batch_size", 64)),
+                )
+                frames = frame_norm.transform(np.concatenate([current_frame, goal_frame], axis=0))
+                z_pair = encoder(torch.from_numpy(frames).to(device).float()).cpu().numpy()
+                z = z_pair[0].astype(np.float32)
+                goal = z_pair[1].astype(np.float32)
+                current_to_goal_l2.append(float(np.linalg.norm(z - goal)))
+                cond = _phase7_condition(z, goal, prev_action_norm, goal_encoding)[None]
+                pred_norm = model(torch.from_numpy(cond).to(device).float())
+                raw_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)[0]
+                teacher_now = torch.clamp(
+                    teacher.actor_mean(obs["state"].to(device).float()),
+                    action_low,
+                    action_high,
+                ).cpu().numpy().astype(np.float32)[0]
+                action_maes.append(float(np.mean(np.abs(raw_action - teacher_now))))
+                policy_latencies.append(policy_timer.elapsed())
+
+                action_t = torch.from_numpy(raw_action).to(device).float()
+                if bool(config.get("policy.clip_actions_to_env_space", True)):
+                    action_t = torch.clamp(action_t, action_low, action_high)
+                action_np = action_t.detach().cpu().numpy().astype(np.float32)
+                obs, reward, terminated, truncated, info = student_env.step(action_np)
+                executed_actions.append(action_np.copy())
+                prev_action_norm = action_norm.transform(action_np[None])[0]
+                final_reward = _scalar(reward)
+                max_reward = max(max_reward, final_reward)
+                success = success or bool(_scalar(info.get("success", False)))
+                steps += 1
+            successes.append(float(success))
+            final_rewards.append(final_reward)
+            max_rewards.append(max_reward)
+            episode_lengths.append(steps)
+    finally:
+        student_env.close()
+        branch_env.close()
+
+    metrics = {
+        "success": float(np.mean(successes)),
+        "success_stderr": float(np.std(successes) / np.sqrt(len(successes))),
+        "final_reward": float(np.mean(final_rewards)),
+        "max_reward": float(np.mean(max_rewards)),
+        "mean_episode_length": float(np.mean(episode_lengths)),
+        "replay_current_state_error_mean": float(np.mean(replay_errors)) if replay_errors else 0.0,
+        "replay_current_state_error_max": float(np.max(replay_errors)) if replay_errors else 0.0,
+        "replay_failed_step_fraction": float(failed_replay_steps / max(1, len(replay_errors))),
+        "latent_current_to_branch_goal_l2": (
+            float(np.mean(current_to_goal_l2)) if current_to_goal_l2 else 0.0
+        ),
+        "teacher_action_mae": float(np.mean(action_maes)) if action_maes else 0.0,
+        "policy_latency_s": float(np.mean(policy_latencies)) if policy_latencies else 0.0,
+        "branch_generation_latency_s": float(np.mean(branch_latencies)) if branch_latencies else 0.0,
+        "episodes": eval_episodes,
+        "seed_start": seed_start,
+    }
+    visual_success = _phase7_visual_flow_success(config, seed)
+    payload = {
+        "phase": "7C",
+        "method": "replay_branch_oracle_low_level_eval",
+        "variant": variant,
+        "latent_dim": latent_dim,
+        "horizon_steps": horizon_steps,
+        "action_chunk_steps": action_chunk_steps,
+        "goal_encoding": goal_encoding,
+        "goal_dropout_prob": goal_dropout_prob,
+        "seed": seed,
+        "checkpoint": str(checkpoint_path),
+        "closed_loop": metrics,
+        "validation_action_metrics": checkpoint["validation_metrics"],
+        "direct_visual_flow_success": visual_success,
+        "matched_replay_state_gate": metrics["replay_failed_step_fraction"] == 0.0,
+        "oracle_gate_visual_flow": bool(metrics["success"] >= visual_success),
+        "oracle_gate_90pct_visual_flow": bool(metrics["success"] >= 0.9 * visual_success),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+@torch.inference_mode()
 def collect_phase7_oracle_dagger_queries(
     config: Config,
     latent_dim: int | None = None,

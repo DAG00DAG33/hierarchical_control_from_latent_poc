@@ -27,6 +27,7 @@ from hcl_poc.incremental import (
     evaluate_phase6_latent_flow,
     evaluate_phase7_oracle_low_level,
     evaluate_phase7_oracle_dagger_low_level,
+    evaluate_phase7_replay_branch_oracle_low_level,
     probe_phase6_representation,
     probe_phase4_visual_history,
     run_phase0,
@@ -429,6 +430,19 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             warmup_steps=args.warmup_steps,
             force=args.force,
         )
+    elif args.incremental_command == "phase7-replay-branch-eval":
+        evaluate_phase7_replay_branch_oracle_low_level(
+            config,
+            latent_dim=args.latent_dim,
+            variant=args.variant,
+            horizon_steps=args.horizon_steps,
+            action_chunk_steps=args.action_chunk_steps,
+            goal_encoding=args.goal_encoding,
+            goal_dropout_prob=args.goal_dropout_prob,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     elif args.incremental_command == "phase7-dagger-collect":
         collect_phase7_oracle_dagger_queries(
             config,
@@ -660,6 +674,18 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_branch.add_argument("--warmup-steps", type=int)
     phase7_branch.add_argument("--force", action="store_true")
     phase7_branch.set_defaults(func=incremental_cmd)
+    phase7_replay = incremental_sub.add_parser("phase7-replay-branch-eval")
+    add_config_arg(phase7_replay)
+    phase7_replay.add_argument("--latent-dim", type=int)
+    phase7_replay.add_argument("--variant", default=None)
+    phase7_replay.add_argument("--horizon-steps", type=int)
+    phase7_replay.add_argument("--action-chunk-steps", type=int)
+    phase7_replay.add_argument("--goal-encoding", choices=["absolute", "delta"], default=None)
+    phase7_replay.add_argument("--goal-dropout-prob", type=float)
+    phase7_replay.add_argument("--seed", type=int, default=0)
+    phase7_replay.add_argument("--episodes", type=int)
+    phase7_replay.add_argument("--force", action="store_true")
+    phase7_replay.set_defaults(func=incremental_cmd)
     for command in ["phase7-dagger-collect", "phase7-dagger-train", "phase7-dagger-eval"]:
         phase7_dagger = incremental_sub.add_parser(command)
         add_config_arg(phase7_dagger)
