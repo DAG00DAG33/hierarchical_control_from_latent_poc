@@ -6702,6 +6702,7 @@ def evaluate_phase7_replay_branch_oracle_low_level(
     seed: int = 0,
     episodes: int | None = None,
     dagger_iteration: int | None = None,
+    dagger_query_episodes: int | None = None,
     force: bool = False,
 ) -> Path:
     (
@@ -6746,9 +6747,13 @@ def evaluate_phase7_replay_branch_oracle_low_level(
             goal_dropout_prob=goal_dropout_prob,
             iteration=dagger_iteration,
             seed=seed,
+            query_episodes=dagger_query_episodes,
             force=False,
         )
-        checkpoint_label = f"dagger_iter{dagger_iteration}"
+        query_episode_count = int(
+            dagger_query_episodes or config.get("incremental.phase7.dagger_episodes", 200)
+        )
+        checkpoint_label = f"branch_dagger_iter{dagger_iteration}_e{query_episode_count}"
     results_dir = _phase7_results_dir(
         config,
         variant,
@@ -7541,6 +7546,7 @@ def train_phase7_oracle_dagger_low_level(
     goal_dropout_prob: float | None = None,
     iteration: int = 1,
     seed: int = 0,
+    query_episodes: int | None = None,
     force: bool = False,
 ) -> Path:
     set_seed(seed)
@@ -7570,7 +7576,10 @@ def train_phase7_oracle_dagger_low_level(
         goal_dropout_prob,
         seed,
     )
-    checkpoint_path = artifact_dir / f"oracle_low_level_dagger_iter{iteration}.pt"
+    query_episode_count = int(query_episodes or config.get("incremental.phase7.dagger_episodes", 200))
+    checkpoint_path = artifact_dir / (
+        f"oracle_low_level_branch_dagger_iter{iteration}_e{query_episode_count}.pt"
+    )
     if checkpoint_path.exists() and not force:
         console.print(f"Phase 7 oracle DAgger low-level policy exists: {checkpoint_path}")
         return checkpoint_path
@@ -7584,6 +7593,7 @@ def train_phase7_oracle_dagger_low_level(
         goal_dropout_prob=goal_dropout_prob,
         iteration=iteration,
         seed=seed,
+        episodes=query_episodes,
         force=False,
     )
     encoder_path = train_phase6_representation(
@@ -7714,6 +7724,7 @@ def train_phase7_oracle_dagger_low_level(
         "encoder_checkpoint": str(encoder_path),
         "action_norm": action_norm.state_dict(),
         "query_path": str(query_path),
+        "query_episodes": query_episode_count,
         "query_train_samples": int(len(query_train)),
         "query_validation_samples": int(len(query_val)),
         "query_repeats": repeats,
@@ -7730,7 +7741,7 @@ def train_phase7_oracle_dagger_low_level(
     }
     torch.save(payload, checkpoint_path)
     write_json(
-        artifact_dir / f"oracle_low_level_dagger_iter{iteration}_metrics.json",
+        artifact_dir / f"oracle_low_level_branch_dagger_iter{iteration}_e{query_episode_count}_metrics.json",
         {
             "variant": variant,
             "latent_dim": latent_dim,
@@ -7739,6 +7750,7 @@ def train_phase7_oracle_dagger_low_level(
             "goal_encoding": goal_encoding,
             "goal_dropout_prob": goal_dropout_prob,
             "iteration": iteration,
+            "query_episodes": query_episode_count,
             "validation_metrics": validation_metrics,
             "best_validation_mse": best_val,
             "query_path": str(query_path),
@@ -7760,6 +7772,7 @@ def evaluate_phase7_oracle_dagger_low_level(
     iteration: int = 1,
     seed: int = 0,
     episodes: int | None = None,
+    query_episodes: int | None = None,
     goal_mode: str = "all",
     force: bool = False,
 ) -> Path:
@@ -7789,6 +7802,7 @@ def evaluate_phase7_oracle_dagger_low_level(
         goal_dropout_prob=goal_dropout_prob,
         iteration=iteration,
         seed=seed,
+        query_episodes=query_episodes,
         force=force,
     )
     device = default_device()

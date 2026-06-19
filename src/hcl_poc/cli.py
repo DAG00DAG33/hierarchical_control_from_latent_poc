@@ -445,6 +445,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             episodes=args.episodes,
             dagger_iteration=args.dagger_iteration,
+            dagger_query_episodes=args.dagger_query_episodes,
             force=args.force,
         )
     elif args.incremental_command == "phase7-matched-flat-eval":
@@ -496,6 +497,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             goal_dropout_prob=args.goal_dropout_prob,
             iteration=args.iteration,
             seed=args.seed,
+            query_episodes=args.query_episodes,
             force=args.force,
         )
     elif args.incremental_command == "phase7-dagger-eval":
@@ -510,6 +512,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             iteration=args.iteration,
             seed=args.seed,
             episodes=args.episodes,
+            query_episodes=args.query_episodes,
             goal_mode=args.goal_mode,
             force=args.force,
         )
@@ -713,6 +716,7 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_replay.add_argument("--seed", type=int, default=0)
     phase7_replay.add_argument("--episodes", type=int)
     phase7_replay.add_argument("--dagger-iteration", type=int)
+    phase7_replay.add_argument("--dagger-query-episodes", type=int)
     phase7_replay.add_argument("--force", action="store_true")
     phase7_replay.set_defaults(func=incremental_cmd)
     phase7_flat = incremental_sub.add_parser("phase7-matched-flat-eval")
@@ -743,6 +747,8 @@ def build_parser() -> argparse.ArgumentParser:
         phase7_dagger.add_argument("--goal-dropout-prob", type=float)
         phase7_dagger.add_argument("--iteration", type=int, default=1)
         phase7_dagger.add_argument("--seed", type=int, default=0)
+        if command in {"phase7-dagger-train", "phase7-dagger-eval"}:
+            phase7_dagger.add_argument("--query-episodes", type=int)
         phase7_dagger.add_argument("--force", action="store_true")
         if command in {"phase7-dagger-collect", "phase7-dagger-eval"}:
             phase7_dagger.add_argument("--episodes", type=int)

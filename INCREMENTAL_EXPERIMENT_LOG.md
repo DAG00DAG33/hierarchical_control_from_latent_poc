@@ -1102,3 +1102,33 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   iteration with `phase7-replay-branch-eval --dagger-iteration 1`. The current
   `phase7-dagger-eval` path still evaluates DAgger checkpoints with nominal
   precomputed teacher goals and should not be used as the Phase 7F gate.
+
+### 2026-06-19 - P7-D11: Coherent branch-oracle DAgger train/eval smoke
+
+- **Artifact fix:** DAgger checkpoints are now branch-specific and include the
+  query budget:
+  `oracle_low_level_branch_dagger_iter{iteration}_e{query_episodes}.pt`. This
+  prevents old nominal-goal DAgger checkpoints and tiny smoke checkpoints from
+  being reused as full coherent Phase 7F results.
+- **CLI fix:** Added `--query-episodes` for `phase7-dagger-train` /
+  `phase7-dagger-eval`, and `--dagger-query-episodes` for
+  `phase7-replay-branch-eval`.
+- **Smoke train:** `phase7-dagger-train --latent-dim 256 --variant ae_recon
+  --horizon-steps 2 --action-chunk-steps 1 --goal-encoding delta --iteration 1
+  --query-episodes 2 --force`.
+- **Smoke replay-branch eval:** `phase7-replay-branch-eval --latent-dim 256
+  --variant ae_recon --horizon-steps 2 --action-chunk-steps 1 --goal-encoding
+  delta --dagger-iteration 1 --dagger-query-episodes 2 --episodes 2 --force`.
+
+| checkpoint | eval episodes | success | replay max error | failed replay fraction | teacher action MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| branch DAgger iter1 e2 | `2` | `1.00` | `0.0` | `0.0` | `0.0322` |
+
+- **Gate status:** This only validates end-to-end wiring for coherent 7F
+  branch-query collection, training, and replay-branch evaluation. It is not a
+  DAgger performance result because the query and eval budgets are intentionally
+  tiny.
+- **Next action:** Run a development-scale coherent branch DAgger iteration
+  with a modest query budget before spending on the full 200-episode collection.
+  Given the exact-replay cost observed here, a practical next budget is around
+  10-20 query episodes followed by a 20-50 episode replay-branch evaluation.
