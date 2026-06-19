@@ -27,9 +27,9 @@ identify its causal rollout source.
 
 | Item | Status |
 | --- | --- |
-| Active phase | Phase 7: oracle future-latent low-level policy |
-| Gate | Oracle future-latent interface should match the flat visual-flow baseline before high-level prediction |
-| Gate state | Phases 0-6 passed |
+| Active phase | Phase 6: latent representation capacity and objective study |
+| Gate | Encoder should preserve task-relevant state and support flat latent control before Phase 7 |
+| Gate state | Phases 0-5 passed; Phase 6 reopened for smaller-latent and WM-objective ablations |
 | Current blocker | None |
 | GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
 | Free disk at start | 113 GB |
@@ -583,7 +583,98 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   stricter 90% target by a small margin.
 - **Final/max normalized reward:** `0.637` / `0.700`.
 - **Held-out action MAE/RMSE:** `0.0355` / `0.0619`.
-- **Phase 6 conclusion:** The learned latent now preserves the task-relevant
-  state variables and can support a flat latent controller that retains most of
-  the direct-observation visual-flow performance. Proceed to Phase 7 oracle
-  future-latent low-level validation.
+- **Phase 6 conclusion at this point:** The learned 512D latent preserved the
+  task-relevant state variables and could support a flat latent controller that
+  retained most of the direct-observation visual-flow performance.
+- **Later amendment:** Phase 6 was reopened before Phase 7 to study whether
+  512D is unnecessarily large and whether the world-model objective helps the
+  encoder.
+
+### 2026-06-18 - P6-I02: Force flag propagation for representation probes
+
+- **Issue:** `phase6-probe --force` retrained probe heads but still reused an
+  existing encoder checkpoint because the force flag did not propagate into
+  `train_phase6_representation`.
+- **Impact:** Objective-ablation probes could silently compare stale encoders.
+- **Fix:** Pass `force` through `_phase6_representations` into
+  `train_phase6_representation`.
+- **Validation:** Re-ran the affected WM+reconstruction 512D probe after the
+  fix. The fresh result is used in the ablation table below.
+
+### 2026-06-18 - P6-S01: Reconstruction-only latent capacity sweep
+
+- **Hypothesis:** 512D may be larger than necessary; representation probes may
+  pass at much smaller dimensions, but closed-loop control may reveal the true
+  information threshold.
+- **Variant:** `ae_recon`, hidden width 1024, balanced DINO/proprio
+  reconstruction, zero world-model prediction loss.
+- **Dataset type:** Successful PPO `causal_dataset`, 1,800 train episodes and
+  200 validation episodes for encoder/control; separate 12,000-sample causal
+  probe dataset.
+- **Commands:** `phase6-probe --variant ae_recon --latent-dim {256,128,64,32,16}
+  --force`, `phase6-control-eval --variant ae_recon --latent-dim
+  {256,128,64,32,16} --force`, plus `phase6-dagger-eval` for 128D and 256D.
+- **Probe results:**
+
+| dim | obj x/y MAE m | yaw MAE rad | inv action MAE | reward MAE | contact AUROC |
+| --- | --- | --- | --- | --- | --- |
+| 512 | `0.0025/0.0027` | `0.0488` | `0.0183` | `0.0218` | `0.994` |
+| 256 | `0.0027/0.0028` | `0.0512` | `0.0179` | `0.0243` | `0.994` |
+| 128 | `0.0027/0.0029` | `0.0506` | `0.0192` | `0.0268` | `0.994` |
+| 64 | `0.0028/0.0031` | `0.0542` | `0.0228` | `0.0355` | `0.995` |
+| 32 | `0.0033/0.0035` | `0.0600` | `0.0286` | `0.0555` | `0.993` |
+| 16 | `0.0040/0.0041` | `0.0843` | `0.0342` | `0.0703` | `0.989` |
+
+- **Control results:**
+
+| dim | BC success | BC max reward | BC action MAE | DAgger success | DAgger max reward | DAgger action MAE |
+| --- | --- | --- | --- | --- | --- | --- |
+| 512 | `0.44` | `0.589` | `0.0322` | `0.59` | `0.700` | `0.0355` |
+| 256 | `0.53` | `0.651` | `0.0325` | `0.60` | `0.710` | `0.0367` |
+| 128 | `0.37` | `0.524` | `0.0332` | `0.50` | `0.628` | `0.0393` |
+| 64 | `0.27` | `0.458` | `0.0357` | - | - | - |
+| 32 | `0.28` | `0.453` | `0.0386` | - | - | - |
+| 16 | `0.12` | `0.306` | `0.0422` | - | - | - |
+
+- **Interpretation:** Static probes remain deceptively strong down to 64D and
+  formally pass even at 16D, but control-relevant information starts degrading
+  below 256D. The 128D encoder has good pose probes but loses enough
+  closed-loop information that one DAgger iteration reaches only 50/100. The
+  256D encoder is the smallest tested latent that matches or slightly exceeds
+  the 512D closed-loop result, reaching 60/100 after DAgger against the 66/100
+  direct visual-flow reference.
+- **Decision:** Use `ae_recon_z256` as the current Phase 6 default. Keep 512D
+  as a capacity reference, not the main representation.
+
+### 2026-06-18 - P6-S02: World-model objective ablation
+
+- **Hypothesis:** The action-conditioned world-model loss may improve latent
+  dynamics for hierarchical control, or it may hurt current-state information
+  needed by the low-level controller.
+- **Variants:**
+  - `wm_recon`: action-conditioned multi-horizon world-model loss plus balanced
+    reconstruction;
+  - `wm_norecon`: action-conditioned world-model loss only, no reconstruction.
+- **Important separation:** This is the encoder-training world model, which
+  takes actions as input. It is not the later hierarchical high-level model,
+  which should map current latent state to future latent state without actions.
+- **Probe results:**
+
+| variant | dim | obj x/y MAE m | yaw MAE rad | inv action MAE | reward MAE | contact AUROC | gate support |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ae_recon` | 512 | `0.0025/0.0027` | `0.0488` | `0.0183` | `0.0218` | `0.994` | pass |
+| `ae_recon` | 128 | `0.0027/0.0029` | `0.0506` | `0.0192` | `0.0268` | `0.994` | pass |
+| `wm_recon` | 512 | `0.0055/0.0058` | `0.1052` | `0.0503` | `0.1306` | `0.982` | pass |
+| `wm_norecon` | 512 | `0.0216/0.0185` | `0.3254` | `0.1716` | `0.3015` | `0.870` | fail |
+| `wm_recon` | 128 | `0.0075/0.0072` | `0.1430` | `0.0770` | `0.1809` | `0.971` | pass |
+| `wm_norecon` | 128 | `0.0193/0.0210` | `0.3330` | `0.1747` | `0.3090` | `0.764` | fail |
+
+- **Interpretation:** WM-only is not enough; it fails core pose/yaw/velocity
+  support at both 128D and 512D. Adding reconstruction makes the WM variant
+  usable by the formal gates, but it is consistently worse than
+  reconstruction-only AE on pose, yaw, inverse dynamics, and reward. Under the
+  current recipe, the action-conditioned temporal objective does not help the
+  encoder and appears to trade away current-state detail.
+- **Decision:** Do not move to Phase 7 with a WM-trained encoder. Continue
+  with reconstruction-only `ae_recon_z256` unless a later Phase 6 diagnostic
+  finds a concrete reason to revisit the WM objective.

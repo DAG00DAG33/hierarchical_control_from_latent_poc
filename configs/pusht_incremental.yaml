@@ -130,8 +130,8 @@ incremental:
   phase6:
     train_episodes: 1800
     validation_episodes: 200
-    latent_dims: [128, 256, 512]
-    default_variant: wm_recon
+    latent_dims: [16, 32, 64, 128, 256, 512]
+    default_variant: ae_recon
     hidden_dim: 1024
     batch_size: 512
     batches_per_epoch: 400

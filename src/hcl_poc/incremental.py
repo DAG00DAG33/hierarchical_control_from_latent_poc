@@ -3769,6 +3769,7 @@ def _phase6_representations(
     latent_dim: int | None,
     variant: str | None,
     seed: int,
+    force: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     if representation == "raw":
         train_episodes, _val_episodes, _metadata = _load_phase6_train_episodes(config)
@@ -3786,7 +3787,7 @@ def _phase6_representations(
         latent_dim=latent_dim,
         variant=variant,
         seed=seed,
-        force=False,
+        force=force,
     )
     device = default_device()
     encoder, checkpoint = _load_phase6_encoder(path, device)
@@ -4085,6 +4086,7 @@ def probe_phase6_representation(
         latent_dim,
         variant,
         seed,
+        force=force,
     )
     metrics = _phase6_train_probe_heads(
         config,
