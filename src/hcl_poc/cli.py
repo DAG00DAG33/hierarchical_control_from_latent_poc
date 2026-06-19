@@ -43,6 +43,8 @@ from hcl_poc.incremental import (
     run_phase0,
     run_phase7_branch_audit,
     run_phase11_comparison,
+    run_phase12_budget,
+    plot_phase12_sample_efficiency,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -750,6 +752,16 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             eval_seed_start=args.eval_seed_start,
         )
+    elif args.incremental_command == "phase12-run":
+        run_phase12_budget(
+            config,
+            n_trajectories=args.n_trajectories,
+            seed=args.seed,
+            episodes=args.episodes,
+            eval_seed_start=args.eval_seed_start,
+        )
+    elif args.incremental_command == "phase12-plot":
+        plot_phase12_sample_efficiency(config)
     else:
         raise ValueError(args.incremental_command)
 
@@ -1177,6 +1189,16 @@ def build_parser() -> argparse.ArgumentParser:
     phase11.add_argument("--episodes", type=int, default=100)
     phase11.add_argument("--eval-seed-start", type=int, default=1_200_000)
     phase11.set_defaults(func=incremental_cmd)
+    phase12_run = incremental_sub.add_parser("phase12-run")
+    add_config_arg(phase12_run)
+    phase12_run.add_argument("--n-trajectories", type=int, required=True)
+    phase12_run.add_argument("--seed", type=int, default=0)
+    phase12_run.add_argument("--episodes", type=int, default=100)
+    phase12_run.add_argument("--eval-seed-start", type=int, default=1_200_000)
+    phase12_run.set_defaults(func=incremental_cmd)
+    phase12_plot = incremental_sub.add_parser("phase12-plot")
+    add_config_arg(phase12_plot)
+    phase12_plot.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

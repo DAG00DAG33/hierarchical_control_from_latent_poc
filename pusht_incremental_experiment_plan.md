@@ -2470,7 +2470,11 @@ Test the thesis claim under controlled data budgets.
 
 For temporal and hierarchical methods, use nested subsets of the same causal trajectory dataset:
 
-$$N\in\{50,100,200,500,1000,2000\}$$
+$$N\in\{50,100,200,500,1000,1800\}$$
+
+The prepared causal dataset contains 2,000 successful trajectories. Keep the
+last 200 fixed as validation data at every budget, so the largest leakage-free
+training budget is 1,800 rather than 2,000.
 
 For one-step BC and DAgger diagnostics, additionally report the number of independent state queries.
 

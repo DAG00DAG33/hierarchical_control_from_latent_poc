@@ -11556,6 +11556,251 @@ def run_phase11_comparison(
     return output_path
 
 
+def _phase12_budget_config(config: Config, n_trajectories: int) -> Config:
+    raw = copy.deepcopy(config.raw)
+    raw["paths"]["incremental_artifact_dir"] = str(
+        config.path_value("paths.incremental_artifact_dir") / "phase12" / f"n{n_trajectories}"
+    )
+    raw["paths"]["incremental_results_dir"] = str(
+        config.path_value("paths.incremental_results_dir") / "phase12" / f"n{n_trajectories}"
+    )
+    raw["incremental"]["phase4"]["train_episodes"] = n_trajectories
+    raw["incremental"]["phase6"]["train_episodes"] = n_trajectories
+    return Config(raw=raw, path=config.path)
+
+
+def run_phase12_budget(
+    config: Config,
+    n_trajectories: int,
+    seed: int = 0,
+    episodes: int = 100,
+    eval_seed_start: int = 1_200_000,
+) -> Path:
+    budgets = [50, 100, 200, 500, 1000, 1800]
+    if n_trajectories not in budgets:
+        raise ValueError(f"Phase 12 trajectory budget must be one of {budgets}")
+    budget_config = _phase12_budget_config(config, n_trajectories)
+    output_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir") / "phase12" / f"n{n_trajectories}"
+    )
+    output_path = output_dir / "sample_efficiency_summary.json"
+    if output_path.exists():
+        console.print(f"Phase 12 budget summary exists: {output_path}")
+        return output_path
+
+    visual_bc_path = evaluate_phase4_visual_bc(
+        budget_config,
+        history=1,
+        architecture="concat",
+        seed=seed,
+        episodes=episodes,
+        eval_seed_start=eval_seed_start,
+    )
+    visual_flow_path = evaluate_phase5_visual_flow(
+        budget_config,
+        history=1,
+        architecture="concat",
+        seed=seed,
+        episodes=episodes,
+        eval_seed_start=eval_seed_start,
+    )
+    train_phase6_representation(
+        budget_config,
+        latent_dim=256,
+        variant="ae_recon",
+        seed=seed,
+        force=False,
+    )
+    train_phase7_oracle_low_level(
+        budget_config,
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        action_chunk_steps=1,
+        goal_encoding="delta",
+        goal_dropout_prob=0.0,
+        seed=seed,
+        force=False,
+    )
+    oracle_path = evaluate_phase7_replay_branch_oracle_low_level(
+        budget_config,
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        action_chunk_steps=1,
+        goal_encoding="delta",
+        goal_dropout_prob=0.0,
+        seed=seed,
+        episodes=episodes,
+        force=False,
+    )
+    train_phase8_deterministic_predictor(
+        budget_config,
+        history=1,
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        target_mode="absolute",
+        seed=seed,
+        force=False,
+    )
+    deterministic_path = evaluate_phase8_deterministic_hierarchy(
+        budget_config,
+        history=1,
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        target_mode="absolute",
+        seed=seed,
+        episodes=episodes,
+        force=False,
+    )
+    train_phase9_future_flow(
+        budget_config,
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        seed=seed,
+        force=False,
+    )
+    generative_path = evaluate_phase9_future_flow(
+        budget_config,
+        sample_mode="zero",
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        seed=seed,
+        episodes=episodes,
+        force=False,
+    )
+    train_episodes, _validation_episodes, _metadata = _load_phase4_episodes(budget_config)
+    transitions = int(sum(len(episode["actions"]) for episode in train_episodes))
+
+    import json
+
+    method_paths = {
+        "visual_bc": visual_bc_path,
+        "visual_flat_flow": visual_flow_path,
+        "oracle_hierarchy": oracle_path,
+        "deterministic_hierarchy": deterministic_path,
+        "generative_hierarchy": generative_path,
+    }
+    rows = []
+    for method, path in method_paths.items():
+        with path.open("r", encoding="utf-8") as f:
+            result = json.load(f)
+        closed = result["closed_loop"]
+        rows.append(
+            {
+                "method": method,
+                "source": str(path),
+                "success": float(closed["success"]),
+                "success_stderr": float(closed["success_stderr"]),
+                "final_reward": float(closed["final_reward"]),
+                "max_reward": float(closed["max_reward"]),
+                "episodes": int(closed["episodes"]),
+                "eval_seed_start": int(closed["seed_start"]),
+            }
+        )
+    payload = {
+        "phase": 12,
+        "n_trajectories": n_trajectories,
+        "causal_transitions": transitions,
+        "equivalent_behavior_seconds": transitions / float(config.get("control_freq", 20)),
+        "state_query_samples": 0,
+        "validation_trajectories": 200,
+        "policy_seed": seed,
+        "evaluation_episodes": episodes,
+        "evaluation_seed_start": eval_seed_start,
+        "rows": rows,
+        "artifact_root": str(budget_config.path_value("paths.incremental_artifact_dir")),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def plot_phase12_sample_efficiency(config: Config) -> Path:
+    import json
+    import matplotlib.pyplot as plt
+
+    budgets = [50, 100, 200, 500, 1000, 1800]
+    summaries = []
+    root = config.path_value("paths.incremental_results_dir") / "phase12"
+    for budget in budgets:
+        path = root / f"n{budget}" / "sample_efficiency_summary.json"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing Phase 12 budget result: {path}")
+        with path.open("r", encoding="utf-8") as f:
+            summaries.append(json.load(f))
+    methods = [row["method"] for row in summaries[0]["rows"]]
+    transitions = np.asarray([summary["causal_transitions"] for summary in summaries])
+    curves = {}
+    for method in methods:
+        values = []
+        errors = []
+        for summary in summaries:
+            row = next(item for item in summary["rows"] if item["method"] == method)
+            values.append(float(row["success"]))
+            errors.append(float(row["success_stderr"]))
+        success = np.asarray(values)
+        curves[method] = {
+            "success": values,
+            "success_stderr": errors,
+            "n50_transitions": (
+                int(transitions[np.flatnonzero(success >= 0.5)[0]])
+                if np.any(success >= 0.5)
+                else None
+            ),
+            "n70_transitions": (
+                int(transitions[np.flatnonzero(success >= 0.7)[0]])
+                if np.any(success >= 0.7)
+                else None
+            ),
+            "aulc_log_transitions": float(np.trapezoid(success, np.log(transitions))),
+        }
+    output_path = root / "sample_efficiency.json"
+    plot_path = root / "sample_efficiency.png"
+    payload = {
+        "phase": 12,
+        "trajectory_budgets": budgets,
+        "causal_transitions": transitions.tolist(),
+        "curves": curves,
+        "plot": str(plot_path),
+        "protocol": {
+            "training_seeds": 1,
+            "evaluation_episodes": 100,
+            "validation_trajectories": 200,
+            "training_seed_robustness_measured": False,
+        },
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    figure, axis = plt.subplots(figsize=(9, 6))
+    for method in methods:
+        axis.errorbar(
+            transitions,
+            curves[method]["success"],
+            yerr=curves[method]["success_stderr"],
+            marker="o",
+            capsize=3,
+            label=method.replace("_", " "),
+        )
+    axis.set_xscale("log")
+    axis.set_ylim(0.0, 1.0)
+    axis.set_xlabel("Causal training transitions")
+    axis.set_ylabel("Success rate")
+    axis.set_title("Push-T sample efficiency")
+    axis.grid(True, which="both", alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+    console.print(payload)
+    return output_path
+
+
 def sweep_phase8_deterministic_predictors(
     config: Config,
     latent_dim: int | None = None,
