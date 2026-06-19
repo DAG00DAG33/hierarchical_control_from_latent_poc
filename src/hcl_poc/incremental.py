@@ -5518,6 +5518,334 @@ def _phase7_condition(
     return np.concatenate([z, goal_part, prev_action_norm], axis=-1).astype(np.float32)
 
 
+def _phase7_privileged_yaw(state: np.ndarray) -> np.ndarray:
+    quat = state[..., 27:31]
+    return (2.0 * np.arctan2(quat[..., 3], quat[..., 0])).astype(np.float32)
+
+
+def _wrap_angle(angle: np.ndarray) -> np.ndarray:
+    return ((angle + np.pi) % (2.0 * np.pi) - np.pi).astype(np.float32)
+
+
+def _phase7_privileged_goal(
+    current_state: np.ndarray,
+    future_state: np.ndarray,
+    horizon_steps: int,
+    control_freq: int,
+) -> np.ndarray:
+    current = np.asarray(current_state, dtype=np.float32)
+    future = np.asarray(future_state, dtype=np.float32)
+    if current.shape[-1] != 31 or future.shape[-1] != 31:
+        raise ValueError(
+            f"Expected 31D PushT privileged state, got {current.shape[-1]} and {future.shape[-1]}"
+        )
+    dt = float(horizon_steps) / float(control_freq)
+    obj_xy = future[..., 24:26]
+    yaw = _phase7_privileged_yaw(future)
+    obj_vel_xy = (future[..., 24:26] - current[..., 24:26]) / dt
+    yaw_rate = _wrap_angle(yaw - _phase7_privileged_yaw(current)) / dt
+    tcp_pos = future[..., 14:17]
+    tcp_vel = (future[..., 14:17] - current[..., 14:17]) / dt
+    contact = (
+        np.linalg.norm(future[..., 14:16] - future[..., 24:26], axis=-1, keepdims=True)
+        < float(0.08)
+    ).astype(np.float32)
+    return np.concatenate(
+        [
+            obj_xy,
+            np.sin(yaw)[..., None].astype(np.float32),
+            np.cos(yaw)[..., None].astype(np.float32),
+            obj_vel_xy.astype(np.float32),
+            yaw_rate[..., None].astype(np.float32),
+            tcp_pos.astype(np.float32),
+            tcp_vel.astype(np.float32),
+            contact,
+        ],
+        axis=-1,
+    ).astype(np.float32)
+
+
+def _phase7_privileged_condition(
+    current_state: np.ndarray,
+    goal: np.ndarray | None,
+    prev_action_norm: np.ndarray,
+) -> np.ndarray:
+    pieces = [current_state.astype(np.float32)]
+    if goal is not None:
+        pieces.append(goal.astype(np.float32))
+    pieces.append(prev_action_norm.astype(np.float32))
+    return np.concatenate(pieces, axis=-1).astype(np.float32)
+
+
+def _phase7_privileged_checkpoint_dir(config: Config, horizon_steps: int, seed: int) -> Path:
+    return ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "phase7"
+        / "privileged_branch"
+        / f"k{horizon_steps}"
+        / f"seed{seed}"
+    )
+
+
+def _phase7_privileged_results_dir(config: Config, horizon_steps: int, seed: int) -> Path:
+    return ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "phase7"
+        / "privileged_branch"
+        / f"k{horizon_steps}"
+        / f"seed{seed}"
+    )
+
+
+def _load_phase7_privileged_episodes(
+    config: Config,
+    horizon_steps: int,
+) -> tuple[list[dict[str, np.ndarray]], list[dict[str, np.ndarray]], dict[str, Any]]:
+    dataset_path = collect_phase1_query_dataset(config, force=False)
+    subset = str(config.get("incremental.phase7.privileged_subset", "successful"))
+    train_episodes = int(config.get("incremental.phase7.privileged_train_episodes", 1800))
+    validation_episodes = int(config.get("incremental.phase7.privileged_validation_episodes", 200))
+    label_kind = str(config.get("incremental.phase7.privileged_label_kind", "deterministic_clipped"))
+    label_dataset = {
+        "deterministic_clipped": "teacher_clipped_actions",
+        "deterministic_raw": "teacher_raw_actions",
+    }.get(label_kind)
+    if label_dataset is None:
+        raise ValueError(f"Unknown privileged Phase 7 label kind: {label_kind}")
+    with h5py.File(dataset_path, "r") as h5:
+        keys = _phase1_episode_keys(h5, subset)
+        usable = [key for key in keys if len(h5[key]["teacher_clipped_actions"]) > horizon_steps]
+        required = train_episodes + validation_episodes
+        if len(usable) < required:
+            raise ValueError(
+                f"Phase 7 privileged subset '{subset}' has {len(usable)} usable episodes, "
+                f"requires {required}"
+            )
+        train_keys = usable[:train_episodes]
+        validation_keys = usable[-validation_episodes:]
+
+        def read(keys_to_read: list[str]) -> list[dict[str, np.ndarray]]:
+            episodes = []
+            for key in keys_to_read:
+                episodes.append(
+                    {
+                        "states": np.asarray(h5[key]["states"], dtype=np.float32),
+                        "actions": np.asarray(h5[key][label_dataset], dtype=np.float32),
+                    }
+                )
+            return episodes
+
+        train = read(train_keys)
+        validation = read(validation_keys)
+    metadata = {
+        "dataset_path": str(dataset_path),
+        "subset": subset,
+        "label_kind": label_kind,
+        "train_episodes": train_episodes,
+        "validation_episodes": validation_episodes,
+    }
+    return train, validation, metadata
+
+
+def _phase7_build_privileged_conditions(
+    episodes: list[dict[str, np.ndarray]],
+    action_norm: Standardizer,
+    horizon_steps: int,
+    control_freq: int,
+    include_goal: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    conditions: list[np.ndarray] = []
+    actions: list[np.ndarray] = []
+    action_dim = episodes[0]["actions"].shape[-1]
+    zero_prev = action_norm.transform(np.zeros((1, action_dim), dtype=np.float32))[0]
+    for episode in episodes:
+        states = episode["states"]
+        episode_actions = episode["actions"]
+        prev_actions = action_norm.transform(episode_actions)
+        for t in range(len(episode_actions) - horizon_steps):
+            prev_action = prev_actions[t - 1] if t > 0 else zero_prev
+            goal = (
+                _phase7_privileged_goal(states[t], states[t + horizon_steps], horizon_steps, control_freq)
+                if include_goal
+                else None
+            )
+            conditions.append(_phase7_privileged_condition(states[t], goal, prev_action))
+            actions.append(episode_actions[t])
+    if not conditions:
+        raise ValueError("No Phase 7 privileged samples were produced")
+    return np.stack(conditions).astype(np.float32), np.stack(actions).astype(np.float32)
+
+
+def _phase7_train_privileged_model(
+    config: Config,
+    name: str,
+    train_cond: np.ndarray,
+    train_actions: np.ndarray,
+    val_cond: np.ndarray,
+    val_actions: np.ndarray,
+    action_norm: Standardizer,
+    seed: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    set_seed(seed)
+    device = default_device()
+    cond_norm = Standardizer.fit(train_cond)
+    x_train = torch.from_numpy(cond_norm.transform(train_cond)).float()
+    y_train = torch.from_numpy(action_norm.transform(train_actions)).float()
+    loader = DataLoader(
+        TensorDataset(x_train, y_train),
+        batch_size=int(config.get("incremental.phase7.privileged_batch_size", 4096)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    hidden_dim = int(config.get("incremental.phase7.privileged_hidden_dim", 256))
+    model = MLP(train_cond.shape[-1], train_actions.shape[-1], hidden_dim, depth=4).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(config.get("incremental.phase7.privileged_lr", 3e-4))
+    )
+    x_val = torch.from_numpy(cond_norm.transform(val_cond)).to(device).float()
+    y_val = torch.from_numpy(action_norm.transform(val_actions)).to(device).float()
+    epochs = int(config.get("incremental.phase7.privileged_epochs", 100))
+    best_state = None
+    best_val = float("inf")
+    history = []
+    for epoch in trange(1, epochs + 1, desc=f"train phase7D {name}"):
+        model.train()
+        train_sum = 0.0
+        train_count = 0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            train_sum += float(loss.detach().cpu()) * len(x)
+            train_count += len(x)
+        model.eval()
+        with torch.inference_mode():
+            val_mse = float(torch.mean((model(x_val) - y_val) ** 2).cpu())
+        history.append({"epoch": epoch, "train_mse": train_sum / train_count, "validation_mse": val_mse})
+        if val_mse < best_val:
+            best_val = val_mse
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError(f"Phase 7D {name} training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    preds = []
+    with torch.inference_mode():
+        for start in range(0, len(val_cond), 8192):
+            x = torch.from_numpy(cond_norm.transform(val_cond[start : start + 8192])).to(device).float()
+            pred_norm = model(x).cpu().numpy()
+            preds.append(action_norm.inverse(pred_norm))
+    validation_metrics = _action_regression_metrics(np.concatenate(preds), val_actions)
+    payload = {
+        "model": best_state,
+        "cond_norm": cond_norm.state_dict(),
+        "cond_dim": int(train_cond.shape[-1]),
+        "action_dim": int(train_actions.shape[-1]),
+        "hidden_dim": hidden_dim,
+        "best_validation_mse": best_val,
+        "validation_metrics": validation_metrics,
+        "history": history,
+    }
+    summary = {
+        "best_validation_mse": best_val,
+        "validation_metrics": validation_metrics,
+        "train_samples": int(len(train_cond)),
+        "validation_samples": int(len(val_cond)),
+    }
+    return payload, summary
+
+
+def train_phase7_privileged_branch_baselines(
+    config: Config,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    horizon_steps = int(horizon_steps or config.get("incremental.phase7.horizon_steps", 2))
+    checkpoint_dir = _phase7_privileged_checkpoint_dir(config, horizon_steps, seed)
+    checkpoint_path = checkpoint_dir / "privileged_branch_baselines.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Phase 7D privileged baselines exist: {checkpoint_path}")
+        return checkpoint_path
+    train_episodes, val_episodes, data_metadata = _load_phase7_privileged_episodes(
+        config, horizon_steps
+    )
+    train_actions = np.concatenate([episode["actions"] for episode in train_episodes], axis=0)
+    action_norm = Standardizer.fit(train_actions)
+    control_freq = int(config.get("control_freq", 20))
+    flat_train_cond, flat_train_actions = _phase7_build_privileged_conditions(
+        train_episodes, action_norm, horizon_steps, control_freq, include_goal=False
+    )
+    flat_val_cond, flat_val_actions = _phase7_build_privileged_conditions(
+        val_episodes, action_norm, horizon_steps, control_freq, include_goal=False
+    )
+    goal_train_cond, goal_train_actions = _phase7_build_privileged_conditions(
+        train_episodes, action_norm, horizon_steps, control_freq, include_goal=True
+    )
+    goal_val_cond, goal_val_actions = _phase7_build_privileged_conditions(
+        val_episodes, action_norm, horizon_steps, control_freq, include_goal=True
+    )
+    timer = Timer()
+    flat_payload, flat_summary = _phase7_train_privileged_model(
+        config,
+        "flat",
+        flat_train_cond,
+        flat_train_actions,
+        flat_val_cond,
+        flat_val_actions,
+        action_norm,
+        seed,
+    )
+    goal_payload, goal_summary = _phase7_train_privileged_model(
+        config,
+        "branch-goal",
+        goal_train_cond,
+        goal_train_actions,
+        goal_val_cond,
+        goal_val_actions,
+        action_norm,
+        seed + 1000,
+    )
+    payload = {
+        "phase": "7D",
+        "method": "privileged_flat_and_structured_branch_goal",
+        "horizon_steps": horizon_steps,
+        "control_freq": control_freq,
+        "seed": seed,
+        "action_norm": action_norm.state_dict(),
+        "flat": flat_payload,
+        "branch_goal": goal_payload,
+        "data": {
+            **data_metadata,
+            "flat_train_samples": int(len(flat_train_cond)),
+            "flat_validation_samples": int(len(flat_val_cond)),
+            "goal_train_samples": int(len(goal_train_cond)),
+            "goal_validation_samples": int(len(goal_val_cond)),
+        },
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        checkpoint_dir / "privileged_branch_baselines_metrics.json",
+        {
+            "phase": "7D",
+            "horizon_steps": horizon_steps,
+            "seed": seed,
+            "flat": flat_summary,
+            "branch_goal": goal_summary,
+            "data": payload["data"],
+            "elapsed_s": payload["elapsed_s"],
+        },
+    )
+    console.print(f"Wrote Phase 7D privileged baselines: {checkpoint_path}")
+    return checkpoint_path
+
+
 class _Phase7OracleDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -6472,6 +6800,305 @@ def evaluate_phase7_replay_branch_oracle_low_level(
         "matched_replay_state_gate": metrics["replay_failed_step_fraction"] == 0.0,
         "oracle_gate_visual_flow": bool(metrics["success"] >= visual_success),
         "oracle_gate_90pct_visual_flow": bool(metrics["success"] >= 0.9 * visual_success),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def _phase7_load_privileged_model(
+    checkpoint: dict[str, Any],
+    key: str,
+    device: torch.device,
+) -> tuple[nn.Module, Standardizer]:
+    entry = checkpoint[key]
+    model = MLP(
+        int(entry["cond_dim"]),
+        int(entry["action_dim"]),
+        int(entry["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(entry["model"])
+    model.eval()
+    return model, Standardizer.from_state_dict(entry["cond_norm"])
+
+
+def _phase7_obs_state_tensor(obs: Any, device: torch.device) -> torch.Tensor:
+    if isinstance(obs, dict):
+        obs = obs["state"]
+    if isinstance(obs, torch.Tensor):
+        return obs.to(device).float()
+    return torch.as_tensor(obs, device=device, dtype=torch.float32)
+
+
+@torch.inference_mode()
+def _evaluate_phase7_privileged_mode(
+    config: Config,
+    checkpoint: dict[str, Any],
+    mode: str,
+    model: nn.Module,
+    cond_norm: Standardizer,
+    action_norm: Standardizer,
+    teacher: PPOAgent,
+    horizon_steps: int,
+    episodes: int,
+    seed_start: int,
+) -> dict[str, Any]:
+    if mode not in {"flat", "branch_goal"}:
+        raise ValueError(f"Unknown privileged Phase 7D mode: {mode}")
+    device = default_device()
+
+    def make_env(num_envs: int):
+        return gym.make(
+            config.get("env_id"),
+            obs_mode="state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=num_envs,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+
+    max_num_envs = min(
+        int(config.get("incremental.phase7.replay_branch_num_envs", 16)),
+        episodes,
+    )
+    action_dim = int(checkpoint["flat"]["action_dim"])
+    zero_action_norm = action_norm.transform(np.zeros((1, action_dim), dtype=np.float32))[0]
+    control_freq = int(checkpoint["control_freq"])
+    replay_state_tolerance = float(
+        config.get("incremental.phase7.replay_branch_state_tolerance", 1e-6)
+    )
+    max_episode_steps = int(config.get("env_max_episode_steps", 100))
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    teacher_action_maes: list[float] = []
+    action_saturation: list[float] = []
+    policy_latencies: list[float] = []
+    branch_latencies: list[float] = []
+    branch_latencies_per_env: list[float] = []
+    replay_errors: list[float] = []
+    failed_replay_steps = 0
+    branch_goal_norms: list[float] = []
+    progress = trange(episodes, desc=f"phase7D privileged {mode} eval")
+    for batch_start in range(0, episodes, max_num_envs):
+        num_envs = min(max_num_envs, episodes - batch_start)
+        reset_seeds = [seed_start + batch_start + i for i in range(num_envs)]
+        student_env = make_env(num_envs)
+        branch_env = make_env(num_envs) if mode == "branch_goal" else None
+        action_low_np = np.asarray(student_env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student_env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device, dtype=torch.float32)
+        action_high = torch.as_tensor(action_high_np, device=device, dtype=torch.float32)
+        try:
+            obs, _info = student_env.reset(seed=reset_seeds)
+            history: list[torch.Tensor] = []
+            prev_action_norm = np.repeat(zero_action_norm[None, :], num_envs, axis=0).astype(
+                np.float32
+            )
+            active = np.ones(num_envs, dtype=bool)
+            success_once = np.zeros(num_envs, dtype=bool)
+            batch_final_rewards = np.zeros(num_envs, dtype=np.float32)
+            batch_max_rewards = np.full(num_envs, -np.inf, dtype=np.float32)
+            batch_lengths = np.zeros(num_envs, dtype=np.int32)
+            for _step in range(max_episode_steps):
+                if not active.any():
+                    break
+                active_count = int(active.sum())
+                state_t = _phase7_obs_state_tensor(obs, device)
+                current_state = state_t.detach().cpu().numpy().astype(np.float32)
+                goal = None
+                if mode == "branch_goal":
+                    if branch_env is None:
+                        raise RuntimeError("Branch env missing for branch-goal evaluation")
+                    branch_timer = Timer()
+                    branch_obs, _branch_info = branch_env.reset(seed=reset_seeds)
+                    replay_done = torch.zeros(num_envs, device=device, dtype=torch.bool)
+                    for action_history in history:
+                        branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                            branch_env.step(action_history)
+                        )
+                        replay_done = replay_done | torch.logical_or(branch_term, branch_trunc).view(-1)
+                    state_errors = torch.max(
+                        torch.abs(
+                            student_env.unwrapped.get_state() - branch_env.unwrapped.get_state()
+                        ),
+                        dim=1,
+                    ).values
+                    state_errors_np = state_errors.detach().cpu().numpy()
+                    replay_errors.extend(float(x) for x in state_errors_np[active])
+                    replay_done_np = replay_done.detach().cpu().numpy().astype(bool)
+                    failed_replay_steps += int(
+                        np.sum(active & (replay_done_np | (state_errors_np > replay_state_tolerance)))
+                    )
+                    for _ in range(horizon_steps):
+                        teacher_action = torch.clamp(
+                            teacher.actor_mean(_phase7_obs_state_tensor(branch_obs, device)),
+                            action_low,
+                            action_high,
+                        )
+                        branch_obs, _branch_reward, branch_term, branch_trunc, _branch_info = (
+                            branch_env.step(teacher_action)
+                        )
+                        if bool(torch.all(torch.logical_or(branch_term, branch_trunc))):
+                            break
+                    branch_elapsed = branch_timer.elapsed()
+                    branch_latencies.append(branch_elapsed)
+                    branch_latencies_per_env.append(branch_elapsed / active_count)
+                    future_state = _phase7_obs_state_tensor(branch_obs, device).detach().cpu().numpy()
+                    goal = _phase7_privileged_goal(
+                        current_state,
+                        future_state,
+                        horizon_steps,
+                        control_freq,
+                    )
+                    branch_goal_norms.extend(np.linalg.norm(goal[active], axis=-1).tolist())
+
+                policy_timer = Timer()
+                cond = _phase7_privileged_condition(current_state, goal, prev_action_norm)
+                cond_t = torch.from_numpy(cond_norm.transform(cond)).to(device).float()
+                raw_action = action_norm.inverse(model(cond_t).cpu().numpy()).astype(np.float32)
+                policy_latencies.append(policy_timer.elapsed() / active_count)
+                teacher_now = torch.clamp(
+                    teacher.actor_mean(state_t),
+                    action_low,
+                    action_high,
+                ).cpu().numpy().astype(np.float32)
+                teacher_action_maes.extend(
+                    np.mean(np.abs(raw_action[active] - teacher_now[active]), axis=-1).tolist()
+                )
+                action_saturation.extend(
+                    np.any((raw_action[active] < action_low_np) | (raw_action[active] > action_high_np), axis=-1)
+                    .astype(np.float32)
+                    .tolist()
+                )
+                action_t = torch.from_numpy(raw_action).to(device).float()
+                if bool(config.get("policy.clip_actions_to_env_space", True)):
+                    action_t = torch.clamp(action_t, action_low, action_high)
+                action_t[~torch.from_numpy(active).to(device)] = 0.0
+                obs, reward, terminated, truncated, info = student_env.step(action_t)
+                history.append(action_t.detach().clone())
+                prev_action_norm = action_norm.transform(action_t.detach().cpu().numpy().astype(np.float32))
+                reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+                batch_final_rewards[active] = reward_np[active]
+                batch_max_rewards[active] = np.maximum(batch_max_rewards[active], reward_np[active])
+                batch_lengths[active] += 1
+                if "success" in info:
+                    success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
+                done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(bool)
+                newly_done = active & done
+                if np.any(newly_done):
+                    progress.update(int(newly_done.sum()))
+                    active[newly_done] = False
+            if np.any(active):
+                progress.update(int(active.sum()))
+            successes.extend(float(x) for x in success_once)
+            final_rewards.extend(float(x) for x in batch_final_rewards)
+            max_rewards.extend(float(x) for x in batch_max_rewards)
+            episode_lengths.extend(int(x) for x in batch_lengths)
+        finally:
+            student_env.close()
+            if branch_env is not None:
+                branch_env.close()
+    progress.close()
+    return {
+        "success": float(np.mean(successes)),
+        "success_stderr": float(np.std(successes) / np.sqrt(len(successes))),
+        "final_reward": float(np.mean(final_rewards)),
+        "max_reward": float(np.mean(max_rewards)),
+        "mean_episode_length": float(np.mean(episode_lengths)),
+        "teacher_action_mae": float(np.mean(teacher_action_maes)) if teacher_action_maes else 0.0,
+        "action_saturation_rate": float(np.mean(action_saturation)) if action_saturation else 0.0,
+        "policy_latency_s": float(np.mean(policy_latencies)) if policy_latencies else 0.0,
+        "branch_generation_latency_s": float(np.mean(branch_latencies)) if branch_latencies else 0.0,
+        "branch_generation_latency_per_env_s": (
+            float(np.mean(branch_latencies_per_env)) if branch_latencies_per_env else 0.0
+        ),
+        "replay_current_state_error_mean": float(np.mean(replay_errors)) if replay_errors else 0.0,
+        "replay_current_state_error_max": float(np.max(replay_errors)) if replay_errors else 0.0,
+        "replay_failed_step_fraction": float(failed_replay_steps / max(1, len(replay_errors))),
+        "branch_goal_l2": float(np.mean(branch_goal_norms)) if branch_goal_norms else 0.0,
+        "episodes": episodes,
+        "num_envs": max_num_envs,
+        "seed_start": seed_start,
+    }
+
+
+def evaluate_phase7_privileged_branch_baselines(
+    config: Config,
+    horizon_steps: int | None = None,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    horizon_steps = int(horizon_steps or config.get("incremental.phase7.horizon_steps", 2))
+    checkpoint_path = train_phase7_privileged_branch_baselines(
+        config,
+        horizon_steps=horizon_steps,
+        seed=seed,
+        force=False,
+    )
+    eval_episodes = int(episodes or config.get("incremental.phase7.privileged_eval_episodes", 50))
+    results_dir = _phase7_privileged_results_dir(config, horizon_steps, seed)
+    output_path = results_dir / f"privileged_branch_baselines_eval_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Phase 7D privileged eval exists: {output_path}")
+        return output_path
+    device = default_device()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    flat_model, flat_cond_norm = _phase7_load_privileged_model(checkpoint, "flat", device)
+    goal_model, goal_cond_norm = _phase7_load_privileged_model(checkpoint, "branch_goal", device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    seed_start = int(config.get("incremental.phase7.replay_branch_seed", 1_200_000))
+    flat = _evaluate_phase7_privileged_mode(
+        config,
+        checkpoint,
+        "flat",
+        flat_model,
+        flat_cond_norm,
+        action_norm,
+        teacher,
+        horizon_steps,
+        eval_episodes,
+        seed_start,
+    )
+    branch_goal = _evaluate_phase7_privileged_mode(
+        config,
+        checkpoint,
+        "branch_goal",
+        goal_model,
+        goal_cond_norm,
+        action_norm,
+        teacher,
+        horizon_steps,
+        eval_episodes,
+        seed_start,
+    )
+    payload = {
+        "phase": "7D",
+        "method": "privileged_structured_branch_oracle_baseline",
+        "horizon_steps": horizon_steps,
+        "seed": seed,
+        "checkpoint": str(checkpoint_path),
+        "closed_loop": {
+            "flat": flat,
+            "branch_goal": branch_goal,
+        },
+        "validation_action_metrics": {
+            "flat": checkpoint["flat"]["validation_metrics"],
+            "branch_goal": checkpoint["branch_goal"]["validation_metrics"],
+        },
+        "gate_within_flat_5pp": bool(branch_goal["success"] >= flat["success"] - 0.05),
+        "preferred_branch_success_gate": bool(branch_goal["success"] >= 0.80),
+        "matched_replay_state_gate": branch_goal["replay_failed_step_fraction"] == 0.0,
         "metadata": _runtime_metadata(config),
     }
     write_json(output_path, payload)

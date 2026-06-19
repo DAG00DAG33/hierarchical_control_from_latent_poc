@@ -27,6 +27,7 @@ from hcl_poc.incremental import (
     evaluate_phase6_latent_flow,
     evaluate_phase7_oracle_low_level,
     evaluate_phase7_oracle_dagger_low_level,
+    evaluate_phase7_privileged_branch_baselines,
     evaluate_phase7_replay_branch_oracle_low_level,
     probe_phase6_representation,
     probe_phase4_visual_history,
@@ -43,6 +44,7 @@ from hcl_poc.incremental import (
     train_phase6_representation,
     train_phase7_oracle_low_level,
     train_phase7_oracle_dagger_low_level,
+    train_phase7_privileged_branch_baselines,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -443,6 +445,21 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "phase7-priv-train":
+        train_phase7_privileged_branch_baselines(
+            config,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "phase7-priv-eval":
+        evaluate_phase7_privileged_branch_baselines(
+            config,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     elif args.incremental_command == "phase7-dagger-collect":
         collect_phase7_oracle_dagger_queries(
             config,
@@ -686,6 +703,15 @@ def build_parser() -> argparse.ArgumentParser:
     phase7_replay.add_argument("--episodes", type=int)
     phase7_replay.add_argument("--force", action="store_true")
     phase7_replay.set_defaults(func=incremental_cmd)
+    for command in ["phase7-priv-train", "phase7-priv-eval"]:
+        phase7_priv = incremental_sub.add_parser(command)
+        add_config_arg(phase7_priv)
+        phase7_priv.add_argument("--horizon-steps", type=int)
+        phase7_priv.add_argument("--seed", type=int, default=0)
+        phase7_priv.add_argument("--force", action="store_true")
+        if command == "phase7-priv-eval":
+            phase7_priv.add_argument("--episodes", type=int)
+        phase7_priv.set_defaults(func=incremental_cmd)
     for command in ["phase7-dagger-collect", "phase7-dagger-train", "phase7-dagger-eval"]:
         phase7_dagger = incremental_sub.add_parser(command)
         add_config_arg(phase7_dagger)

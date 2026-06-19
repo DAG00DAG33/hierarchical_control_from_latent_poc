@@ -1001,3 +1001,37 @@ Use 50-100 episodes for phase gates, debugging, and model selection. Reserve
   implement the privileged structured branch-oracle baseline first, then the
   matched latent flat/residual branch controllers. Keep final 500-episode
   evaluation only for selected methods.
+
+### 2026-06-19 - P7-D08: Privileged structured branch-oracle baseline
+
+- **Implementation:** Added `phase7-priv-train` and `phase7-priv-eval`.
+  Phase 7D now trains two matched privileged MLP baselines from successful
+  Phase 1 teacher episodes:
+  - flat privileged: `[s_t, a_{t-1}] -> a_t`;
+  - structured branch-goal: `[s_t, g_{t+k}^{priv}, a_{t-1}] -> a_t`.
+- **Structured goal:** `g_priv` contains future T-block xy, sin/cos yaw,
+  finite-difference T-block xy/yaw velocity, future TCP position,
+  finite-difference TCP velocity, and a simple TCP/object contact indicator.
+  During closed-loop evaluation the future state is generated online by the
+  exact replay branch oracle from the student's actual current state.
+- **Run:** `phase7-priv-eval --horizon-steps 2 --episodes 50 --force`.
+
+| policy | success | final reward | max reward | teacher action MAE | replay max error | failed replay fraction | branch latency/env |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| privileged flat | `0.26` | `0.438` | `0.459` | `0.172` | `0.0` | `0.0` | n/a |
+| privileged branch goal | `0.62` | `0.735` | `0.738` | `0.049` | `0.0` | `0.0` | `0.210 s` |
+
+- **Validation action MAE:** flat `0.0543`; branch-goal `0.0397`.
+- **Gate status:** The formal Phase 7D relative gate passes on this
+  development run: branch-goal success is above flat success minus 5 pp.
+  The preferred absolute target does not pass yet (`0.62 < 0.80`).
+- **Interpretation:** Privileged future-state conditioning is not the bottleneck
+  in the same way the old nominal-oracle latent test suggested. A locally
+  reachable branch goal substantially improves the privileged controller here.
+  The weak flat privileged MLP is also a warning: the initial Phase 7D dataset
+  only uses successful nominal teacher states, not learner/recovery states, so
+  the flat baseline is not yet a strong matched privileged teacher.
+- **Next action:** Move to Phase 7E, but keep Phase 7D open. The next
+  privileged improvements to test before final gating are adding learner/recovery
+  states and adding the residual privileged controller initialized around the
+  flat policy.

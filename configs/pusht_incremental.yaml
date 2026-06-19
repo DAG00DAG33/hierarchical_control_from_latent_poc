@@ -204,3 +204,12 @@ incremental:
     replay_branch_num_envs: 16
     replay_branch_seed: 1200000
     replay_branch_state_tolerance: 0.000001
+    privileged_subset: successful
+    privileged_label_kind: deterministic_clipped
+    privileged_train_episodes: 1800
+    privileged_validation_episodes: 200
+    privileged_hidden_dim: 256
+    privileged_batch_size: 4096
+    privileged_epochs: 100
+    privileged_lr: 0.0003
+    privileged_eval_episodes: 50
