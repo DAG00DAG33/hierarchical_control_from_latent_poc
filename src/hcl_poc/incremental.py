@@ -6509,13 +6509,21 @@ def _phase7_encode_oracle_frame_sequences(
 def _phase7_visual_flow_success(config: Config, seed: int) -> float:
     import json
 
-    visual_flow_path = (
+    result_dir = (
         config.path_value("paths.incremental_results_dir")
         / "phase5"
         / "concat_h1"
         / f"seed{seed}"
-        / "visual_flow.json"
     )
+    visual_flow_path = result_dir / "visual_flow.json"
+    if not visual_flow_path.exists():
+        evaluated_paths = sorted(result_dir.glob("visual_flow_eval_seed*_*.json"))
+        if len(evaluated_paths) != 1:
+            raise FileNotFoundError(
+                "Expected visual_flow.json or exactly one seed-specific visual flow result in "
+                f"{result_dir}, found {len(evaluated_paths)}"
+            )
+        visual_flow_path = evaluated_paths[0]
     with visual_flow_path.open("r", encoding="utf-8") as f:
         return float(json.load(f)["closed_loop"]["success"])
 
