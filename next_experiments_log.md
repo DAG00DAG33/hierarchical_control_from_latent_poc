@@ -341,3 +341,24 @@ State-query data is always reported separately from causal transitions.
   mixed-25 as the only recovery-data candidate for later matched hierarchy
   tests; do not spend hierarchy/flow budget on mixed-50 or recovery-heavy
   unless a later representation diagnostic provides a specific reason.
+
+## 2026-06-20 - E-G01: AE/VAE/raw goal-geometry audit
+
+- **Data:** Existing fixed 12,000-state Phase 6 probe corpus. Geometry uses
+  20,000 random state pairs and 500 nearest-neighbor queries against 3,000
+  references. Latent dimensions are standardized before Euclidean comparison,
+  matching downstream condition normalization.
+- **Pair geometry:** Object-XY Spearman correlation is `0.627/0.704/0.713`
+  for raw/AE/VAE; TCP-XY is `0.796/0.701/0.673`; teacher-action distance is
+  `0.579/0.628/0.621`. VAE is smoother for object state, while raw DINO is most
+  direct for TCP and AE aligns best with action differences.
+- **Neighborhood control consistency:** Teacher-action MAE of nearest states is
+  `0.1007` raw, `0.0671` AE, and `0.0774` VAE. Contact match is 92.6%, 94.8%,
+  and 93.8%. AE is the strongest local control neighborhood.
+- **Interpolation:** VAE decoded interpolation has lower linear-reference MSE
+  (`0.0459`) than AE (`0.0556`), but existing matched latent BC succeeds at
+  only `0.37` for VAE versus `0.53` for AE.
+- **Decision:** Keep AE-256 for current-state compression, but do not use raw
+  AE subtraction as the preferred goal interface. Carry forward the compact
+  time-conditioned TCP endpoint/effect interface validated in Phase C. Full
+  interpretation is in `representation_geometry_report.md`.

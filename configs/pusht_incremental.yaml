@@ -307,3 +307,8 @@ pre_rl:
     eval_episodes: 100
     eval_num_envs: 32
     eval_seed_start: 1820000
+  phase_e:
+    seed: 1900000
+    pair_samples: 20000
+    nearest_references: 3000
+    nearest_queries: 500

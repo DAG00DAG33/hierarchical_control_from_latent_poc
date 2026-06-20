@@ -10288,6 +10288,247 @@ def evaluate_pre_rl_phase_d_visual_bc(
     return output_path
 
 
+def _pre_rl_rank_correlation(x: np.ndarray, y: np.ndarray) -> float:
+    x_rank = np.empty_like(x, dtype=np.float64)
+    y_rank = np.empty_like(y, dtype=np.float64)
+    x_rank[np.argsort(x)] = np.arange(len(x), dtype=np.float64)
+    y_rank[np.argsort(y)] = np.arange(len(y), dtype=np.float64)
+    return float(np.corrcoef(x_rank, y_rank)[0, 1])
+
+
+@torch.inference_mode()
+def analyze_pre_rl_phase_e_geometry(config: Config) -> Path:
+    import csv
+    import matplotlib.pyplot as plt
+
+    probe_path = collect_phase6_probe_dataset(config, force=False)
+    with np.load(probe_path) as probe:
+        inputs = np.asarray(probe["inputs"], dtype=np.float32)
+        next_inputs = np.asarray(probe["next_inputs"], dtype=np.float32)
+        labels = np.asarray(probe["labels"], dtype=np.float32)
+        next_labels = np.asarray(probe["next_labels"], dtype=np.float32)
+        actions = np.asarray(probe["actions"], dtype=np.float32)
+        contact = np.asarray(probe["contact"], dtype=np.float32).reshape(-1)
+    device = default_device()
+    rng = np.random.default_rng(int(config.get("pre_rl.phase_e.seed", 1_900_000)))
+    variants = [
+        ("raw_dino_proprio", None),
+        (
+            "ae_recon_z256",
+            config.path_value("paths.incremental_artifact_dir")
+            / "phase6"
+            / "ae_recon_z256"
+            / "seed0"
+            / "encoder.pt",
+        ),
+        (
+            "vae_recon_z256",
+            config.path_value("paths.incremental_artifact_dir")
+            / "phase6"
+            / "vae_recon_z256"
+            / "seed0"
+            / "encoder.pt",
+        ),
+    ]
+    pair_count = int(config.get("pre_rl.phase_e.pair_samples", 20_000))
+    left = rng.integers(0, len(inputs), size=pair_count)
+    right = rng.integers(0, len(inputs), size=pair_count)
+    object_xy_distance = np.linalg.norm(labels[left, :2] - labels[right, :2], axis=-1)
+    yaw_distance = np.abs(
+        _wrap_angle(labels[left, 2] - labels[right, 2])
+    )
+    tcp_distance = np.linalg.norm(labels[left, 6:8] - labels[right, 6:8], axis=-1)
+    action_distance = np.linalg.norm(actions[left] - actions[right], axis=-1)
+    rows = []
+    root = ensure_dir(config.path_value("paths.incremental_results_dir") / "pre_rl" / "phase_e")
+    for name, checkpoint_path in variants:
+        decoder = None
+        checkpoint: dict[str, Any] | None = None
+        if checkpoint_path is None:
+            representation = inputs
+            next_representation = next_inputs
+            kl_mean = None
+            reconstruction_mse = None
+        else:
+            encoder, checkpoint = _load_phase6_encoder(checkpoint_path, device)
+            frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+
+            def encode(values: np.ndarray) -> np.ndarray:
+                outputs = []
+                normalized = frame_norm.transform(values)
+                for start in range(0, len(values), 2048):
+                    outputs.append(
+                        encoder(
+                            torch.from_numpy(normalized[start : start + 2048])
+                            .to(device)
+                            .float()
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                return np.concatenate(outputs).astype(np.float32)
+
+            representation = encode(inputs)
+            next_representation = encode(next_inputs)
+            kl_mean = None
+            if isinstance(encoder, VariationalObservationEncoder):
+                normalized = frame_norm.transform(inputs)
+                kl_values = []
+                for start in range(0, len(inputs), 2048):
+                    mean, logvar = encoder.encode_stats(
+                        torch.from_numpy(normalized[start : start + 2048]).to(device).float()
+                    )
+                    kl_values.append(
+                        (-0.5 * (1.0 + logvar - mean.square() - logvar.exp()).mean(dim=-1))
+                        .cpu()
+                        .numpy()
+                    )
+                kl_mean = float(np.mean(np.concatenate(kl_values)))
+            reconstruction_mse = None
+            if checkpoint.get("decoder") is not None:
+                decoder = MLP(
+                    int(checkpoint["latent_dim"]),
+                    int(checkpoint["input_dim"]),
+                    int(checkpoint["hidden_dim"]),
+                    depth=3,
+                ).to(device)
+                decoder.load_state_dict(checkpoint["decoder"])
+                decoder.eval()
+                interpolation_indices = rng.choice(len(inputs), size=(256, 2), replace=False)
+                alpha = np.asarray([0.25, 0.5, 0.75], dtype=np.float32)
+                z0 = representation[interpolation_indices[:, 0]]
+                z1 = representation[interpolation_indices[:, 1]]
+                interpolated = (
+                    z0[:, None, :] * (1.0 - alpha[None, :, None])
+                    + z1[:, None, :] * alpha[None, :, None]
+                ).reshape(-1, representation.shape[-1])
+                decoded = decoder(torch.from_numpy(interpolated).to(device).float()).cpu().numpy()
+                normalized_inputs = frame_norm.transform(inputs)
+                x0 = normalized_inputs[interpolation_indices[:, 0]]
+                x1 = normalized_inputs[interpolation_indices[:, 1]]
+                linear_target = (
+                    x0[:, None, :] * (1.0 - alpha[None, :, None])
+                    + x1[:, None, :] * alpha[None, :, None]
+                ).reshape(decoded.shape)
+                reconstruction_mse = float(np.mean((decoded - linear_target) ** 2))
+
+        representation_std = representation.std(axis=0)
+        standardized = (representation - representation.mean(axis=0)) / np.maximum(
+            representation_std, 1e-6
+        )
+        next_standardized = (next_representation - representation.mean(axis=0)) / np.maximum(
+            representation_std, 1e-6
+        )
+        latent_pair_distance = np.linalg.norm(
+            standardized[left] - standardized[right], axis=-1
+        )
+        transition_distance = np.linalg.norm(next_standardized - standardized, axis=-1)
+        object_transition = np.linalg.norm(next_labels[:, :2] - labels[:, :2], axis=-1)
+        tcp_transition = np.linalg.norm(next_labels[:, 6:8] - labels[:, 6:8], axis=-1)
+
+        reference_count = int(config.get("pre_rl.phase_e.nearest_references", 3000))
+        query_count = int(config.get("pre_rl.phase_e.nearest_queries", 500))
+        reference = standardized[:reference_count]
+        query_start = reference_count
+        query = standardized[query_start : query_start + query_count]
+        nearest_indices = []
+        for start in range(0, len(query), 128):
+            distances = torch.cdist(
+                torch.from_numpy(query[start : start + 128]).to(device).float(),
+                torch.from_numpy(reference).to(device).float(),
+            )
+            nearest_indices.append(torch.argmin(distances, dim=1).cpu().numpy())
+        nearest = np.concatenate(nearest_indices)
+        query_indices = np.arange(query_start, query_start + query_count)
+        row = {
+            "representation": name,
+            "dimension": int(representation.shape[-1]),
+            "active_dimensions_std_gt_0_1": int(np.sum(representation_std > 0.1)),
+            "vae_kl_mean_per_dimension": kl_mean,
+            "decoded_interpolation_linear_mse": reconstruction_mse,
+            "pair_object_xy_spearman": _pre_rl_rank_correlation(
+                latent_pair_distance, object_xy_distance
+            ),
+            "pair_object_yaw_spearman": _pre_rl_rank_correlation(
+                latent_pair_distance, yaw_distance
+            ),
+            "pair_tcp_xy_spearman": _pre_rl_rank_correlation(
+                latent_pair_distance, tcp_distance
+            ),
+            "pair_teacher_action_spearman": _pre_rl_rank_correlation(
+                latent_pair_distance, action_distance
+            ),
+            "transition_object_xy_spearman": _pre_rl_rank_correlation(
+                transition_distance, object_transition
+            ),
+            "transition_tcp_xy_spearman": _pre_rl_rank_correlation(
+                transition_distance, tcp_transition
+            ),
+            "transition_action_effort_spearman": _pre_rl_rank_correlation(
+                transition_distance, np.linalg.norm(actions, axis=-1)
+            ),
+            "nearest_object_xy_error_m": float(
+                np.mean(np.linalg.norm(labels[query_indices, :2] - labels[nearest, :2], axis=-1))
+            ),
+            "nearest_object_yaw_error_rad": float(
+                np.mean(np.abs(_wrap_angle(labels[query_indices, 2] - labels[nearest, 2])))
+            ),
+            "nearest_tcp_xy_error_m": float(
+                np.mean(np.linalg.norm(labels[query_indices, 6:8] - labels[nearest, 6:8], axis=-1))
+            ),
+            "nearest_teacher_action_mae": float(
+                np.mean(np.abs(actions[query_indices] - actions[nearest]))
+            ),
+            "nearest_contact_match": float(np.mean(contact[query_indices] == contact[nearest])),
+        }
+        rows.append(row)
+
+    csv_path = root / "representation_geometry.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    plot_path = root / "representation_geometry.png"
+    metrics = [
+        "pair_object_xy_spearman",
+        "pair_tcp_xy_spearman",
+        "pair_teacher_action_spearman",
+        "transition_action_effort_spearman",
+    ]
+    x = np.arange(len(metrics))
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    width = 0.25
+    for index, row in enumerate(rows):
+        axis.bar(
+            x + (index - 1) * width,
+            [row[metric] for metric in metrics],
+            width=width,
+            label=row["representation"],
+        )
+    axis.set_xticks(x, [metric.replace("_spearman", "").replace("_", " ") for metric in metrics])
+    axis.set_ylabel("Spearman correlation")
+    axis.set_title("Representation geometry versus physical/control distance")
+    axis.grid(axis="y", alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+    payload = {
+        "phase": "E3",
+        "experiment": "representation_goal_geometry",
+        "probe_dataset": str(probe_path),
+        "pair_samples": pair_count,
+        "rows": rows,
+        "csv": str(csv_path),
+        "plot": str(plot_path),
+        "metadata": _runtime_metadata(config),
+    }
+    output_path = root / "representation_geometry.json"
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
 @torch.inference_mode()
 def collect_phase7_oracle_dagger_queries(
     config: Config,

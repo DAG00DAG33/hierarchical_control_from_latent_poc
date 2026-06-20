@@ -57,6 +57,7 @@ from hcl_poc.incremental import (
     create_pre_rl_phase_d_manifests,
     train_pre_rl_phase_d_visual_bc,
     evaluate_pre_rl_phase_d_visual_bc,
+    analyze_pre_rl_phase_e_geometry,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -841,6 +842,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "pre-rl-e-geometry":
+        analyze_pre_rl_phase_e_geometry(config)
     else:
         raise ValueError(args.incremental_command)
 
@@ -1356,6 +1359,9 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_d_eval_visual_bc.add_argument("--episodes", type=int)
     pre_rl_d_eval_visual_bc.add_argument("--force", action="store_true")
     pre_rl_d_eval_visual_bc.set_defaults(func=incremental_cmd)
+    pre_rl_e_geometry = incremental_sub.add_parser("pre-rl-e-geometry")
+    add_config_arg(pre_rl_e_geometry)
+    pre_rl_e_geometry.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)
