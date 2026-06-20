@@ -275,3 +275,10 @@ pre_rl:
     eval_episodes: 200
     oracle_eval_episodes: 50
     eval_seed_start: 1500000
+  phase_b:
+    horizons: [2, 5, 10, 20]
+    goal_types: [full, robot, tcp, object, object_pose]
+    policy_seed: 0
+    smoke_eval_episodes: 20
+    development_eval_episodes: 100
+    eval_seed_start: 1600000

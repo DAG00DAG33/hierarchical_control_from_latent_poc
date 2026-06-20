@@ -145,3 +145,30 @@ State-query data is always reported separately from causal transitions.
 - **Remaining Phase A deliverable:** Representative rollout videos will be
   generated with the shared pre-RL video recorder alongside Phase B videos so
   success/failure selection and rendering are implemented once.
+
+## 2026-06-20 - B-I01: Oracle-information decomposition implementation
+
+- **Objective:** Determine whether oracle performance comes from a desired
+  future object effect, future robot/TCP motion, or both.
+- **Goal types:** Full 28D object/TCP/joint/contact goal, 20D robot goal, 6D
+  TCP goal, 7D object pose/velocity goal, and 4D object-pose-only goal. Every
+  policy also receives the same complete current 31D privileged state and
+  previous action. A matched flat current-state policy is included.
+- **Horizons:** `k={2,5,10,20}` at 20 Hz with one-step low-level actions.
+- **Data:** Existing 1,800/200 clean successful privileged causal split,
+  deterministic clipped teacher actions, no learner-state queries. Each
+  representation has a separately fitted condition normalizer and otherwise
+  identical width-256, depth-4 MLP training.
+- **Oracle correctness:** Evaluation uses reset-and-exact-replay from each
+  policy's current student state before rolling the teacher. It does not use a
+  nominal trajectory or direct state copy.
+- **Added diagnostics:** Per-goal validation action MAE, valid shuffled-goal
+  action sensitivity, teacher-action MAE, action saturation, exact replay
+  error, and one-step object/yaw/TCP error toward the supplied branch target.
+- **Commands:** `pre-rl-b-train`, `pre-rl-b-eval`, and
+  `pre-rl-b-aggregate`. The aggregate writes the required
+  `oracle_goal_decomposition.csv` using structured CSV serialization and a
+  success-by-goal/horizon plot.
+- **Execution plan:** Run 20-episode smoke evaluations first. Promote all
+  valid settings to the required 100 fixed episodes after checking state
+  slicing, replay equality, and goal sensitivity.

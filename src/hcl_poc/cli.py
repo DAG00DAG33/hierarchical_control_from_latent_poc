@@ -47,6 +47,9 @@ from hcl_poc.incremental import (
     plot_phase12_sample_efficiency,
     run_pre_rl_phase_a_seed,
     aggregate_pre_rl_phase_a,
+    train_pre_rl_phase_b_horizon,
+    evaluate_pre_rl_phase_b_horizon,
+    aggregate_pre_rl_phase_b,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -768,6 +771,23 @@ def incremental_cmd(args: argparse.Namespace) -> None:
         run_pre_rl_phase_a_seed(config, seed=args.seed)
     elif args.incremental_command == "pre-rl-a-aggregate":
         aggregate_pre_rl_phase_a(config)
+    elif args.incremental_command == "pre-rl-b-train":
+        train_pre_rl_phase_b_horizon(
+            config,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-b-eval":
+        evaluate_pre_rl_phase_b_horizon(
+            config,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-b-aggregate":
+        aggregate_pre_rl_phase_b(config, episodes=args.episodes)
     else:
         raise ValueError(args.incremental_command)
 
@@ -1212,6 +1232,23 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_a_aggregate = incremental_sub.add_parser("pre-rl-a-aggregate")
     add_config_arg(pre_rl_a_aggregate)
     pre_rl_a_aggregate.set_defaults(func=incremental_cmd)
+    pre_rl_b_train = incremental_sub.add_parser("pre-rl-b-train")
+    add_config_arg(pre_rl_b_train)
+    pre_rl_b_train.add_argument("--horizon-steps", type=int, required=True)
+    pre_rl_b_train.add_argument("--seed", type=int, default=0)
+    pre_rl_b_train.add_argument("--force", action="store_true")
+    pre_rl_b_train.set_defaults(func=incremental_cmd)
+    pre_rl_b_eval = incremental_sub.add_parser("pre-rl-b-eval")
+    add_config_arg(pre_rl_b_eval)
+    pre_rl_b_eval.add_argument("--horizon-steps", type=int, required=True)
+    pre_rl_b_eval.add_argument("--seed", type=int, default=0)
+    pre_rl_b_eval.add_argument("--episodes", type=int)
+    pre_rl_b_eval.add_argument("--force", action="store_true")
+    pre_rl_b_eval.set_defaults(func=incremental_cmd)
+    pre_rl_b_aggregate = incremental_sub.add_parser("pre-rl-b-aggregate")
+    add_config_arg(pre_rl_b_aggregate)
+    pre_rl_b_aggregate.add_argument("--episodes", type=int)
+    pre_rl_b_aggregate.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)
