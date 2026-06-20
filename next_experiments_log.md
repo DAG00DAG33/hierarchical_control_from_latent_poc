@@ -84,3 +84,20 @@ State-query data is always reported separately from causal transitions.
 - **Runtime:** The exact 50-episode branch replay took about 9.6 minutes. The
   other seed-0 evaluations and matched-flat training took about 6 minutes.
 - **Status:** Seed 0 complete; no Phase A gate decision until seeds 1 and 2.
+
+## 2026-06-20 - A-D02: Learned-hierarchy lazy-training inference-mode bug
+
+- **Command:** The sequential Phase A seed-1/seed-2 command documented in
+  A-I01.
+- **Observed behavior:** Seed 1 completed visual/latent training, matched-flat
+  evaluation, low-level training, and all 50 exact oracle episodes. It then
+  failed when the decorated Phase 8 evaluator lazily trained the new seed's
+  deterministic predictor with autograd disabled.
+- **Diagnosis:** This is the same latent evaluator assumption found in A-D01,
+  also present in the Phase 8 and Phase 9 evaluation entry points because
+  historical evaluations normally followed explicit training commands.
+- **Fix:** Explicitly leave inference mode around every lazy Phase 8/9
+  checkpoint preparation path, including optional DAgger/adapted/robust paths.
+  Rollout computation remains under inference mode.
+- **Data impact:** None. The valid seed-1 oracle result and all completed
+  checkpoints/results are retained. No Phase A aggregate has been generated.

@@ -10700,15 +10700,16 @@ def evaluate_phase9_future_flow(
     latent_dim, variant, horizon_steps = _phase8_defaults(
         config, latent_dim, variant, horizon_steps
     )
-    checkpoint_path = train_phase9_future_flow(
-        config,
-        latent_dim=latent_dim,
-        variant=variant,
-        horizon_steps=horizon_steps,
-        trajectory_limit=None,
-        seed=seed,
-        force=False,
-    )
+    with torch.inference_mode(False):
+        checkpoint_path = train_phase9_future_flow(
+            config,
+            latent_dim=latent_dim,
+            variant=variant,
+            horizon_steps=horizon_steps,
+            trajectory_limit=None,
+            seed=seed,
+            force=False,
+        )
     eval_episodes = int(episodes or config.get("incremental.phase9.eval_episodes", 100))
     result_phase = "phase10" if robust_low_method is not None else "phase9"
     results_dir = ensure_dir(
@@ -10747,16 +10748,17 @@ def evaluate_phase9_future_flow(
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
     low_path = Path(checkpoint["low_level_checkpoint"])
     if robust_low_method is not None:
-        low_path = train_phase10_robust_low_level(
-            config,
-            method=robust_low_method,
-            latent_dim=latent_dim,
-            variant=variant,
-            horizon_steps=horizon_steps,
-            interpolation_alpha=interpolation_alpha,
-            seed=seed,
-            force=False,
-        )
+        with torch.inference_mode(False):
+            low_path = train_phase10_robust_low_level(
+                config,
+                method=robust_low_method,
+                latent_dim=latent_dim,
+                variant=variant,
+                horizon_steps=horizon_steps,
+                interpolation_alpha=interpolation_alpha,
+                seed=seed,
+                force=False,
+            )
     low_model, low_checkpoint = _load_phase7_low_level_checkpoint(low_path, device)
     oracle_low_path = Path(low_checkpoint.get("base_low_checkpoint", low_path))
     low_action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
@@ -11873,7 +11875,7 @@ def run_pre_rl_phase_a_seed(config: Config, seed: int) -> Path:
         / "phase4"
         / "concat_h1"
         / f"seed{seed}"
-        / f"visual_bc_eval_seed{eval_seed}_{eval_episodes}.json"
+        / "visual_bc.json"
     )
     if not visual_bc_path.exists():
         visual_bc_path = evaluate_phase4_visual_bc(
@@ -11889,7 +11891,7 @@ def run_pre_rl_phase_a_seed(config: Config, seed: int) -> Path:
         / "phase5"
         / "concat_h1"
         / f"seed{seed}"
-        / f"visual_flow_eval_seed{eval_seed}_{eval_episodes}.json"
+        / "visual_flow.json"
     )
     if not visual_flow_path.exists():
         visual_flow_path = evaluate_phase5_visual_flow(
@@ -12904,42 +12906,45 @@ def evaluate_phase8_deterministic_hierarchy(
             raise ValueError(
                 "Action-consistent evaluation requires base absolute L=1 without high DAgger"
             )
-        predictor_path = train_phase8_action_consistent_predictor(
-            config,
-            action_consistency_weight=action_consistency_weight,
-            latent_dim=latent_dim,
-            variant=variant,
-            horizon_steps=horizon_steps,
-            seed=seed,
-            force=False,
-        )
+        with torch.inference_mode(False):
+            predictor_path = train_phase8_action_consistent_predictor(
+                config,
+                action_consistency_weight=action_consistency_weight,
+                latent_dim=latent_dim,
+                variant=variant,
+                horizon_steps=horizon_steps,
+                seed=seed,
+                force=False,
+            )
         predictor_label = f"actionw{action_consistency_weight:g}".replace(".", "p")
     elif high_dagger_query_episodes is None:
-        predictor_path = train_phase8_deterministic_predictor(
-            config,
-            history=history,
-            latent_dim=latent_dim,
-            variant=variant,
-            horizon_steps=horizon_steps,
-            target_mode=target_mode,
-            seed=seed,
-            force=False,
-        )
+        with torch.inference_mode(False):
+            predictor_path = train_phase8_deterministic_predictor(
+                config,
+                history=history,
+                latent_dim=latent_dim,
+                variant=variant,
+                horizon_steps=horizon_steps,
+                target_mode=target_mode,
+                seed=seed,
+                force=False,
+            )
         predictor_label = f"base_{target_mode}"
     else:
         if target_mode != "absolute":
             raise ValueError("Phase 8 high DAgger currently supports absolute targets")
         if history != 1:
             raise ValueError("Current Phase 8 DAgger queries support history L=1")
-        predictor_path = train_phase8_dagger_predictor(
-            config,
-            latent_dim=latent_dim,
-            variant=variant,
-            horizon_steps=horizon_steps,
-            query_episodes=high_dagger_query_episodes,
-            seed=seed,
-            force=False,
-        )
+        with torch.inference_mode(False):
+            predictor_path = train_phase8_dagger_predictor(
+                config,
+                latent_dim=latent_dim,
+                variant=variant,
+                horizon_steps=horizon_steps,
+                query_episodes=high_dagger_query_episodes,
+                seed=seed,
+                force=False,
+            )
         predictor_label = f"high_dagger_e{high_dagger_query_episodes}"
     low_level_label = (
         "base_low"
@@ -12984,15 +12989,16 @@ def evaluate_phase8_deterministic_hierarchy(
     action_norm = Standardizer.from_state_dict(predictor_checkpoint["action_norm"])
     low_level_path = Path(predictor_checkpoint["low_level_checkpoint"])
     if adapted_low_query_episodes is not None:
-        low_level_path = train_phase8_adapted_low_level(
-            config,
-            latent_dim=latent_dim,
-            variant=variant,
-            horizon_steps=horizon_steps,
-            query_episodes=adapted_low_query_episodes,
-            seed=seed,
-            force=False,
-        )
+        with torch.inference_mode(False):
+            low_level_path = train_phase8_adapted_low_level(
+                config,
+                latent_dim=latent_dim,
+                variant=variant,
+                horizon_steps=horizon_steps,
+                query_episodes=adapted_low_query_episodes,
+                seed=seed,
+                force=False,
+            )
     low_model, low_checkpoint = _load_phase7_low_level_checkpoint(low_level_path, device)
     low_action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
     if not (
@@ -13002,13 +13008,14 @@ def evaluate_phase8_deterministic_hierarchy(
         raise ValueError("Phase 8 predictor and low level use different action normalization")
     flat_model = None
     if branch_action_weight < 1.0:
-        flat_path = train_phase6_latent_bc(
-            config,
-            latent_dim=latent_dim,
-            variant=variant,
-            seed=seed,
-            force=False,
-        )
+        with torch.inference_mode(False):
+            flat_path = train_phase6_latent_bc(
+                config,
+                latent_dim=latent_dim,
+                variant=variant,
+                seed=seed,
+                force=False,
+            )
         flat_checkpoint = torch.load(flat_path, map_location=device, weights_only=False)
         flat_model = MLP(
             int(flat_checkpoint["cond_dim"]),
