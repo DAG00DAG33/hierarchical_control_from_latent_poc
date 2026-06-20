@@ -11868,22 +11868,38 @@ def run_pre_rl_phase_a_seed(config: Config, seed: int) -> Path:
         console.print(f"Pre-RL Phase A seed summary exists: {output_path}")
         return output_path
 
-    visual_bc_path = evaluate_phase4_visual_bc(
-        phase_config,
-        history=1,
-        architecture="concat",
-        seed=seed,
-        episodes=eval_episodes,
-        eval_seed_start=eval_seed,
+    visual_bc_path = (
+        result_root
+        / "phase4"
+        / "concat_h1"
+        / f"seed{seed}"
+        / f"visual_bc_eval_seed{eval_seed}_{eval_episodes}.json"
     )
-    visual_flow_path = evaluate_phase5_visual_flow(
-        phase_config,
-        history=1,
-        architecture="concat",
-        seed=seed,
-        episodes=eval_episodes,
-        eval_seed_start=eval_seed,
+    if not visual_bc_path.exists():
+        visual_bc_path = evaluate_phase4_visual_bc(
+            phase_config,
+            history=1,
+            architecture="concat",
+            seed=seed,
+            episodes=eval_episodes,
+            eval_seed_start=eval_seed,
+        )
+    visual_flow_path = (
+        result_root
+        / "phase5"
+        / "concat_h1"
+        / f"seed{seed}"
+        / f"visual_flow_eval_seed{eval_seed}_{eval_episodes}.json"
     )
+    if not visual_flow_path.exists():
+        visual_flow_path = evaluate_phase5_visual_flow(
+            phase_config,
+            history=1,
+            architecture="concat",
+            seed=seed,
+            episodes=eval_episodes,
+            eval_seed_start=eval_seed,
+        )
     matched_flat_path = evaluate_phase7_matched_flat_latent_policy(
         phase_config,
         latent_dim=256,

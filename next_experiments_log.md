@@ -56,3 +56,31 @@ State-query data is always reported separately from causal transitions.
   retained and the resumable runner will reuse them.
 - **Data impact:** None. No partial checkpoint was written and no result was
   included in an aggregate.
+
+## 2026-06-20 - A-R01: Seed 0 replication
+
+- **Command:** `uv run hcl-poc incremental pre-rl-a-run --config
+  configs/pusht_incremental.yaml --seed 0`.
+- **Checkpoints:** Reused the independently trained Phase 12 seed-0 visual,
+  AE-256, low-level, deterministic-high, and flow-high checkpoints. Trained
+  the previously missing matched-flat AE-256 head from the same 1,800 causal
+  trajectories. No state-query data was used.
+- **Evaluation:** Deployable methods use 200 episodes and the oracle uses 50;
+  all begin at seed `1500000`. Exact branch replay error is `0.0`.
+
+| method | success | 95% Wilson CI | final reward | max reward | validation action MAE | rollout teacher MAE |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| visual BC | `0.600` | `[0.531, 0.665]` | `0.601` | `0.711` | `0.0382` | n/a |
+| visual flat flow | `0.585` | `[0.516, 0.651]` | `0.579` | `0.701` | `0.0375` | n/a |
+| matched flat latent | `0.505` | `[0.436, 0.574]` | `0.621` | `0.634` | `0.0325` | n/a |
+| exact branch oracle | `0.620` | `[0.482, 0.741]` | `0.743` | `0.745` | `0.0266` | `0.0334` |
+| deterministic hierarchy | `0.300` | `[0.241, 0.367]` | `0.364` | `0.475` | `0.0392` | `0.1457` |
+| generative hierarchy | `0.335` | `[0.273, 0.403]` | `0.364` | `0.498` | `0.0401` | `0.1389` |
+
+- **Preliminary diagnosis:** The point estimates retain
+  `oracle > direct flat > matched latent flat > learned hierarchy`. The oracle
+  interval overlaps direct visual BC because only 50 expensive episodes are
+  available; the three-training-seed aggregate remains necessary.
+- **Runtime:** The exact 50-episode branch replay took about 9.6 minutes. The
+  other seed-0 evaluations and matched-flat training took about 6 minutes.
+- **Status:** Seed 0 complete; no Phase A gate decision until seeds 1 and 2.
