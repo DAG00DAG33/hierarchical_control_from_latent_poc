@@ -60,6 +60,8 @@ from hcl_poc.incremental import (
     analyze_pre_rl_phase_e_geometry,
     train_pre_rl_phase_f_privileged_tcp_predictor,
     evaluate_pre_rl_phase_f_privileged_tcp_hierarchy,
+    train_pre_rl_phase_f_visual_tcp_hierarchy,
+    evaluate_pre_rl_phase_f_visual_tcp_hierarchy,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -859,6 +861,23 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "pre-rl-f-train-visual-tcp":
+        train_pre_rl_phase_f_visual_tcp_hierarchy(
+            config,
+            representation=args.representation,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-f-eval-visual-tcp":
+        evaluate_pre_rl_phase_f_visual_tcp_hierarchy(
+            config,
+            representation=args.representation,
+            goal_source=args.goal_source,
+            seed=args.seed,
+            episodes=args.episodes,
+            audit_branch=args.audit_branch,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1388,6 +1407,27 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_f_eval.add_argument("--episodes", type=int)
     pre_rl_f_eval.add_argument("--force", action="store_true")
     pre_rl_f_eval.set_defaults(func=incremental_cmd)
+    pre_rl_f_visual_train = incremental_sub.add_parser("pre-rl-f-train-visual-tcp")
+    add_config_arg(pre_rl_f_visual_train)
+    pre_rl_f_visual_train.add_argument(
+        "--representation", choices=["raw", "ae256"], required=True
+    )
+    pre_rl_f_visual_train.add_argument("--seed", type=int, default=0)
+    pre_rl_f_visual_train.add_argument("--force", action="store_true")
+    pre_rl_f_visual_train.set_defaults(func=incremental_cmd)
+    pre_rl_f_visual_eval = incremental_sub.add_parser("pre-rl-f-eval-visual-tcp")
+    add_config_arg(pre_rl_f_visual_eval)
+    pre_rl_f_visual_eval.add_argument(
+        "--representation", choices=["raw", "ae256"], required=True
+    )
+    pre_rl_f_visual_eval.add_argument(
+        "--goal-source", choices=["learned", "oracle"], default="learned"
+    )
+    pre_rl_f_visual_eval.add_argument("--audit-branch", action="store_true")
+    pre_rl_f_visual_eval.add_argument("--seed", type=int, default=0)
+    pre_rl_f_visual_eval.add_argument("--episodes", type=int)
+    pre_rl_f_visual_eval.add_argument("--force", action="store_true")
+    pre_rl_f_visual_eval.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

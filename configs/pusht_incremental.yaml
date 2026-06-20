@@ -320,5 +320,14 @@ pre_rl:
     epochs: 100
     lr: 0.0003
     eval_episodes: 100
-    eval_num_envs: 64
+    eval_num_envs: 16
     eval_seed_start: 1920000
+    visual_eval_seed_start: 1930000
+    oracle_eval_episodes: 20
+    oracle_eval_num_envs: 16
+    visual_hidden_dim: 512
+    visual_batch_size: 512
+    visual_batches_per_epoch: 200
+    visual_epochs: 60
+    visual_lr: 0.0003
+    validation_samples: 5000

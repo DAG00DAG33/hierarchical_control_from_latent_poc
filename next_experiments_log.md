@@ -384,3 +384,51 @@ State-query data is always reported separately from causal transitions.
   uncertainty without requiring latent subtraction. The next test replaces
   privileged current state in the high and low policies with AE-256/DINO plus
   proprioception while retaining the same endpoint target.
+
+## 2026-06-21 - F-G02: Matched visual factorized TCP hierarchy
+
+- **Methods:** Two matched deterministic hierarchies use the same 1,800 clean
+  causal training trajectories, 200 validation trajectories, `k=10`, `U=10`,
+  `H=1`, 100 evaluation seeds, previous executed action, and 3D future TCP
+  endpoint. The only difference is current representation: raw normalized
+  spatial DINO plus proprioception (`6549D`) or frozen AE-256.
+- **Training:** Separate width-512, depth-4 high and low MLPs. The high level
+  predicts the 10-step endpoint. The low level is trained over every remaining
+  offset 1-10 and receives endpoint, recomputed velocity, previous action, and
+  normalized time-to-go. Both models use 60 epochs, 200 batches/epoch, batch
+  size 512, and learning rate `3e-4`.
+- **Offline metrics:**
+
+| representation | endpoint L2 | oracle-goal action MAE | predicted-goal action MAE | induced action L2 |
+| --- | ---: | ---: | ---: | ---: |
+| raw DINO+prop | `0.0173 m` | `0.0444` | `0.0445` | `0.0015` |
+| AE-256 | `0.0180 m` | `0.0391` | `0.0396` | `0.0072` |
+
+- **Closed loop:** Evaluation uses 16 CUDA environments consistently because
+  a 64-versus-16 comparison exposed batch-size sensitivity in vectorized
+  simulation/inference. Raw succeeds at `0.71` (95% Wilson
+  `[0.615, 0.790]`), final reward `0.781`, teacher-action MAE `0.0879`, and
+  6.42 high-level decisions/episode. AE-256 succeeds at `0.53`, final reward
+  `0.639`, and teacher-action MAE `0.1267`.
+- **Decision:** Select raw spatial DINO plus proprioception for the factorized
+  hierarchy. AE-256 compresses static state well but loses rollout-relevant
+  information for this interface.
+
+## 2026-06-21 - G-G01: Matched oracle gap and on-policy endpoint audit
+
+- **Protocol:** Exact local teacher branches are regenerated from each current
+  student state every 10 primitive steps. Learned and oracle policies use the
+  identical raw visual low level, 100 seeds beginning at `1930000`, and 16
+  environments. Replay current-state error is exactly zero.
+- **Result:** Learned endpoint success is `0.71`; matched branch-oracle endpoint
+  success is also `0.71`. Both Wilson intervals are `[0.615, 0.790]`. The
+  Phase F/G requirement of at least 80% oracle performance passes with a ratio
+  of 1.00.
+- **Distribution shift:** Endpoint L2 grows from `0.0173 m` on held-out teacher
+  states to `0.0368 m` on hierarchy-visited states. Despite that increase, the
+  learned hierarchy retains the oracle success rate. Learned and oracle
+  teacher-action MAE are `0.0879` and `0.0765`.
+- **Interface conclusion:** The remaining gap is not high-level endpoint
+  prediction for this selected interface. The principal residual is the
+  visual low-level policy relative to the privileged low-level ceiling and
+  direct flat variability, not an oracle-to-learned high-level gap.
