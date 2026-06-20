@@ -20,6 +20,10 @@ and every experiment and failed intervention is recorded in
 [INCREMENTAL_EXPERIMENT_LOG.md](INCREMENTAL_EXPERIMENT_LOG.md). The earlier
 prototype is retained in [EXPERIMENT_REPORT.md](EXPERIMENT_REPORT.md).
 
+The final candidates, their training data, architectures, hyperparameters,
+deployment paths, and selection rationale are specified in
+[FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md).
+
 ## Method
 
 The environment uses `pd_ee_delta_pos` control at 20 Hz. Observations contain
