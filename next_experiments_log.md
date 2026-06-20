@@ -101,3 +101,47 @@ State-query data is always reported separately from causal transitions.
   Rollout computation remains under inference mode.
 - **Data impact:** None. The valid seed-1 oracle result and all completed
   checkpoints/results are retained. No Phase A aggregate has been generated.
+
+## 2026-06-20 - A-G01: Full-budget statistical replication gate
+
+- **Commands:** Three `pre-rl-a-run` commands for seeds `{0,1,2}`, followed by
+  `pre-rl-a-aggregate`, exactly as recorded in A-I01.
+- **Data:** Every model uses the same 1,800 clean successful causal
+  trajectories (80,472 transitions) and fixed 200-trajectory validation set.
+  Each seed retrains visual BC, visual flow, AE-256, matched latent flat,
+  oracle low level, deterministic high level, and generative high level from
+  its own initialization. No state-query data is used.
+- **Evaluation:** The same 200 reset seeds beginning at `1500000` for every
+  deployable policy; the first 50 for each exact-replay oracle. Exact replay
+  state error is zero. The table reports mean and sample standard deviation
+  across training seeds.
+
+| method | seed successes | mean +/- training-seed SD | pooled 95% Wilson CI | mean final reward | mean max reward |
+| --- | --- | ---: | --- | ---: | ---: |
+| visual BC | `0.600, 0.595, 0.595` | `0.597 +/- 0.003` | `[0.557, 0.635]` | `0.582` | `0.707` |
+| visual flat flow | `0.585, 0.555, 0.605` | `0.582 +/- 0.025` | `[0.542, 0.620]` | `0.600` | `0.700` |
+| matched flat latent | `0.505, 0.490, 0.460` | `0.485 +/- 0.023` | `[0.445, 0.525]` | `0.604` | `0.619` |
+| exact branch oracle | `0.620, 0.760, 0.700` | `0.693 +/- 0.070` | `[0.615, 0.762]` | `0.793` | `0.794` |
+| deterministic hierarchy | `0.300, 0.345, 0.335` | `0.327 +/- 0.024` | `[0.290, 0.365]` | `0.373` | `0.496` |
+| generative hierarchy | `0.335, 0.390, 0.325` | `0.350 +/- 0.035` | `[0.313, 0.389]` | `0.358` | `0.511` |
+
+- **Action-error diagnosis:** Oracle rollout teacher MAE is stable at
+  `0.0320-0.0334`; deterministic learned hierarchy MAE is `0.137-0.151`, and
+  generative hierarchy MAE is `0.131-0.141`. Learned-goal error therefore
+  remains a large control error under every training seed.
+- **Gate:** Pass. The mean ordering is
+  `oracle (0.693) > best flat (0.597) > best learned hierarchy (0.350)`.
+  This ordering also holds in point estimates for each policy seed. The pooled
+  oracle and visual-BC confidence intervals overlap slightly, so the exact
+  oracle advantage is not claimed as a precise effect size; the large
+  flat-versus-learned gap is reproducible.
+- **Decision:** Continue to Phase B with high priority on determining whether
+  the oracle benefit is future object effect, future robot motion, or motor
+  waypoint leakage. Representation redesign remains justified because the
+  learned hierarchy does not overlap the direct flat methods after replication.
+- **Artifacts:** Tracked aggregate JSON and plot are
+  `docs/results/pre_rl/phase_a_aggregate.json` and
+  `docs/results/pre_rl/phase_a_success_across_seeds.png`.
+- **Remaining Phase A deliverable:** Representative rollout videos will be
+  generated with the shared pre-RL video recorder alongside Phase B videos so
+  success/failure selection and rendering are implemented once.

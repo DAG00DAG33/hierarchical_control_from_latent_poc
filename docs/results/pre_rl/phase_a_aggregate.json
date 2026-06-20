@@ -1,0 +1,413 @@
+{
+  "best_flat_success": 0.5966666666666666,
+  "best_learned_hierarchy_success": 0.35000000000000003,
+  "gate_ordering": "oracle > flat > learned_hierarchy",
+  "gate_passed": true,
+  "metadata": {
+    "config": "configs/pusht_incremental.yaml",
+    "control_freq": 20,
+    "controller": "pd_ee_delta_pos",
+    "cuda_available": true,
+    "device": "cuda",
+    "environment": "PushT-v1",
+    "git_commit": "bf85359399876659bba0ddbf1c7fbc1ac386c4c7",
+    "git_dirty": true,
+    "gymnasium_version": "1.3.0",
+    "mani_skill_version": "3.0.1",
+    "torch_version": "2.12.0+cu130"
+  },
+  "oracle_success": 0.6933333333333334,
+  "phase": "A",
+  "plot": "results/incremental/pre_rl/phase_a/phase_a_success_across_seeds.png",
+  "rows": [
+    {
+      "mean_final_reward": 0.5818855442805216,
+      "mean_max_reward": 0.7074083574861287,
+      "mean_success": 0.5966666666666666,
+      "method": "visual_bc",
+      "pooled_success": 0.5966666666666667,
+      "pooled_wilson_95": [
+        0.5569191470800464,
+        0.6351842573906382
+      ],
+      "seed_rows": [
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.6006593264965341,
+          "max_reward": 0.7106519693508744,
+          "method": "visual_bc",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase4/concat_h1/seed0/visual_bc.json",
+          "success": 0.6,
+          "success_wilson_95": [
+            0.53083672039262,
+            0.6653942143319266
+          ],
+          "validation_action_mae": 0.03816820681095123
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.5623363908659667,
+          "max_reward": 0.7049143576994539,
+          "method": "visual_bc",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase4/concat_h1/seed1/visual_bc.json",
+          "success": 0.595,
+          "success_wilson_95": [
+            0.525797100813387,
+            0.6606222871749323
+          ],
+          "validation_action_mae": 0.038507428020238876
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.582660915479064,
+          "max_reward": 0.7066587454080582,
+          "method": "visual_bc",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase4/concat_h1/seed2/visual_bc.json",
+          "success": 0.595,
+          "success_wilson_95": [
+            0.525797100813387,
+            0.6606222871749323
+          ],
+          "validation_action_mae": 0.038060277700424194
+        }
+      ],
+      "seed_success": [
+        0.6,
+        0.595,
+        0.595
+      ],
+      "training_seed_std": 0.0028867513459481316
+    },
+    {
+      "mean_final_reward": 0.6002477980707773,
+      "mean_max_reward": 0.7002570333952706,
+      "mean_success": 0.5816666666666667,
+      "method": "visual_flat_flow",
+      "pooled_success": 0.5816666666666667,
+      "pooled_wilson_95": [
+        0.541799114298437,
+        0.6204951412026586
+      ],
+      "seed_rows": [
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.5790062994044274,
+          "max_reward": 0.7011192444525659,
+          "method": "visual_flat_flow",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase5/concat_h1/seed0/visual_flow.json",
+          "success": 0.585,
+          "success_wilson_95": [
+            0.5157391490134403,
+            0.6510571455024242
+          ],
+          "validation_action_mae": 0.03749643638730049
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.5836498852539808,
+          "max_reward": 0.6843121387436986,
+          "method": "visual_flat_flow",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase5/concat_h1/seed1/visual_flow.json",
+          "success": 0.555,
+          "success_wilson_95": [
+            0.4857330241280342,
+            0.6221939899704665
+          ],
+          "validation_action_mae": 0.03757326677441597
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.6380872095539235,
+          "max_reward": 0.715339716989547,
+          "method": "visual_flat_flow",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase5/concat_h1/seed2/visual_flow.json",
+          "success": 0.605,
+          "success_wilson_95": [
+            0.5358834915928536,
+            0.6701589898679203
+          ],
+          "validation_action_mae": 0.037577979266643524
+        }
+      ],
+      "seed_success": [
+        0.585,
+        0.555,
+        0.605
+      ],
+      "training_seed_std": 0.025166114784235794
+    },
+    {
+      "mean_final_reward": 0.6040855409010935,
+      "mean_max_reward": 0.6190599843176704,
+      "mean_success": 0.48500000000000004,
+      "method": "matched_flat_latent",
+      "pooled_success": 0.485,
+      "pooled_wilson_95": [
+        0.44523312532158843,
+        0.5249577257088227
+      ],
+      "seed_rows": [
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.6213821489131078,
+          "max_reward": 0.6338705085217953,
+          "method": "matched_flat_latent",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase7/matched_flat/ae_recon_z256/seed0/matched_flat_latent_eval_200.json",
+          "success": 0.505,
+          "success_wilson_95": [
+            0.43627000033527485,
+            0.5735415464009526
+          ],
+          "validation_action_mae": 0.0324716679751873
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.6085574694699608,
+          "max_reward": 0.6212631155364216,
+          "method": "matched_flat_latent",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase7/matched_flat/ae_recon_z256/seed1/matched_flat_latent_eval_200.json",
+          "success": 0.49,
+          "success_wilson_95": [
+            0.42156278331213176,
+            0.5588141232154135
+          ],
+          "validation_action_mae": 0.03186744078993797
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.5823170043202117,
+          "max_reward": 0.602046328894794,
+          "method": "matched_flat_latent",
+          "rollout_teacher_action_mae": null,
+          "source": "results/incremental/pre_rl/phase_a/phase7/matched_flat/ae_recon_z256/seed2/matched_flat_latent_eval_200.json",
+          "success": 0.46,
+          "success_wilson_95": [
+            0.39233051799971463,
+            0.5291771081104667
+          ],
+          "validation_action_mae": 0.03210575878620148
+        }
+      ],
+      "seed_success": [
+        0.505,
+        0.49,
+        0.46
+      ],
+      "training_seed_std": 0.02291287847477919
+    },
+    {
+      "mean_final_reward": 0.7930494427680971,
+      "mean_max_reward": 0.7943358846505483,
+      "mean_success": 0.6933333333333334,
+      "method": "oracle_hierarchy",
+      "pooled_success": 0.6933333333333334,
+      "pooled_wilson_95": [
+        0.6154815486776256,
+        0.7615299568333848
+      ],
+      "seed_rows": [
+        {
+          "episodes": 50,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.7431981700658798,
+          "max_reward": 0.7452553975582122,
+          "method": "oracle_hierarchy",
+          "rollout_teacher_action_mae": 0.03335400606135783,
+          "source": "results/incremental/pre_rl/phase_a/phase7/ae_recon_z256_k2_h1_delta/seed0/replay_branch_oracle_eval_50.json",
+          "success": 0.62,
+          "success_wilson_95": [
+            0.4815044693099298,
+            0.7413721068980641
+          ],
+          "validation_action_mae": 0.02662716433405876
+        },
+        {
+          "episodes": 50,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.8386351555585861,
+          "max_reward": 0.8395630013942719,
+          "method": "oracle_hierarchy",
+          "rollout_teacher_action_mae": 0.03201930240962823,
+          "source": "results/incremental/pre_rl/phase_a/phase7/ae_recon_z256_k2_h1_delta/seed1/replay_branch_oracle_eval_50.json",
+          "success": 0.76,
+          "success_wilson_95": [
+            0.6258731624205708,
+            0.8570260860300828
+          ],
+          "validation_action_mae": 0.026556948199868202
+        },
+        {
+          "episodes": 50,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.7973150026798248,
+          "max_reward": 0.7981892549991607,
+          "method": "oracle_hierarchy",
+          "rollout_teacher_action_mae": 0.03206283940589772,
+          "source": "results/incremental/pre_rl/phase_a/phase7/ae_recon_z256_k2_h1_delta/seed2/replay_branch_oracle_eval_50.json",
+          "success": 0.7,
+          "success_wilson_95": [
+            0.562496495355466,
+            0.8089644649911906
+          ],
+          "validation_action_mae": 0.026984339579939842
+        }
+      ],
+      "seed_success": [
+        0.62,
+        0.76,
+        0.7
+      ],
+      "training_seed_std": 0.07023769168568493
+    },
+    {
+      "mean_final_reward": 0.3727423205265465,
+      "mean_max_reward": 0.4961600297441085,
+      "mean_success": 0.32666666666666666,
+      "method": "deterministic_hierarchy",
+      "pooled_success": 0.32666666666666666,
+      "pooled_wilson_95": [
+        0.290346007615219,
+        0.365192715402864
+      ],
+      "seed_rows": [
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.36418428459903224,
+          "max_reward": 0.4750371897593141,
+          "method": "deterministic_hierarchy",
+          "rollout_teacher_action_mae": 0.14571115508104868,
+          "source": "results/incremental/pre_rl/phase_a/phase8/ae_recon_z256_k2_l1/seed0/deterministic_hierarchy_base_absolute_base_low_branchw100_200.json",
+          "success": 0.3,
+          "success_wilson_95": [
+            0.24074744682371402,
+            0.36679068372719265
+          ],
+          "validation_action_mae": 0.039164625108242035
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.35448323644232005,
+          "max_reward": 0.5088681531697512,
+          "method": "deterministic_hierarchy",
+          "rollout_teacher_action_mae": 0.1508785483494603,
+          "source": "results/incremental/pre_rl/phase_a/phase8/ae_recon_z256_k2_l1/seed1/deterministic_hierarchy_base_absolute_base_low_branchw100_200.json",
+          "success": 0.345,
+          "success_wilson_95": [
+            0.2825979437674894,
+            0.4132441074094632
+          ],
+          "validation_action_mae": 0.03839884325861931
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.3995594405382872,
+          "max_reward": 0.5045747463032604,
+          "method": "deterministic_hierarchy",
+          "rollout_teacher_action_mae": 0.13742047843849833,
+          "source": "results/incremental/pre_rl/phase_a/phase8/ae_recon_z256_k2_l1/seed2/deterministic_hierarchy_base_absolute_base_low_branchw100_200.json",
+          "success": 0.335,
+          "success_wilson_95": [
+            0.2732408697841632,
+            0.40297808792033485
+          ],
+          "validation_action_mae": 0.03910169377923012
+        }
+      ],
+      "seed_success": [
+        0.3,
+        0.345,
+        0.335
+      ],
+      "training_seed_std": 0.02362907813126304
+    },
+    {
+      "mean_final_reward": 0.3582947348306577,
+      "mean_max_reward": 0.5114576157865425,
+      "mean_success": 0.35000000000000003,
+      "method": "generative_hierarchy",
+      "pooled_success": 0.35,
+      "pooled_wilson_95": [
+        0.3128990638700219,
+        0.38900944643408836
+      ],
+      "seed_rows": [
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.3644422483351082,
+          "max_reward": 0.4975181303359568,
+          "method": "generative_hierarchy",
+          "rollout_teacher_action_mae": 0.13888179509897783,
+          "source": "results/incremental/pre_rl/phase_a/phase9/ae_recon_z256_k2_l1/seed0/future_flow_zero_base_200.json",
+          "success": 0.335,
+          "success_wilson_95": [
+            0.2732408697841632,
+            0.40297808792033485
+          ],
+          "validation_action_mae": 0.040092967450618744
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.3515021113678813,
+          "max_reward": 0.5411051008105278,
+          "method": "generative_hierarchy",
+          "rollout_teacher_action_mae": 0.1410523091718767,
+          "source": "results/incremental/pre_rl/phase_a/phase9/ae_recon_z256_k2_l1/seed1/future_flow_zero_base_200.json",
+          "success": 0.39,
+          "success_wilson_95": [
+            0.3250834313746962,
+            0.4590625404283025
+          ],
+          "validation_action_mae": 0.0393652580678463
+        },
+        {
+          "episodes": 200,
+          "eval_seed_start": 1500000,
+          "final_reward": 0.35893984478898344,
+          "max_reward": 0.4957496162131429,
+          "method": "generative_hierarchy",
+          "rollout_teacher_action_mae": 0.13086636838737375,
+          "source": "results/incremental/pre_rl/phase_a/phase9/ae_recon_z256_k2_l1/seed2/future_flow_zero_base_200.json",
+          "success": 0.325,
+          "success_wilson_95": [
+            0.2639157153923429,
+            0.3926801488397004
+          ],
+          "validation_action_mae": 0.039632461965084076
+        }
+      ],
+      "seed_success": [
+        0.335,
+        0.39,
+        0.325
+      ],
+      "training_seed_std": 0.034999999999999996
+    }
+  ],
+  "training_seeds": [
+    0,
+    1,
+    2
+  ]
+}
