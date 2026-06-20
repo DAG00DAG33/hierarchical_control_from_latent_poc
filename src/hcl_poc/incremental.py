@@ -5817,6 +5817,43 @@ def _pre_rl_phase_b_conditions(
     return np.stack(conditions).astype(np.float32), np.stack(actions).astype(np.float32)
 
 
+def _pre_rl_phase_c_time_conditioned_conditions(
+    episodes: list[dict[str, np.ndarray]],
+    action_norm: Standardizer,
+    horizon_steps: int,
+    control_freq: int,
+    goal_type: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    conditions: list[np.ndarray] = []
+    actions: list[np.ndarray] = []
+    action_dim = episodes[0]["actions"].shape[-1]
+    zero_prev = action_norm.transform(np.zeros((1, action_dim), dtype=np.float32))[0]
+    for episode in episodes:
+        states = episode["states"]
+        episode_actions = episode["actions"]
+        previous_actions = action_norm.transform(episode_actions)
+        for t in range(len(episode_actions) - horizon_steps):
+            previous = previous_actions[t - 1] if t > 0 else zero_prev
+            for offset in range(1, horizon_steps + 1):
+                goal = _pre_rl_phase_b_goal(
+                    states[t],
+                    states[t + offset],
+                    offset,
+                    control_freq,
+                    goal_type,
+                )
+                base = _phase7_privileged_condition(states[t], goal, previous)
+                conditions.append(
+                    np.concatenate(
+                        [base, np.asarray([offset / horizon_steps], dtype=np.float32)]
+                    )
+                )
+                actions.append(episode_actions[t])
+    if not conditions:
+        raise ValueError(f"No Phase C time-conditioned samples for horizon {horizon_steps}")
+    return np.stack(conditions).astype(np.float32), np.stack(actions).astype(np.float32)
+
+
 def _phase7_train_privileged_model(
     config: Config,
     name: str,
@@ -8243,10 +8280,14 @@ def _evaluate_phase7_privileged_mode(
     horizon_steps: int,
     episodes: int,
     seed_start: int,
+    goal_update_period: int = 1,
+    max_num_envs_override: int | None = None,
 ) -> dict[str, Any]:
     valid_modes = {"flat", "branch_goal", *PRE_RL_PHASE_B_GOAL_TYPES}
     if mode not in valid_modes:
         raise ValueError(f"Unknown privileged Phase 7D mode: {mode}")
+    if goal_update_period < 1:
+        raise ValueError("Goal update period must be at least one primitive step")
     device = default_device()
 
     def make_env(num_envs: int):
@@ -8262,7 +8303,10 @@ def _evaluate_phase7_privileged_mode(
         )
 
     max_num_envs = min(
-        int(config.get("incremental.phase7.replay_branch_num_envs", 16)),
+        int(
+            max_num_envs_override
+            or config.get("incremental.phase7.replay_branch_num_envs", 16)
+        ),
         episodes,
     )
     action_dim = int(checkpoint["flat"]["action_dim"])
@@ -8287,6 +8331,7 @@ def _evaluate_phase7_privileged_mode(
     object_subgoal_errors: list[float] = []
     yaw_subgoal_errors: list[float] = []
     tcp_subgoal_errors: list[float] = []
+    high_level_decisions = 0
     progress = trange(episodes, desc=f"phase7D privileged {mode} eval")
     for batch_start in range(0, episodes, max_num_envs):
         num_envs = min(max_num_envs, episodes - batch_start)
@@ -8307,6 +8352,9 @@ def _evaluate_phase7_privileged_mode(
                 np.float32
             )
             active = np.ones(num_envs, dtype=bool)
+            held_goal: np.ndarray | None = None
+            held_target_future_state: np.ndarray | None = None
+            last_replan_step = 0
             success_once = np.zeros(num_envs, dtype=bool)
             batch_final_rewards = np.zeros(num_envs, dtype=np.float32)
             batch_max_rewards = np.full(num_envs, -np.inf, dtype=np.float32)
@@ -8317,9 +8365,13 @@ def _evaluate_phase7_privileged_mode(
                 active_count = int(active.sum())
                 state_t = _phase7_obs_state_tensor(obs, device)
                 current_state = state_t.detach().cpu().numpy().astype(np.float32)
-                goal = None
-                target_future_state = None
-                if mode != "flat":
+                goal = held_goal
+                target_future_state = held_target_future_state
+                remaining_steps = horizon_steps
+                should_replan = mode != "flat" and (
+                    held_goal is None or _step % goal_update_period == 0
+                )
+                if should_replan:
                     if branch_env is None:
                         raise RuntimeError("Branch env missing for branch-goal evaluation")
                     branch_timer = Timer()
@@ -8380,10 +8432,40 @@ def _evaluate_phase7_privileged_mode(
                             mode,
                         )
                     )
+                    held_goal = goal
+                    held_target_future_state = target_future_state
+                    last_replan_step = _step
+                    high_level_decisions += active_count
                     branch_goal_norms.extend(np.linalg.norm(goal[active], axis=-1).tolist())
+                elif mode != "flat" and held_target_future_state is not None:
+                    remaining_steps = max(1, horizon_steps - (_step - last_replan_step))
+                    goal = (
+                        _phase7_privileged_goal(
+                            current_state,
+                            held_target_future_state,
+                            remaining_steps,
+                            control_freq,
+                        )
+                        if mode == "branch_goal"
+                        else _pre_rl_phase_b_goal(
+                            current_state,
+                            held_target_future_state,
+                            remaining_steps,
+                            control_freq,
+                            mode,
+                        )
+                    )
+                    held_goal = goal
 
                 policy_timer = Timer()
                 cond = _phase7_privileged_condition(current_state, goal, prev_action_norm)
+                if bool(checkpoint[mode].get("time_conditioned", False)):
+                    time_to_goal = np.full(
+                        (len(cond), 1),
+                        remaining_steps / horizon_steps,
+                        dtype=np.float32,
+                    )
+                    cond = np.concatenate([cond, time_to_goal], axis=-1)
                 cond_t = torch.from_numpy(cond_norm.transform(cond)).to(device).float()
                 raw_action = action_norm.inverse(model(cond_t).cpu().numpy()).astype(np.float32)
                 policy_latencies.append(policy_timer.elapsed() / active_count)
@@ -8492,6 +8574,8 @@ def _evaluate_phase7_privileged_mode(
         "episodes": episodes,
         "num_envs": max_num_envs,
         "seed_start": seed_start,
+        "goal_update_period": goal_update_period,
+        "high_level_decisions_per_episode": float(high_level_decisions / episodes),
     }
 
 
@@ -8948,6 +9032,281 @@ def aggregate_pre_rl_phase_b(config: Config, episodes: int | None = None) -> Pat
         "metadata": _runtime_metadata(config),
     }
     output_path = root / f"phase_b_aggregate_{eval_episodes}.json"
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def train_pre_rl_phase_c_time_conditioned(
+    config: Config,
+    horizon_steps: int,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    goal_type = str(config.get("pre_rl.phase_c.goal_type", "tcp"))
+    checkpoint_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "pre_rl"
+        / "phase_c"
+        / f"k{horizon_steps}"
+        / f"seed{seed}"
+    )
+    checkpoint_path = checkpoint_dir / f"time_conditioned_{goal_type}.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Pre-RL Phase C time-conditioned model exists: {checkpoint_path}")
+        return checkpoint_path
+    phase_b_path = train_pre_rl_phase_b_horizon(
+        config,
+        horizon_steps=horizon_steps,
+        seed=seed,
+        force=False,
+    )
+    phase_b = torch.load(phase_b_path, map_location="cpu", weights_only=False)
+    train_episodes, validation_episodes, data_metadata = _load_phase7_privileged_episodes(
+        config,
+        horizon_steps,
+        cap_train_to_usable=True,
+    )
+    action_norm = Standardizer.from_state_dict(phase_b["action_norm"])
+    control_freq = int(config.get("control_freq", 20))
+    train_cond, train_labels = _pre_rl_phase_c_time_conditioned_conditions(
+        train_episodes,
+        action_norm,
+        horizon_steps,
+        control_freq,
+        goal_type,
+    )
+    validation_cond, validation_labels = _pre_rl_phase_c_time_conditioned_conditions(
+        validation_episodes,
+        action_norm,
+        horizon_steps,
+        control_freq,
+        goal_type,
+    )
+    model_payload, summary = _phase7_train_privileged_model(
+        config,
+        f"pre-rl-c-k{horizon_steps}-time-conditioned-{goal_type}",
+        train_cond,
+        train_labels,
+        validation_cond,
+        validation_labels,
+        action_norm,
+        seed,
+    )
+    model_payload.update(
+        {
+            "goal_type": goal_type,
+            "goal_dim": int(train_cond.shape[-1] - 35),
+            "time_conditioned": True,
+            "training_offsets": list(range(1, horizon_steps + 1)),
+        }
+    )
+    payload = {
+        "phase": "C1",
+        "method": "time_conditioned_multi_offset_oracle",
+        "horizon_steps": horizon_steps,
+        "control_freq": control_freq,
+        "seed": seed,
+        "action_norm": phase_b["action_norm"],
+        "flat": phase_b["flat"],
+        goal_type: model_payload,
+        "data": {
+            **data_metadata,
+            "causal_train_transitions": int(
+                sum(len(episode["actions"]) for episode in train_episodes)
+            ),
+            "expanded_train_samples": int(len(train_cond)),
+            "state_query_samples": 0,
+        },
+        "training_summary": summary,
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        checkpoint_dir / f"time_conditioned_{goal_type}_metrics.json",
+        {
+            "phase": payload["phase"],
+            "method": payload["method"],
+            "horizon_steps": horizon_steps,
+            "goal_type": goal_type,
+            "data": payload["data"],
+            "training_summary": summary,
+            "metadata": payload["metadata"],
+        },
+    )
+    console.print(f"Wrote Pre-RL Phase C time-conditioned model: {checkpoint_path}")
+    return checkpoint_path
+
+
+def run_pre_rl_phase_c_oracle_sweep(
+    config: Config,
+    episodes: int | None = None,
+    time_conditioned: bool = False,
+    horizons_override: list[int] | None = None,
+    force: bool = False,
+) -> Path:
+    import csv
+    import json
+    import matplotlib.pyplot as plt
+
+    eval_episodes = int(episodes or config.get("pre_rl.phase_c.smoke_eval_episodes", 20))
+    horizons = horizons_override or [
+        int(value) for value in config.get("pre_rl.phase_c.horizons")
+    ]
+    update_periods = [int(value) for value in config.get("pre_rl.phase_c.update_periods")]
+    goal_type = str(config.get("pre_rl.phase_c.goal_type", "tcp"))
+    if goal_type not in PRE_RL_PHASE_B_GOAL_TYPES:
+        raise ValueError(f"Unknown Phase C goal type: {goal_type}")
+    seed = int(config.get("pre_rl.phase_b.policy_seed", 0))
+    eval_seed = int(config.get("pre_rl.phase_c.eval_seed_start", 1_700_000))
+    max_num_envs = int(config.get("pre_rl.phase_c.replay_branch_num_envs", 32))
+    root = ensure_dir(config.path_value("paths.incremental_results_dir") / "pre_rl" / "phase_c")
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    rows: list[dict[str, Any]] = []
+    variant = "time_conditioned" if time_conditioned else "fixed_offset"
+
+    for horizon_steps in horizons:
+        checkpoint_path = (
+            train_pre_rl_phase_c_time_conditioned(
+                config,
+                horizon_steps=horizon_steps,
+                seed=seed,
+                force=False,
+            )
+            if time_conditioned
+            else train_pre_rl_phase_b_horizon(
+                config,
+                horizon_steps=horizon_steps,
+                seed=seed,
+                force=False,
+            )
+        )
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+        settings = [("flat", 1), *[(goal_type, period) for period in update_periods]]
+        for mode, update_period in settings:
+            setting_path = root / (
+                f"k{horizon_steps}_{mode}_u{update_period}_{variant}_endpoint_"
+                f"eval_{eval_episodes}.json"
+            )
+            if setting_path.exists() and not force:
+                with setting_path.open("r", encoding="utf-8") as f:
+                    result = json.load(f)
+                rows.append(result["row"])
+                continue
+            model, cond_norm = _phase7_load_privileged_model(checkpoint, mode, device)
+            metrics = _evaluate_phase7_privileged_mode(
+                config,
+                checkpoint,
+                mode,
+                model,
+                cond_norm,
+                action_norm,
+                teacher,
+                horizon_steps,
+                eval_episodes,
+                eval_seed,
+                goal_update_period=update_period,
+                max_num_envs_override=max_num_envs,
+            )
+            row = {
+                **metrics,
+                "method": "flat" if mode == "flat" else "oracle_held_goal",
+                "goal_type": mode,
+                "horizon_steps": horizon_steps,
+                "horizon_seconds": horizon_steps / float(config.get("control_freq", 20)),
+                "goal_update_period": 0 if mode == "flat" else update_period,
+                "success_wilson_95": _wilson_interval(metrics["success"], eval_episodes),
+            }
+            write_json(
+                setting_path,
+                {
+                    "phase": "C1",
+                    "experiment": "oracle_goal_hold_sweep",
+                    "policy_variant": variant,
+                    "held_goal_semantics": "fixed_endpoint_recomputed_features",
+                    "checkpoint": str(checkpoint_path),
+                    "data": checkpoint["data"],
+                    "row": row,
+                    "metadata": _runtime_metadata(config),
+                },
+            )
+            rows.append(row)
+
+    fields = [
+        "method",
+        "goal_type",
+        "horizon_steps",
+        "horizon_seconds",
+        "goal_update_period",
+        "episodes",
+        "success",
+        "success_ci_low",
+        "success_ci_high",
+        "final_reward",
+        "max_reward",
+        "teacher_action_mae",
+        "one_step_tcp_subgoal_error_m",
+        "high_level_decisions_per_episode",
+        "branch_generation_latency_s",
+        "replay_current_state_error_max",
+    ]
+    csv_rows = []
+    for row in rows:
+        csv_rows.append(
+            {
+                **{field: row.get(field) for field in fields},
+                "success_ci_low": row["success_wilson_95"][0],
+                "success_ci_high": row["success_wilson_95"][1],
+            }
+        )
+    csv_path = root / f"oracle_goal_hold_sweep_{variant}_{eval_episodes}.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(csv_rows)
+
+    plot_path = root / f"oracle_goal_hold_sweep_{variant}_{eval_episodes}.png"
+    figure, axis = plt.subplots(figsize=(8, 5.5))
+    for horizon_steps in horizons:
+        horizon_rows = [
+            row
+            for row in csv_rows
+            if row["method"] == "oracle_held_goal"
+            and row["horizon_steps"] == horizon_steps
+        ]
+        axis.plot(
+            [row["goal_update_period"] for row in horizon_rows],
+            [row["success"] for row in horizon_rows],
+            marker="o",
+            label=f"k={horizon_steps}",
+        )
+    axis.set_ylim(0.0, 1.0)
+    axis.set_xlabel("Goal hold period U (primitive steps)")
+    axis.set_ylabel("Success rate")
+    axis.set_title(f"Oracle {goal_type.upper()} goal temporal abstraction")
+    axis.grid(alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+
+    payload = {
+        "phase": "C1",
+        "experiment": "oracle_goal_hold_sweep",
+        "policy_variant": variant,
+        "held_goal_semantics": "fixed_endpoint_recomputed_features",
+        "goal_type": goal_type,
+        "episodes_per_setting": eval_episodes,
+        "horizons": horizons,
+        "update_periods": update_periods,
+        "rows": rows,
+        "csv": str(csv_path),
+        "plot": str(plot_path),
+        "metadata": _runtime_metadata(config),
+    }
+    output_path = root / f"phase_c_oracle_sweep_{variant}_{eval_episodes}.json"
     write_json(output_path, payload)
     console.print(payload)
     return output_path

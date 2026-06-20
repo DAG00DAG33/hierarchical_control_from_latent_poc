@@ -216,3 +216,47 @@ State-query data is always reported separately from causal transitions.
   `oracle_goal_decomposition.csv`, and
   `oracle_goal_decomposition_20.png` (tracked copies under
   `docs/results/pre_rl/phase_b/`).
+
+## 2026-06-20 - C-D01: Fixed-offset held-goal failure and correction
+
+- **Initial test:** Reused the fixed-`k` Phase B TCP policies while holding one
+  oracle branch goal for `U={1,2,5,10}` primitive steps. The first
+  implementation cached the six-dimensional TCP feature vector directly.
+- **Bug found:** TCP "velocity" is a displacement-over-horizon feature derived
+  from the current state and target endpoint. Caching it made the feature stale
+  after the first action. The corrected implementation holds the raw reachable
+  endpoint state and recomputes derived features from each current observation
+  and the remaining time. This does not invoke the high level again.
+- **Corrected fixed-offset result:** At `k=5`, success was `0.30, 0.25, 0.05,
+  0.05` for `U=1,2,5,10` against flat `0.30`. At `k=10`, it was `0.20, 0.20,
+  0.15, 0.00` against flat `0.35`. Exact replay errors remained zero.
+- **Diagnosis:** Even coherent endpoint preprocessing becomes out of
+  distribution after one held action because each Phase B low level was
+  trained only at exactly `k` remaining steps.
+
+## 2026-06-20 - C-G01: Multi-offset time-conditioned oracle smoke gate
+
+- **Method:** Train TCP low-level policies on every future offset from 1 through
+  `k`, repeating the coherent teacher action label for each reachable teacher
+  endpoint. Append normalized time-to-go `offset/k`. At deployment, hold the
+  endpoint for `U` steps, recompute its derived TCP feature from the observed
+  current state, decrement time-to-go, and reobserve before every action.
+- **Data:** Same clean successful privileged trajectories as Phase B, no state
+  queries. `k=5` expands 71,115 causal transitions across five offsets; `k=10`
+  expands them across ten offsets. Architecture remains a width-256, depth-4
+  deterministic MLP with 100 epochs, batch size 4,096, and learning rate
+  `3e-4`.
+- **20-episode smoke result:**
+
+| horizon | flat | `U=1` | `U=2` | `U=5` | `U=10` |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `k=5` | `0.30` | `0.60` | `0.50` | `0.50` | `0.15` |
+| `k=10` | `0.35` | `0.55` | `0.55` | `0.55` | `0.75` |
+
+- **Temporal abstraction:** `k=10,U=10` uses 6.05 high-level decisions per
+  episode on average versus 56.15 primitive actions, while reaching `0.75`
+  success and `0.0486` teacher-action MAE. This is a genuine 0.5-second held
+  future target rather than per-step indirect action prediction.
+- **Decision:** Phase C has a strong positive smoke signal. Confirm only the
+  selected `k=10` family on 100 fixed episodes before choosing the interface;
+  do not train `k=20`, whose Phase B oracle was already weak.

@@ -282,3 +282,11 @@ pre_rl:
     smoke_eval_episodes: 20
     development_eval_episodes: 100
     eval_seed_start: 1600000
+  phase_c:
+    goal_type: tcp
+    horizons: [5, 10, 20]
+    update_periods: [1, 2, 5, 10]
+    smoke_eval_episodes: 20
+    development_eval_episodes: 100
+    replay_branch_num_envs: 32
+    eval_seed_start: 1700000

@@ -50,6 +50,8 @@ from hcl_poc.incremental import (
     train_pre_rl_phase_b_horizon,
     evaluate_pre_rl_phase_b_horizon,
     aggregate_pre_rl_phase_b,
+    run_pre_rl_phase_c_oracle_sweep,
+    train_pre_rl_phase_c_time_conditioned,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -788,6 +790,21 @@ def incremental_cmd(args: argparse.Namespace) -> None:
         )
     elif args.incremental_command == "pre-rl-b-aggregate":
         aggregate_pre_rl_phase_b(config, episodes=args.episodes)
+    elif args.incremental_command == "pre-rl-c-oracle-sweep":
+        run_pre_rl_phase_c_oracle_sweep(
+            config,
+            episodes=args.episodes,
+            time_conditioned=args.time_conditioned,
+            horizons_override=args.horizons,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-c-train-time-conditioned":
+        train_pre_rl_phase_c_time_conditioned(
+            config,
+            horizon_steps=args.horizon_steps,
+            seed=args.seed,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1249,6 +1266,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(pre_rl_b_aggregate)
     pre_rl_b_aggregate.add_argument("--episodes", type=int)
     pre_rl_b_aggregate.set_defaults(func=incremental_cmd)
+    pre_rl_c_oracle_sweep = incremental_sub.add_parser("pre-rl-c-oracle-sweep")
+    add_config_arg(pre_rl_c_oracle_sweep)
+    pre_rl_c_oracle_sweep.add_argument("--episodes", type=int)
+    pre_rl_c_oracle_sweep.add_argument("--time-conditioned", action="store_true")
+    pre_rl_c_oracle_sweep.add_argument("--horizons", type=int, nargs="+")
+    pre_rl_c_oracle_sweep.add_argument("--force", action="store_true")
+    pre_rl_c_oracle_sweep.set_defaults(func=incremental_cmd)
+    pre_rl_c_train = incremental_sub.add_parser("pre-rl-c-train-time-conditioned")
+    add_config_arg(pre_rl_c_train)
+    pre_rl_c_train.add_argument("--horizon-steps", type=int, required=True)
+    pre_rl_c_train.add_argument("--seed", type=int, default=0)
+    pre_rl_c_train.add_argument("--force", action="store_true")
+    pre_rl_c_train.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)
