@@ -10529,6 +10529,270 @@ def analyze_pre_rl_phase_e_geometry(config: Config) -> Path:
     return output_path
 
 
+def train_pre_rl_phase_f_privileged_tcp_predictor(
+    config: Config,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    horizon_steps = int(config.get("pre_rl.phase_f.horizon_steps", 10))
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "pre_rl"
+        / "phase_f"
+        / "privileged_tcp"
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "predictor.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Pre-RL Phase F privileged TCP predictor exists: {checkpoint_path}")
+        return checkpoint_path
+    low_path = train_pre_rl_phase_c_time_conditioned(
+        config, horizon_steps=horizon_steps, seed=seed, force=False
+    )
+    low_checkpoint = torch.load(low_path, map_location="cpu", weights_only=False)
+    action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
+    train_episodes, val_episodes, data_metadata = _load_phase7_privileged_episodes(
+        config, horizon_steps, cap_train_to_usable=True
+    )
+    zero_action = action_norm.transform(np.zeros((1, 3), dtype=np.float32))[0]
+
+    def samples(episodes: list[dict[str, np.ndarray]]) -> tuple[np.ndarray, np.ndarray]:
+        conditions = []
+        targets = []
+        for episode in episodes:
+            states = episode["states"]
+            actions = episode["actions"]
+            normalized_actions = action_norm.transform(actions)
+            for t in range(len(actions) - horizon_steps):
+                previous = normalized_actions[t - 1] if t > 0 else zero_action
+                conditions.append(np.concatenate([states[t], previous]))
+                targets.append(states[t + horizon_steps, 14:17])
+        return np.asarray(conditions, dtype=np.float32), np.asarray(targets, dtype=np.float32)
+
+    train_x, train_y = samples(train_episodes)
+    val_x, val_y = samples(val_episodes)
+    input_norm = Standardizer.fit(train_x)
+    target_norm = Standardizer.fit(train_y)
+    dataset = TensorDataset(
+        torch.from_numpy(input_norm.transform(train_x)),
+        torch.from_numpy(target_norm.transform(train_y)),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config.get("pre_rl.phase_f.batch_size", 1024)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    device = default_device()
+    hidden_dim = int(config.get("pre_rl.phase_f.hidden_dim", 512))
+    model = MLP(train_x.shape[-1], 3, hidden_dim, depth=4).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(config.get("pre_rl.phase_f.lr", 3e-4))
+    )
+    val_x_t = torch.from_numpy(input_norm.transform(val_x)).to(device).float()
+    epochs = int(config.get("pre_rl.phase_f.epochs", 100))
+    best_state = None
+    best_mse = float("inf")
+    history = []
+    for epoch in trange(1, epochs + 1, desc="train Phase F privileged TCP predictor"):
+        model.train()
+        total = 0.0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True).float()
+            y = y.to(device, non_blocking=True).float()
+            loss = torch.mean((model(x) - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            total += float(loss.detach().cpu()) * len(x)
+        model.eval()
+        with torch.inference_mode():
+            predicted = target_norm.inverse(model(val_x_t).cpu().numpy())
+        position_error = np.linalg.norm(predicted - val_y, axis=-1)
+        val_mse = float(np.mean(position_error**2))
+        history.append(
+            {
+                "epoch": epoch,
+                "train_normalized_mse": total / len(dataset),
+                "validation_tcp_l2_m": float(np.mean(position_error)),
+            }
+        )
+        if val_mse < best_mse:
+            best_mse = val_mse
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase F privileged TCP predictor produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    predicted = target_norm.inverse(model(val_x_t).detach().cpu().numpy())
+    persistence = val_x[:, 14:17]
+    payload = {
+        "phase": "F-G",
+        "method": "privileged_deterministic_tcp_endpoint_predictor",
+        "horizon_steps": horizon_steps,
+        "model": best_state,
+        "condition_dim": int(train_x.shape[-1]),
+        "hidden_dim": hidden_dim,
+        "input_norm": input_norm.state_dict(),
+        "target_norm": target_norm.state_dict(),
+        "action_norm": low_checkpoint["action_norm"],
+        "low_checkpoint": str(low_path),
+        "validation_tcp_l2_m": float(np.mean(np.linalg.norm(predicted - val_y, axis=-1))),
+        "persistence_tcp_l2_m": float(np.mean(np.linalg.norm(persistence - val_y, axis=-1))),
+        "history": history,
+        "data": {**data_metadata, "train_samples": len(train_x), "validation_samples": len(val_x)},
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "metrics.json",
+        {key: value for key, value in payload.items() if key not in {"model", "input_norm", "target_norm", "action_norm"}},
+    )
+    console.print(f"Wrote Pre-RL Phase F privileged TCP predictor: {checkpoint_path}")
+    return checkpoint_path
+
+
+@torch.inference_mode()
+def evaluate_pre_rl_phase_f_privileged_tcp_hierarchy(
+    config: Config,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    eval_episodes = int(episodes or config.get("pre_rl.phase_f.eval_episodes", 100))
+    result_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "pre_rl"
+        / "phase_f"
+        / "privileged_tcp"
+        / f"seed{seed}"
+    )
+    output_path = result_dir / f"hierarchy_eval_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Pre-RL Phase F privileged TCP evaluation exists: {output_path}")
+        return output_path
+    predictor_path = train_pre_rl_phase_f_privileged_tcp_predictor(
+        config, seed=seed, force=False
+    )
+    device = default_device()
+    checkpoint = torch.load(predictor_path, map_location=device, weights_only=False)
+    predictor = MLP(
+        int(checkpoint["condition_dim"]), 3, int(checkpoint["hidden_dim"]), depth=4
+    ).to(device)
+    predictor.load_state_dict(checkpoint["model"])
+    predictor.eval()
+    input_norm = Standardizer.from_state_dict(checkpoint["input_norm"])
+    target_norm = Standardizer.from_state_dict(checkpoint["target_norm"])
+    low_checkpoint = torch.load(
+        checkpoint["low_checkpoint"], map_location=device, weights_only=False
+    )
+    low_model, low_cond_norm = _phase7_load_privileged_model(low_checkpoint, "tcp", device)
+    action_norm = Standardizer.from_state_dict(low_checkpoint["action_norm"])
+    horizon_steps = int(checkpoint["horizon_steps"])
+    update_period = int(config.get("pre_rl.phase_f.update_period", 10))
+    num_envs = min(int(config.get("pre_rl.phase_f.eval_num_envs", 64)), eval_episodes)
+    env = _make_state_env(
+        config,
+        num_envs,
+        record_metrics=True,
+        ignore_terminations=False,
+        reconfiguration_freq=0,
+    )
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    zero_action = action_norm.transform(np.zeros((1, 3), dtype=np.float32))[0]
+    previous_action = np.repeat(zero_action[None], num_envs, axis=0)
+    countdown = np.zeros(num_envs, dtype=np.int32)
+    endpoint = np.zeros((num_envs, 3), dtype=np.float32)
+    seed_start = int(config.get("pre_rl.phase_f.eval_seed_start", 1_920_000))
+    obs, _info = env.reset(seed=seed_start)
+    successes = []
+    final_rewards = []
+    max_rewards = []
+    teacher_maes = []
+    active_max_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+    high_decisions = 0
+    while len(successes) < eval_episodes:
+        state_t = _phase7_obs_state_tensor(obs, device)
+        state = state_t.cpu().numpy().astype(np.float32)
+        replan = countdown <= 0
+        if np.any(replan):
+            high_condition = np.concatenate([state, previous_action], axis=-1)
+            predicted_endpoint = target_norm.inverse(
+                predictor(
+                    torch.from_numpy(input_norm.transform(high_condition)).to(device).float()
+                )
+                .cpu()
+                .numpy()
+            )
+            endpoint[replan] = predicted_endpoint[replan]
+            countdown[replan] = update_period
+            high_decisions += int(np.sum(replan))
+        remaining = np.maximum(countdown, 1).astype(np.float32)
+        tcp_velocity = (endpoint - state[:, 14:17]) / (
+            remaining[:, None] / float(config.get("control_freq", 20))
+        )
+        goal = np.concatenate([endpoint, tcp_velocity], axis=-1)
+        low_condition = _phase7_privileged_condition(state, goal, previous_action)
+        low_condition = np.concatenate(
+            [low_condition, (remaining / horizon_steps)[:, None]], axis=-1
+        )
+        raw_action = action_norm.inverse(
+            low_model(
+                torch.from_numpy(low_cond_norm.transform(low_condition)).to(device).float()
+            )
+            .cpu()
+            .numpy()
+        )
+        teacher_action = (
+            torch.clamp(teacher.actor_mean(state_t), action_low, action_high).cpu().numpy()
+        )
+        teacher_maes.extend(np.mean(np.abs(raw_action - teacher_action), axis=-1).tolist())
+        action = torch.clamp(torch.from_numpy(raw_action).to(device).float(), action_low, action_high)
+        obs, reward, _terminated, _truncated, info = env.step(action)
+        countdown -= 1
+        previous_action = action_norm.transform(action.cpu().numpy())
+        reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+        active_max_reward = np.maximum(active_max_reward, reward_np)
+        if "final_info" in info:
+            mask = _numpy(info["_final_info"]).reshape(-1).astype(bool)
+            if np.any(mask):
+                success_once = _numpy(info["final_info"]["episode"]["success_once"]).reshape(-1)
+                for env_index in np.flatnonzero(mask):
+                    successes.append(float(success_once[env_index]))
+                    final_rewards.append(float(reward_np[env_index]))
+                    max_rewards.append(float(active_max_reward[env_index]))
+                    countdown[env_index] = 0
+                    previous_action[env_index] = zero_action
+                    active_max_reward[env_index] = -np.inf
+                    if len(successes) >= eval_episodes:
+                        break
+    env.close()
+    success = float(np.mean(successes[:eval_episodes]))
+    payload = {
+        "phase": "F-G",
+        "method": "learned_privileged_tcp_endpoint_hierarchy",
+        "horizon_steps": horizon_steps,
+        "update_period": update_period,
+        "episodes": eval_episodes,
+        "success": success,
+        "success_wilson_95": _wilson_interval(success, eval_episodes),
+        "final_reward": float(np.mean(final_rewards[:eval_episodes])),
+        "max_reward": float(np.mean(max_rewards[:eval_episodes])),
+        "teacher_action_mae": float(np.mean(teacher_maes)),
+        "high_level_decisions_per_episode": float(high_decisions / eval_episodes),
+        "validation_tcp_l2_m": checkpoint["validation_tcp_l2_m"],
+        "persistence_tcp_l2_m": checkpoint["persistence_tcp_l2_m"],
+        "checkpoint": str(predictor_path),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
 @torch.inference_mode()
 def collect_phase7_oracle_dagger_queries(
     config: Config,

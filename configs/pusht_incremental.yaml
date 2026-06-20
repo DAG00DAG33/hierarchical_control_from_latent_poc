@@ -312,3 +312,13 @@ pre_rl:
     pair_samples: 20000
     nearest_references: 3000
     nearest_queries: 500
+  phase_f:
+    horizon_steps: 10
+    update_period: 10
+    hidden_dim: 512
+    batch_size: 1024
+    epochs: 100
+    lr: 0.0003
+    eval_episodes: 100
+    eval_num_envs: 64
+    eval_seed_start: 1920000

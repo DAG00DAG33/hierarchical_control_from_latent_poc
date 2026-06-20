@@ -362,3 +362,25 @@ State-query data is always reported separately from causal transitions.
   AE subtraction as the preferred goal interface. Carry forward the compact
   time-conditioned TCP endpoint/effect interface validated in Phase C. Full
   interpretation is in `representation_geometry_report.md`.
+
+## 2026-06-20 - F-G01: Learned privileged TCP effect interface
+
+- **Factorization:** Complete privileged current state remains the low-level
+  input, while the future goal is reduced to a learned 3D TCP endpoint. The
+  validated multi-offset low level derives time-to-go velocity features and
+  holds each endpoint for `U=10` actions at `k=10`.
+- **High-level training:** Deterministic width-512, depth-4 MLP on 53,115 clean
+  causal samples; input is current 31D state plus previous action, output is
+  the TCP position 10 steps ahead. Training uses 100 epochs, batch size 1,024,
+  and learning rate `3e-4`.
+- **Prediction:** Held-out TCP endpoint L2 error is `0.0170 m`, versus
+  `0.1899 m` for persistence.
+- **Closed loop:** 100 episodes on seeds beginning at `1920000` produce `0.69`
+  success (95% Wilson `[0.594, 0.772]`), final reward `0.784`, teacher-action
+  MAE `0.0579`, and 9.16 high-level decisions per episode. A prior 20-episode
+  smoke sample happened to score 1.00 and is not used as the estimate.
+- **Interpretation:** A compact, physically meaningful future TCP effect is
+  both predictable and controllable. This closes most of the interface
+  uncertainty without requiring latent subtraction. The next test replaces
+  privileged current state in the high and low policies with AE-256/DINO plus
+  proprioception while retaining the same endpoint target.
