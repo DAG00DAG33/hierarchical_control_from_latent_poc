@@ -38,3 +38,21 @@ State-query data is always reported separately from causal transitions.
   ```
 
 - **Status:** Implementation complete; execution pending.
+
+## 2026-06-20 - A-D01: Matched-flat lazy-training inference-mode bug
+
+- **Command:** `uv run hcl-poc incremental pre-rl-a-run --config
+  configs/pusht_incremental.yaml --seed 0`.
+- **Observed behavior:** Fresh 200-episode visual BC and visual-flow
+  evaluations completed (`0.600` and `0.585` success), then matched-flat
+  latent training failed on its first backward pass because
+  `evaluate_phase7_matched_flat_latent_policy` decorated the entire function
+  with `torch.inference_mode()`.
+- **Diagnosis:** Earlier calls silently depended on an already existing latent
+  BC checkpoint. Phase A is the first path that legitimately requested lazy
+  training through this evaluator.
+- **Fix:** Keep evaluation inference-only but explicitly disable inference
+  mode around checkpoint preparation/training. Completed result files are
+  retained and the resumable runner will reuse them.
+- **Data impact:** None. No partial checkpoint was written and no result was
+  included in an aggregate.

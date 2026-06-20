@@ -6877,13 +6877,16 @@ def evaluate_phase7_matched_flat_latent_policy(
 ) -> Path:
     latent_dim = int(latent_dim or config.get("incremental.phase7.latent_dim", 256))
     variant = str(variant or config.get("incremental.phase7.variant", "ae_recon"))
-    checkpoint_path = train_phase6_latent_bc(
-        config,
-        latent_dim=latent_dim,
-        variant=variant,
-        seed=seed,
-        force=False,
-    )
+    # This evaluator is inference-only after checkpoint preparation. Explicitly
+    # re-enable autograd when a matched flat checkpoint must be trained lazily.
+    with torch.inference_mode(False):
+        checkpoint_path = train_phase6_latent_bc(
+            config,
+            latent_dim=latent_dim,
+            variant=variant,
+            seed=seed,
+            force=False,
+        )
     results_dir = ensure_dir(
         config.path_value("paths.incremental_results_dir")
         / "phase7"
