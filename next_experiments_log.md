@@ -260,3 +260,27 @@ State-query data is always reported separately from causal transitions.
 - **Decision:** Phase C has a strong positive smoke signal. Confirm only the
   selected `k=10` family on 100 fixed episodes before choosing the interface;
   do not train `k=20`, whose Phase B oracle was already weak.
+
+## 2026-06-20 - C-G02: 100-episode temporal-abstraction confirmation
+
+- **Configuration:** Time-conditioned multi-offset TCP policy, `k=10`,
+  `H=1`, fixed evaluation seeds beginning at `1700000`, exact local teacher
+  branch endpoints, and endpoint holds `U={1,2,5,10}`. No additional training
+  or state-query data was introduced after C-G01.
+
+| method | success | 95% Wilson CI | final reward | teacher MAE | high-level decisions/episode |
+| --- | ---: | --- | ---: | ---: | ---: |
+| flat privileged | `0.16` | `[0.101, 0.244]` | `0.381` | `0.1704` | `0.00` |
+| TCP oracle, `U=1` | `0.69` | `[0.594, 0.772]` | `0.783` | `0.0620` | `59.67` |
+| TCP oracle, `U=2` | `0.71` | `[0.615, 0.790]` | `0.798` | `0.0553` | `29.19` |
+| TCP oracle, `U=5` | `0.69` | `[0.594, 0.772]` | `0.786` | `0.0525` | `12.46` |
+| TCP oracle, `U=10` | `0.81` | `[0.722, 0.875]` | `0.866` | `0.0554` | `6.25` |
+
+- **Gate:** Pass. `k=10,U=10` represents a meaningful 0.5-second physical
+  target, makes materially fewer decisions than the primitive controller, and
+  exceeds both the matched flat policy and per-step oracle on this evaluation
+  set. Exact replay error remains zero.
+- **Selected interface for subsequent experiments:** TCP endpoint,
+  `k=10`, `U=10`, and one-step low-level action horizon `H=1`. The action-chunk
+  ablation remains secondary because goal holding already supplies temporal
+  abstraction without open-loop primitive execution.
