@@ -45,6 +45,8 @@ from hcl_poc.incremental import (
     run_phase11_comparison,
     run_phase12_budget,
     plot_phase12_sample_efficiency,
+    run_pre_rl_phase_a_seed,
+    aggregate_pre_rl_phase_a,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -762,6 +764,10 @@ def incremental_cmd(args: argparse.Namespace) -> None:
         )
     elif args.incremental_command == "phase12-plot":
         plot_phase12_sample_efficiency(config)
+    elif args.incremental_command == "pre-rl-a-run":
+        run_pre_rl_phase_a_seed(config, seed=args.seed)
+    elif args.incremental_command == "pre-rl-a-aggregate":
+        aggregate_pre_rl_phase_a(config)
     else:
         raise ValueError(args.incremental_command)
 
@@ -1199,6 +1205,13 @@ def build_parser() -> argparse.ArgumentParser:
     phase12_plot = incremental_sub.add_parser("phase12-plot")
     add_config_arg(phase12_plot)
     phase12_plot.set_defaults(func=incremental_cmd)
+    pre_rl_a_run = incremental_sub.add_parser("pre-rl-a-run")
+    add_config_arg(pre_rl_a_run)
+    pre_rl_a_run.add_argument("--seed", type=int, required=True)
+    pre_rl_a_run.set_defaults(func=incremental_cmd)
+    pre_rl_a_aggregate = incremental_sub.add_parser("pre-rl-a-aggregate")
+    add_config_arg(pre_rl_a_aggregate)
+    pre_rl_a_aggregate.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

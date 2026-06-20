@@ -11817,6 +11817,275 @@ def plot_phase12_sample_efficiency(config: Config) -> Path:
     return output_path
 
 
+def _pre_rl_phase_a_config(config: Config) -> Config:
+    raw = copy.deepcopy(config.raw)
+    raw["paths"]["incremental_artifact_dir"] = str(
+        config.path_value("paths.incremental_artifact_dir") / "phase12" / "n1800"
+    )
+    raw["paths"]["incremental_results_dir"] = str(
+        config.path_value("paths.incremental_results_dir") / "pre_rl" / "phase_a"
+    )
+    raw["incremental"]["phase4"]["train_episodes"] = 1800
+    raw["incremental"]["phase6"]["train_episodes"] = 1800
+    eval_seed = int(config.get("pre_rl.phase_a.eval_seed_start", 1_500_000))
+    raw["incremental"]["phase4"]["eval_seed"] = eval_seed
+    raw["incremental"]["phase5"]["eval_seed"] = eval_seed
+    raw["incremental"]["phase6"]["eval_seed"] = eval_seed
+    raw["incremental"]["phase7"]["eval_seed"] = eval_seed
+    raw["incremental"]["phase7"]["replay_branch_seed"] = eval_seed
+    raw["incremental"]["phase8"]["eval_seed"] = eval_seed
+    raw["incremental"]["phase9"]["eval_seed"] = eval_seed
+    return Config(raw=raw, path=config.path)
+
+
+def _wilson_interval(success: float, episodes: int, z: float = 1.959963984540054) -> list[float]:
+    if episodes < 1:
+        raise ValueError("Wilson interval requires at least one episode")
+    denominator = 1.0 + z * z / episodes
+    center = (success + z * z / (2.0 * episodes)) / denominator
+    radius = (
+        z
+        * np.sqrt(success * (1.0 - success) / episodes + z * z / (4.0 * episodes**2))
+        / denominator
+    )
+    return [float(max(0.0, center - radius)), float(min(1.0, center + radius))]
+
+
+def run_pre_rl_phase_a_seed(config: Config, seed: int) -> Path:
+    configured_seeds = [int(value) for value in config.get("pre_rl.phase_a.training_seeds")]
+    if seed not in configured_seeds:
+        raise ValueError(f"Phase A seed must be one of {configured_seeds}, got {seed}")
+    phase_config = _pre_rl_phase_a_config(config)
+    eval_episodes = int(config.get("pre_rl.phase_a.eval_episodes", 200))
+    oracle_episodes = int(config.get("pre_rl.phase_a.oracle_eval_episodes", 50))
+    eval_seed = int(config.get("pre_rl.phase_a.eval_seed_start", 1_500_000))
+    result_root = phase_config.path_value("paths.incremental_results_dir")
+    output_path = ensure_dir(result_root / "summaries") / f"seed{seed}.json"
+    if output_path.exists():
+        console.print(f"Pre-RL Phase A seed summary exists: {output_path}")
+        return output_path
+
+    visual_bc_path = evaluate_phase4_visual_bc(
+        phase_config,
+        history=1,
+        architecture="concat",
+        seed=seed,
+        episodes=eval_episodes,
+        eval_seed_start=eval_seed,
+    )
+    visual_flow_path = evaluate_phase5_visual_flow(
+        phase_config,
+        history=1,
+        architecture="concat",
+        seed=seed,
+        episodes=eval_episodes,
+        eval_seed_start=eval_seed,
+    )
+    matched_flat_path = evaluate_phase7_matched_flat_latent_policy(
+        phase_config,
+        latent_dim=256,
+        variant="ae_recon",
+        seed=seed,
+        episodes=eval_episodes,
+    )
+    oracle_path = evaluate_phase7_replay_branch_oracle_low_level(
+        phase_config,
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        action_chunk_steps=1,
+        goal_encoding="delta",
+        goal_dropout_prob=0.0,
+        seed=seed,
+        episodes=oracle_episodes,
+        force=False,
+    )
+    deterministic_path = evaluate_phase8_deterministic_hierarchy(
+        phase_config,
+        history=1,
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        target_mode="absolute",
+        seed=seed,
+        episodes=eval_episodes,
+    )
+    generative_path = evaluate_phase9_future_flow(
+        phase_config,
+        sample_mode="zero",
+        latent_dim=256,
+        variant="ae_recon",
+        horizon_steps=2,
+        seed=seed,
+        episodes=eval_episodes,
+    )
+
+    import json
+
+    method_paths = {
+        "visual_bc": visual_bc_path,
+        "visual_flat_flow": visual_flow_path,
+        "matched_flat_latent": matched_flat_path,
+        "oracle_hierarchy": oracle_path,
+        "deterministic_hierarchy": deterministic_path,
+        "generative_hierarchy": generative_path,
+    }
+    rows = []
+    for method, path in method_paths.items():
+        with path.open("r", encoding="utf-8") as f:
+            result = json.load(f)
+        closed = result["closed_loop"]
+        validation_action_mae = None
+        rollout_action_mae = closed.get("teacher_action_mae")
+        if "held_out_action_metrics" in result:
+            validation_action_mae = result["held_out_action_metrics"].get("mae")
+        elif method == "oracle_hierarchy":
+            validation_action_mae = result["validation_action_metrics"]["correct_goal"]["mae"]
+        elif method == "deterministic_hierarchy":
+            validation_action_mae = result["low_level_metrics"]["predicted_goal_action_mae"]
+        elif method == "generative_hierarchy":
+            validation_action_mae = result["offline_metrics"]["zero_noise_goal_action_mae"]
+        episodes = int(closed["episodes"])
+        success = float(closed["success"])
+        rows.append(
+            {
+                "method": method,
+                "source": str(path),
+                "success": success,
+                "success_wilson_95": _wilson_interval(success, episodes),
+                "episodes": episodes,
+                "eval_seed_start": int(closed["seed_start"]),
+                "final_reward": float(closed["final_reward"]),
+                "max_reward": float(closed["max_reward"]),
+                "validation_action_mae": (
+                    float(validation_action_mae) if validation_action_mae is not None else None
+                ),
+                "rollout_teacher_action_mae": (
+                    float(rollout_action_mae) if rollout_action_mae is not None else None
+                ),
+            }
+        )
+    train_episodes, _validation_episodes, _metadata = _load_phase4_episodes(phase_config)
+    transitions = int(sum(len(episode["actions"]) for episode in train_episodes))
+    payload = {
+        "phase": "A",
+        "experiment": "full_budget_statistical_replication",
+        "command": (
+            "uv run hcl-poc incremental pre-rl-a-run "
+            f"--config {config.path} --seed {seed}"
+        ),
+        "policy_seed": seed,
+        "evaluation_seed_start": eval_seed,
+        "deployable_evaluation_episodes": eval_episodes,
+        "oracle_evaluation_episodes": oracle_episodes,
+        "causal_trajectories": 1800,
+        "causal_transitions": transitions,
+        "validation_trajectories": 200,
+        "state_query_samples": 0,
+        "representation": "ae_recon_z256",
+        "rows": rows,
+        "artifact_root": str(phase_config.path_value("paths.incremental_artifact_dir")),
+        "result_root": str(result_root),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def aggregate_pre_rl_phase_a(config: Config) -> Path:
+    import json
+    import matplotlib.pyplot as plt
+
+    phase_config = _pre_rl_phase_a_config(config)
+    root = phase_config.path_value("paths.incremental_results_dir")
+    seeds = [int(value) for value in config.get("pre_rl.phase_a.training_seeds")]
+    summaries = []
+    for seed in seeds:
+        path = root / "summaries" / f"seed{seed}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing Phase A seed summary: {path}")
+        with path.open("r", encoding="utf-8") as f:
+            summaries.append(json.load(f))
+    methods = [row["method"] for row in summaries[0]["rows"]]
+    rows = []
+    for method in methods:
+        seed_rows = [
+            next(row for row in summary["rows"] if row["method"] == method)
+            for summary in summaries
+        ]
+        successes = np.asarray([row["success"] for row in seed_rows], dtype=np.float64)
+        episode_counts = np.asarray([row["episodes"] for row in seed_rows], dtype=np.int64)
+        pooled_success = float(
+            np.sum(successes * episode_counts) / np.sum(episode_counts)
+        )
+        rows.append(
+            {
+                "method": method,
+                "seed_success": successes.tolist(),
+                "mean_success": float(np.mean(successes)),
+                "training_seed_std": float(np.std(successes, ddof=1)),
+                "pooled_success": pooled_success,
+                "pooled_wilson_95": _wilson_interval(
+                    pooled_success, int(np.sum(episode_counts))
+                ),
+                "mean_final_reward": float(np.mean([row["final_reward"] for row in seed_rows])),
+                "mean_max_reward": float(np.mean([row["max_reward"] for row in seed_rows])),
+                "seed_rows": seed_rows,
+            }
+        )
+    means = {row["method"]: row["mean_success"] for row in rows}
+    best_flat = max(
+        means["visual_bc"], means["visual_flat_flow"], means["matched_flat_latent"]
+    )
+    best_learned_hierarchy = max(
+        means["deterministic_hierarchy"], means["generative_hierarchy"]
+    )
+    ordering_passed = bool(means["oracle_hierarchy"] > best_flat > best_learned_hierarchy)
+    plot_path = root / "phase_a_success_across_seeds.png"
+    labels = [method.replace("_", " ") for method in methods]
+    x = np.arange(len(methods))
+    figure, axis = plt.subplots(figsize=(10, 6))
+    axis.bar(
+        x,
+        [row["mean_success"] for row in rows],
+        yerr=[row["training_seed_std"] for row in rows],
+        capsize=4,
+    )
+    for method_index, row in enumerate(rows):
+        axis.scatter(
+            np.full(len(row["seed_success"]), method_index),
+            row["seed_success"],
+            color="black",
+            zorder=3,
+        )
+    axis.set_xticks(x)
+    axis.set_xticklabels(labels, rotation=30, ha="right")
+    axis.set_ylim(0.0, 1.0)
+    axis.set_ylabel("Success rate")
+    axis.set_title("Pre-RL Phase A: success across training seeds")
+    axis.grid(axis="y", alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+    output_path = root / "phase_a_aggregate.json"
+    payload = {
+        "phase": "A",
+        "training_seeds": seeds,
+        "rows": rows,
+        "best_flat_success": best_flat,
+        "best_learned_hierarchy_success": best_learned_hierarchy,
+        "oracle_success": means["oracle_hierarchy"],
+        "gate_ordering": "oracle > flat > learned_hierarchy",
+        "gate_passed": ordering_passed,
+        "plot": str(plot_path),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
 def sweep_phase8_deterministic_predictors(
     config: Config,
     latent_dim: int | None = None,

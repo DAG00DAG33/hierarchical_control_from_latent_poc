@@ -269,3 +269,9 @@ incremental:
     lr: 0.0001
   phase12:
     oracle_eval_episodes: 10
+pre_rl:
+  phase_a:
+    training_seeds: [0, 1, 2]
+    eval_episodes: 200
+    oracle_eval_episodes: 50
+    eval_seed_start: 1500000
