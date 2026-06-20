@@ -1752,3 +1752,53 @@ The unregularized flow successfully memorizes one and ten trajectories:
   deployable learned high level.
 - **Artifact:** `results/incremental/phase11/complete_hierarchy_comparison.png`
   plots success with binomial error bars and final/maximum reward.
+
+### 2026-06-19 - P12-D01: Final sample-efficiency sweep
+
+- **Nested data:** Trained independently on the first `50`, `100`, `200`,
+  `500`, `1000`, and `1800` successful causal teacher trajectories. The last
+  200 of the 2,000-trajectory dataset remain the same validation set at every
+  budget. The corresponding training-transition counts are `2,311`, `4,507`,
+  `8,834`, `22,367`, `44,605`, and `80,472` (115.6 to 4,023.6 seconds of
+  20 Hz behavior). No DAgger state queries are included in this sweep.
+- **Retraining boundary:** Every budget has an isolated artifact directory and
+  retrains visual BC, visual action flow, the reconstruction-only AE-256,
+  latent oracle low level, deterministic future-latent predictor, and
+  conditional future-latent flow from seed 0. There is no checkpoint transfer
+  between budgets.
+- **Evaluation:** All deployable methods use the same 100 seeds beginning at
+  `1200000`. Exact online teacher-branch replay uses 10 of those seeds because
+  branch generation dominates runtime. Error bars are binomial standard
+  errors; the oracle curve is consequently much less precise. Only one policy
+  training seed is measured, so these curves do not establish training-seed
+  robustness.
+
+| trajectories | transitions | visual BC | flat flow | oracle hierarchy | deterministic hierarchy | generative hierarchy |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 2,311 | `0.00` | `0.03` | `0.00` | `0.01` | `0.03` |
+| 100 | 4,507 | `0.05` | `0.07` | `0.10` | `0.02` | `0.05` |
+| 200 | 8,834 | `0.10` | `0.20` | `0.40` | `0.08` | `0.03` |
+| 500 | 22,367 | `0.29` | `0.28` | `0.80` | `0.14` | `0.23` |
+| 1000 | 44,605 | `0.44` | `0.49` | `0.80` | `0.22` | `0.25` |
+| 1800 | 80,472 | `0.60` | `0.62` | `0.70` | `0.37` | `0.42` |
+
+- **Thresholds:** Oracle hierarchy first reaches 50% and 70% measured success
+  at 22,367 transitions. Visual BC and flat flow first reach 50% at 80,472;
+  neither reaches 70%. Neither learned hierarchy reaches 50%.
+- **Area under learning curve:** Trapezoidal AULC against log transitions is
+  `1.754` oracle, `0.940` flat flow, `0.807` visual BC, `0.538` generative
+  hierarchy, and `0.444` deterministic hierarchy.
+- **Interpretation:** The oracle curve is strong evidence that a reachable
+  future latent is a useful and potentially sample-efficient low-level
+  interface. It is not a deployable method and its 10-episode points have wide
+  uncertainty. Once the high level must predict that latent, the advantage
+  disappears: at 1,800 trajectories, deterministic and generative hierarchy
+  trail flat flow by 25 and 20 percentage points respectively.
+- **Phase 12 result:** Negative for the deployable sample-efficiency claim,
+  positive for the oracle-interface hypothesis. Phase 8-10 diagnostics locate
+  the unresolved bottleneck in high-level prediction of a control-compatible
+  future latent, not exact branch copying or the basic low-level interface.
+- **Artifacts:** `results/incremental/phase12/sample_efficiency.json` contains
+  curves, standard errors, thresholds, and AULC. The corresponding plot is
+  `results/incremental/phase12/sample_efficiency.png`. Tracked copies used by
+  the README are under `docs/results/incremental_sample_efficiency.{json,png}`.

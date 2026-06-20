@@ -1,217 +1,158 @@
 # Push-T Future-Latent Hierarchy POC
 
-This repository tests a two-level imitation-learning architecture on
-ManiSkill `PushT-v1`. A high-level flow model predicts a future latent state,
-and a low-level flow policy uses that latent as a subgoal. The main comparison
-is against a flat latent-conditioned flow policy.
+This repository tests whether a reachable future latent state is a useful
+interface between high- and low-level imitation policies on ManiSkill
+`PushT-v1`. The final experiment compares direct visual policies, an exact
+local-oracle hierarchy, and hierarchies with learned deterministic or
+generative high levels.
 
-The final experiment uses:
+The result separates two claims:
 
-- `pd_ee_delta_pos` control at 20 Hz;
-- RGB encoded by frozen `facebook/dinov2-small` spatial features;
-- non-privileged robot proprioception;
-- a 512D observation latent trained by an action-conditioned world model;
-- hierarchy horizons of 0.05, 0.10, and 0.25 seconds;
-- nested training sets of 50, 100, 200, 1000, and 2000 successful rollouts;
-- 500 evaluation episodes per policy seed.
+1. **Interface:** A low-level policy can use a reachable future latent. This is
+   supported by the exact local-oracle hierarchy.
+2. **Deployable hierarchy:** A learned high level can predict a sufficiently
+   control-compatible future latent. This is not supported by the current
+   implementation.
 
-The complete implementation history, debugging record, ablations, probes, and
-results are in [EXPERIMENT_REPORT.md](EXPERIMENT_REPORT.md).
+The full gated plan is in
+[pusht_incremental_experiment_plan.md](pusht_incremental_experiment_plan.md),
+and every experiment and failed intervention is recorded in
+[INCREMENTAL_EXPERIMENT_LOG.md](INCREMENTAL_EXPERIMENT_LOG.md). The earlier
+prototype is retained in [EXPERIMENT_REPORT.md](EXPERIMENT_REPORT.md).
+
+## Method
+
+The environment uses `pd_ee_delta_pos` control at 20 Hz. Observations contain
+frozen `facebook/dinov2-small` spatial RGB features and non-privileged robot
+proprioception. The selected Phase 6 representation is a 256D
+reconstruction-only autoencoder latent:
+
+```text
+z_t = E_o(DINO(rgb_t), proprio_t)
+```
+
+No object pose labels are used to train the encoder. World-model-only,
+world-model plus reconstruction, AE, VAE, and multiple latent dimensions were
+tested before selecting this representation. Held-out pose probes are
+diagnostics only.
+
+At each step, the low level receives the current latent, previous action, and
+a future-latent displacement two control steps (0.10 s) ahead:
+
+```text
+a_t = pi_low(z_t, g_t - z_t, a_{t-1})
+```
+
+Three sources of `g_t` are compared:
+
+- **Exact local oracle:** Copy the current student simulator state, roll the
+  privileged teacher for two steps, then encode the reached observation.
+- **Deterministic high level:** Predict the absolute future latent from `z_t`.
+- **Generative high level:** Conditional flow matching in future-latent space;
+  the reported policy uses its zero-noise endpoint.
+
+The oracle branch is regenerated from the student's current state every step.
+It never uses a nominal precomputed trajectory after the student deviates.
+State-copy, action, transition, RGB, DINO-feature, and latent parity were
+validated before evaluating the interface.
 
 ## Setup
 
-Python dependencies are managed with `uv`:
+Dependencies are managed with `uv`; training and simulator evaluation require
+CUDA.
 
 ```bash
 uv sync --python 3.11
 uv run hcl-poc doctor
 ```
 
-Full teacher training and dataset collection require CUDA. The imitation
-policies can run on CPU for smoke tests, but the complete experiment is
-intended for a GPU.
-
-The final configuration is:
-
-```text
-configs/pusht_spatial_wm_recon512_lownoise.yaml
-```
+The final incremental configuration is
+[`configs/pusht_incremental.yaml`](configs/pusht_incremental.yaml).
 
 ## Data
 
-The downloaded ManiSkill demonstrations did not replay successfully with
-their recorded actions in the installed simulator. The project therefore
-trains a privileged-state PPO teacher using the same downstream action space
-and records only its successful causal rollouts.
+The original downloaded demonstrations did not replay successfully under the
+installed simulator/controller combination. A privileged PPO teacher was
+therefore trained using the same downstream action space. The prepared HDF5
+dataset contains 2,000 successful causal trajectories with frozen DINO
+features, proprioception, simulator state for diagnostics, and teacher
+actions. The final 200 trajectories are a fixed validation set; training uses
+nested prefixes of the first 1,800.
+
+To rebuild the incremental teacher dataset and its basic checks:
 
 ```bash
-CONFIG=configs/pusht_spatial_wm_recon512_lownoise.yaml
+CONFIG=configs/pusht_incremental.yaml
 
-uv run hcl-poc rl train --config "$CONFIG"
-uv run hcl-poc rl eval --config "$CONFIG"
-uv run hcl-poc data prepare --config "$CONFIG"
+uv run hcl-poc incremental phase0 --config "$CONFIG"
+uv run hcl-poc incremental phase1-collect --config "$CONFIG"
+uv run hcl-poc incremental phase1-train --config "$CONFIG"
+uv run hcl-poc incremental phase1-eval --config "$CONFIG"
 ```
 
-The teacher reached 86.3% deterministic success over 256 episodes. The
-prepared HDF5 dataset contains 2000 successful rollouts and stores frozen DINO
-features, `qpos`, `qvel`, `tcp_pose`, and clipped teacher actions.
+Subsequent phase commands are listed by `uv run hcl-poc incremental --help`.
+They are intentionally gated; follow the plan and log when reproducing the
+representation and oracle diagnostics from scratch.
 
-## Method
+## Final Sweep
 
-The frozen DINO representation and robot proprioception are mapped to a latent
-state:
-
-```text
-z_t = E_o(DINO(rgb_t), proprio_t)
-```
-
-`E_o` is trained through a separate action-conditioned, multi-horizon world
-model:
-
-```text
-z_hat_{t+k} = F_dyn(z_t, a_t, ..., a_{t+k-1}, k)
-```
-
-The final world-model loss also reconstructs its DINO/proprio input. It does
-not use object-pose labels. After this stage, the dynamics model is discarded
-and the observation encoder is frozen.
-
-The hierarchical high-level model is a different model and never receives
-actions:
-
-```text
-g_t ~ p_high(z_{t+k} | z_t)
-```
-
-The low-level policy conditions on the current latent and sampled future
-latent:
-
-```text
-a_{t:t+H-1} ~ pi_low(a_{t:t+H-1} | z_t, g_t)
-```
-
-The low-level policy is trained with latent subgoal noise. This closes the
-large offline error gap between oracle future latents and subgoals sampled by
-the high-level policy.
-
-## Train And Evaluate
-
-Train one complete policy set:
+Each Phase 12 budget retrains visual BC, visual action flow, AE-256, the oracle
+low level, deterministic high level, and generative high level in an isolated
+artifact directory. No checkpoint is transferred between data budgets.
 
 ```bash
-CONFIG=configs/pusht_spatial_wm_recon512_lownoise.yaml
-N=1000
-SEED=0
+CONFIG=configs/pusht_incremental.yaml
 
-uv run hcl-poc train encoder --config "$CONFIG" --n-traj "$N" --seed "$SEED"
-uv run hcl-poc train flat --config "$CONFIG" --n-traj "$N" --seed "$SEED"
-
-for H in 0.05 0.10 0.25; do
-  uv run hcl-poc train high \
-    --config "$CONFIG" --n-traj "$N" --seed "$SEED" --horizon-s "$H"
-  uv run hcl-poc train low \
-    --config "$CONFIG" --n-traj "$N" --seed "$SEED" --horizon-s "$H"
-done
-```
-
-Evaluate each policy over 100 fixed-seed episodes:
-
-```bash
-uv run hcl-poc eval flat \
-  --config "$CONFIG" --n-traj "$N" --seed "$SEED" --episodes 100
-
-for H in 0.05 0.10 0.25; do
-  uv run hcl-poc eval hier \
-    --config "$CONFIG" --n-traj "$N" --seed "$SEED" \
-    --horizon-s "$H" --episodes 100
+for N in 50 100 200 500 1000 1800; do
+  uv run hcl-poc incremental phase12-run \
+    --config "$CONFIG" \
+    --n-trajectories "$N" \
+    --episodes 100 \
+    --eval-seed-start 1200000
 done
 
-uv run hcl-poc report --config "$CONFIG"
+uv run hcl-poc incremental phase12-plot --config "$CONFIG"
 ```
 
-Record videos:
+All deployable methods use one policy seed and the same 100 evaluation seeds.
+Exact branch replay is much slower and uses 10 of those seeds per budget. The
+plot reports binomial standard errors. This reduced protocol does not measure
+training-seed robustness.
 
-```bash
-uv run hcl-poc video flat \
-  --config "$CONFIG" --n-traj 2000 --seed 0 --episodes 4
+## Results
 
-uv run hcl-poc video hier \
-  --config "$CONFIG" --n-traj 2000 --seed 0 \
-  --horizon-s 0.05 --episodes 4
-```
+| Trajectories | Transitions | Visual BC | Flat flow | Oracle hierarchy | Deterministic hierarchy | Generative hierarchy |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 2,311 | 0.00 | 0.03 | 0.00 | 0.01 | 0.03 |
+| 100 | 4,507 | 0.05 | 0.07 | 0.10 | 0.02 | 0.05 |
+| 200 | 8,834 | 0.10 | 0.20 | 0.40 | 0.08 | 0.03 |
+| 500 | 22,367 | 0.29 | 0.28 | 0.80 | 0.14 | 0.23 |
+| 1000 | 44,605 | 0.44 | 0.49 | 0.80 | 0.22 | 0.25 |
+| 1800 | 80,472 | 0.60 | 0.62 | 0.70 | 0.37 | 0.42 |
 
-## Final Results
+![Success versus causal training transitions](docs/results/incremental_sample_efficiency.png)
 
-The table reports mean success rate +/- sample standard deviation across
-policy seeds. Each policy seed was evaluated on the same 500 environment
-initializations. Results through 1000 trajectories use three policy seeds;
-the 2000-trajectory result uses two.
+The plotted values and protocol metadata are available as
+[`docs/results/incremental_sample_efficiency.json`](docs/results/incremental_sample_efficiency.json).
 
-| Training trajectories | Flat latent | Hier 0.05 s | Hier 0.10 s | Hier 0.25 s |
-| ---: | ---: | ---: | ---: | ---: |
-| 50 | 0.20% +/- 0.20% | 0.20% +/- 0.20% | 0.20% +/- 0.35% | 0.07% +/- 0.12% |
-| 100 | 0.13% +/- 0.12% | 0.40% +/- 0.40% | 0.13% +/- 0.23% | 0.00% +/- 0.00% |
-| 200 | 1.13% +/- 0.83% | 0.60% +/- 0.40% | 0.60% +/- 0.72% | 0.93% +/- 0.61% |
-| 1000 | 3.40% +/- 0.87% | 4.00% +/- 0.92% | 3.67% +/- 1.68% | 4.07% +/- 1.14% |
-| 2000 | 5.00% +/- 1.41% | 4.10% +/- 0.14% | 3.90% +/- 0.14% | 4.00% +/- 1.13% |
+The exact oracle first reaches 50% measured success at 22,367 transitions;
+both direct visual policies first reach it at 80,472. This supports the
+future-state interface as a useful temporal abstraction, but the oracle uses a
+privileged teacher online and is not deployable. Its 10-episode points also
+have substantially wider uncertainty.
 
-At 2000 trajectories, the flat policy has final normalized reward
-`0.194 +/- 0.009` and maximum normalized reward `0.234 +/- 0.008`. The three
-hierarchies have final reward around `0.185-0.187` and maximum reward around
-`0.224-0.226`.
+The learned hierarchy does not inherit the oracle's data-efficiency advantage.
+At 1,800 trajectories, deterministic and generative hierarchies reach 0.37 and
+0.42 success, below visual BC at 0.60 and flat flow at 0.62. Detailed Phase
+8-10 diagnostics show that future-latent prediction remains the dominant
+bottleneck: the predicted goals have moderate offline error but induce
+compounding closed-loop action error. Robust low-level training on measured
+high-level errors did not recover performance.
 
-![Success versus training trajectories](docs/results/success_vs_trajectories.png)
+The main deployable sample-efficiency hypothesis is therefore negative. The
+oracle-interface result is positive and identifies a narrower next research
+problem: learn compact, physically aligned future goals without losing the
+low-level control advantage.
 
-![Final reward versus training trajectories](docs/results/final_reward_vs_trajectories.png)
-
-Additional KPI plots:
-
-- [maximum reward](docs/results/max_reward_vs_trajectories.png)
-- [inference latency](docs/results/inference_latency_s_vs_trajectories.png)
-
-The result is negative for the main hypothesis: performance improves with
-more demonstrations, but the hierarchy does not show a data-efficiency
-advantage over the flat latent policy. At 1000 trajectories the methods are
-within seed variance; at 2000 trajectories the flat policy has the highest
-mean success and dense reward.
-
-## Representation Diagnostics
-
-A held-out pose probe was used only to assess frozen representations:
-
-| Representation | x MAE | y MAE | yaw MAE |
-| --- | ---: | ---: | ---: |
-| Spatial DINO input | 3.8 mm | 4.1 mm | 3.8 deg |
-| Original 64D world-model latent | 3.62 cm | 4.57 cm | 30.3 deg |
-| 512D latent without reconstruction | 3.64 cm | 4.77 cm | 28.7 deg |
-| Final 512D reconstruction latent | 8.2 mm | 9.0 mm | 9.2 deg |
-
-The reconstruction objective, rather than latent size alone, is what retained
-the task-relevant pose information. No pose-supervised loss was added to the
-encoder.
-
-## Videos
-
-Twenty dual-camera videos compare seed 0 on the same evaluation
-initialization across all five data sizes and all four policies:
-
-```text
-results/ppo_spatial_wm_recon512_lownoise/videos/dual_camera_seed0/
-```
-
-The selected initialization is unsuccessful for every policy, so these
-videos are qualitative failure/progress comparisons rather than cherry-picked
-successes.
-
-![Flat policy progress](docs/results/flat_progress_seed0.png)
-
-![n=2000 method comparison](docs/results/n2000_methods_seed0.png)
-
-The metrics, plots, contact sheets, and videos are also packaged in:
-
-```text
-results/ppo_spatial_wm_recon512_lownoise.zip
-```
-
-Large datasets, checkpoints, and raw run logs remain local and are ignored by
-Git.
+Large datasets, checkpoints, detailed raw result JSON, and videos remain local
+and are ignored by Git.

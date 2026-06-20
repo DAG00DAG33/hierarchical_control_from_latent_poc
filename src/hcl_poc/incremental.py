@@ -11780,7 +11780,10 @@ def plot_phase12_sample_efficiency(config: Config) -> Path:
         "plot": str(plot_path),
         "protocol": {
             "training_seeds": 1,
-            "evaluation_episodes": 100,
+            "deployable_evaluation_episodes": 100,
+            "oracle_evaluation_episodes": int(
+                config.get("incremental.phase12.oracle_eval_episodes", 10)
+            ),
             "validation_trajectories": 200,
             "training_seed_robustness_measured": False,
         },
@@ -11789,13 +11792,16 @@ def plot_phase12_sample_efficiency(config: Config) -> Path:
     write_json(output_path, payload)
     figure, axis = plt.subplots(figsize=(9, 6))
     for method in methods:
+        label = method.replace("_", " ")
+        if method == "oracle_hierarchy":
+            label += " (10 eval episodes)"
         axis.errorbar(
             transitions,
             curves[method]["success"],
             yerr=curves[method]["success_stderr"],
             marker="o",
             capsize=3,
-            label=method.replace("_", " "),
+            label=label,
         )
     axis.set_xscale("log")
     axis.set_ylim(0.0, 1.0)
