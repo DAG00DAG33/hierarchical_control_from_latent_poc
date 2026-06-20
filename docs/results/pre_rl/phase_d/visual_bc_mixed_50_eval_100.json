@@ -1,0 +1,89 @@
+{
+  "checkpoint": "artifacts/incremental/pre_rl/phase_d/visual_bc/mixed_50/query/seed0/policy.pt",
+  "clean_evaluation": {
+    "episodes": 100,
+    "final_reward": 0.5769231728836894,
+    "max_reward": 0.6706258160620928,
+    "mean_recovery_steps_when_recovered": null,
+    "mean_reward_drop": null,
+    "recovery_success": null,
+    "recovery_success_by_family": {},
+    "seed_start": 1820000,
+    "success": 0.53,
+    "success_wilson_95": [
+      0.4328885697009936,
+      0.6248918204065872
+    ]
+  },
+  "clean_validation_metrics": {
+    "correlation_per_dim": [
+      0.9838651265947524,
+      0.9909721774380026,
+      0.9760264539761327
+    ],
+    "mae": 0.04781399667263031,
+    "max_abs_error": 0.7147537469863892,
+    "prediction_out_of_bounds_fraction": 0.09477087746683019,
+    "rmse": 0.07252860069274902,
+    "target_near_bounds_fraction": 0.2606756606087635
+  },
+  "data": {
+    "clean_source": "data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5",
+    "clean_transitions": 40000,
+    "label_view": "query",
+    "recovery_source": "data/incremental/pre_rl_phase_d_recovery_dino_1000.h5",
+    "recovery_transitions": 40000,
+    "total_transitions": 80000,
+    "variant": "mixed_50"
+  },
+  "disturbed_evaluation": {
+    "episodes": 100,
+    "final_reward": 0.5263677508383989,
+    "max_reward": 0.6552709210664034,
+    "mean_recovery_steps_when_recovered": 17.348837209302324,
+    "mean_reward_drop": 0.08967210289090871,
+    "recovery_success": 0.43,
+    "recovery_success_by_family": {
+      "action_delay": 0.42857142857142855,
+      "action_hold": 0.25,
+      "action_scaling": 0.5357142857142857,
+      "directional_bias": 0.5217391304347826
+    },
+    "seed_start": 1820000,
+    "success": 0.51,
+    "success_wilson_95": [
+      0.4134801193402717,
+      0.6057800106955886
+    ]
+  },
+  "label_view": "query",
+  "metadata": {
+    "config": "configs/pusht_incremental.yaml",
+    "control_freq": 20,
+    "controller": "pd_ee_delta_pos",
+    "cuda_available": true,
+    "device": "cuda",
+    "environment": "PushT-v1",
+    "git_commit": "7053f48a7cba1958ac36b2a1c831a7a393153e27",
+    "git_dirty": true,
+    "gymnasium_version": "1.3.0",
+    "mani_skill_version": "3.0.1",
+    "torch_version": "2.12.0+cu130"
+  },
+  "method": "direct_visual_bc",
+  "phase": "D6-D7",
+  "recovery_validation_metrics": {
+    "correlation_per_dim": [
+      0.9371958821358098,
+      0.9560532859388567,
+      0.9065277787742302
+    ],
+    "mae": 0.06359165906906128,
+    "max_abs_error": 1.3684182167053223,
+    "prediction_out_of_bounds_fraction": 0.04405,
+    "rmse": 0.109658382833004,
+    "target_near_bounds_fraction": 0.1149
+  },
+  "seed": 0,
+  "variant": "mixed_50"
+}

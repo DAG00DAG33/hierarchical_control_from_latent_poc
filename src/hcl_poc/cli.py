@@ -55,6 +55,8 @@ from hcl_poc.incremental import (
     collect_pre_rl_phase_d_recovery_dataset,
     prepare_pre_rl_phase_d_features,
     create_pre_rl_phase_d_manifests,
+    train_pre_rl_phase_d_visual_bc,
+    evaluate_pre_rl_phase_d_visual_bc,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -822,6 +824,23 @@ def incremental_cmd(args: argparse.Namespace) -> None:
         )
     elif args.incremental_command == "pre-rl-d-manifests":
         create_pre_rl_phase_d_manifests(config, force=args.force)
+    elif args.incremental_command == "pre-rl-d-train-visual-bc":
+        train_pre_rl_phase_d_visual_bc(
+            config,
+            variant=args.variant,
+            label_view=args.label_view,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-d-eval-visual-bc":
+        evaluate_pre_rl_phase_d_visual_bc(
+            config,
+            variant=args.variant,
+            label_view=args.label_view,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1310,6 +1329,33 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(pre_rl_d_manifests)
     pre_rl_d_manifests.add_argument("--force", action="store_true")
     pre_rl_d_manifests.set_defaults(func=incremental_cmd)
+    pre_rl_d_visual_bc = incremental_sub.add_parser("pre-rl-d-train-visual-bc")
+    add_config_arg(pre_rl_d_visual_bc)
+    pre_rl_d_visual_bc.add_argument(
+        "--variant",
+        required=True,
+        choices=["clean", "mixed_25", "mixed_50", "recovery_heavy"],
+    )
+    pre_rl_d_visual_bc.add_argument(
+        "--label-view", choices=["query", "behavior"], default="query"
+    )
+    pre_rl_d_visual_bc.add_argument("--seed", type=int, default=0)
+    pre_rl_d_visual_bc.add_argument("--force", action="store_true")
+    pre_rl_d_visual_bc.set_defaults(func=incremental_cmd)
+    pre_rl_d_eval_visual_bc = incremental_sub.add_parser("pre-rl-d-eval-visual-bc")
+    add_config_arg(pre_rl_d_eval_visual_bc)
+    pre_rl_d_eval_visual_bc.add_argument(
+        "--variant",
+        required=True,
+        choices=["clean", "mixed_25", "mixed_50", "recovery_heavy"],
+    )
+    pre_rl_d_eval_visual_bc.add_argument(
+        "--label-view", choices=["query", "behavior"], default="query"
+    )
+    pre_rl_d_eval_visual_bc.add_argument("--seed", type=int, default=0)
+    pre_rl_d_eval_visual_bc.add_argument("--episodes", type=int)
+    pre_rl_d_eval_visual_bc.add_argument("--force", action="store_true")
+    pre_rl_d_eval_visual_bc.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

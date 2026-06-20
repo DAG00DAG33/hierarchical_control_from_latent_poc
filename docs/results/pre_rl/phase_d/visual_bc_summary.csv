@@ -1,0 +1,5 @@
+dataset,epochs,clean_validation_mae,recovery_validation_mae,clean_success,disturbed_success,recovery_success,mean_recovery_steps
+clean,50,0.042663,0.079684,0.66,0.60,0.53,13.49
+mixed_25,100,0.041737,0.062191,0.59,0.55,0.50,12.40
+mixed_50,50,0.047814,0.063592,0.53,0.51,0.43,17.35
+recovery_heavy,50,0.048861,0.063958,0.40,0.39,0.38,13.47

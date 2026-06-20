@@ -9791,6 +9791,503 @@ def create_pre_rl_phase_d_manifests(
     return output_path
 
 
+def _load_pre_rl_phase_d_rows(
+    manifest_path: Path,
+    variant: str,
+    label_view: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    if label_view not in {"query", "behavior"}:
+        raise ValueError(f"Unknown Phase D label view: {label_view}")
+    with h5py.File(manifest_path, "r") as manifest:
+        clean_path = Path(str(manifest["meta"].attrs["clean_source"]))
+        recovery_path = Path(str(manifest["meta"].attrs["recovery_source"]))
+        group = manifest[variant]
+        clean_rows = np.asarray(group["clean_episode_timestep"], dtype=np.int32)
+        recovery_rows = np.asarray(group["recovery_episode_timestep"], dtype=np.int32)
+    total = len(clean_rows) + len(recovery_rows)
+    frames = np.empty((total, 6549), dtype=np.float32)
+    targets = np.empty((total, 3), dtype=np.float32)
+    previous = np.zeros((total, 3), dtype=np.float32)
+    cursor = 0
+
+    def read_source(
+        path: Path,
+        rows: np.ndarray,
+        recovery: bool,
+        start: int,
+    ) -> int:
+        position = start
+        with h5py.File(path, "r") as h5:
+            for episode_index in np.unique(rows[:, 0]):
+                timesteps = rows[rows[:, 0] == episode_index, 1]
+                key = (
+                    f"episode_{int(episode_index):05d}"
+                    if recovery
+                    else f"episode_{int(episode_index):04d}"
+                )
+                group = h5[key]
+                count = len(timesteps)
+                dino = np.asarray(group["dino"], dtype=np.float32)
+                proprio_name = "proprioception" if recovery else "proprio"
+                proprio = np.asarray(group[proprio_name], dtype=np.float32)
+                frames[position : position + count] = np.concatenate(
+                    [dino[timesteps], proprio[timesteps]], axis=-1
+                )
+                action_name = (
+                    "teacher_actions"
+                    if recovery and label_view == "query"
+                    else "executed_actions"
+                    if recovery
+                    else "actions"
+                )
+                actions = np.asarray(group[action_name], dtype=np.float32)
+                targets[position : position + count] = actions[timesteps]
+                previous_source = (
+                    np.asarray(group["executed_actions"], dtype=np.float32)
+                    if recovery
+                    else np.asarray(group["actions"], dtype=np.float32)
+                )
+                valid_previous = timesteps > 0
+                previous[position : position + count][valid_previous] = previous_source[
+                    timesteps[valid_previous] - 1
+                ]
+                position += count
+        return position
+
+    cursor = read_source(clean_path, clean_rows, False, cursor)
+    cursor = read_source(recovery_path, recovery_rows, True, cursor)
+    if cursor != total:
+        raise RuntimeError(f"Loaded {cursor} Phase D rows, expected {total}")
+    metadata = {
+        "variant": variant,
+        "label_view": label_view,
+        "clean_source": str(clean_path),
+        "recovery_source": str(recovery_path),
+        "clean_transitions": int(len(clean_rows)),
+        "recovery_transitions": int(len(recovery_rows)),
+        "total_transitions": total,
+    }
+    return frames, previous, targets, metadata
+
+
+def _load_pre_rl_phase_d_validation(
+    manifest_path: Path,
+    split: str,
+    label_view: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if split not in {"clean", "recovery"}:
+        raise ValueError(f"Unknown Phase D validation split: {split}")
+    temporary_variant = f"__validation_{split}"
+    with h5py.File(manifest_path, "r+") as manifest:
+        if temporary_variant in manifest:
+            del manifest[temporary_variant]
+        group = manifest.create_group(temporary_variant)
+        source_name = f"{split}_episode_timestep"
+        rows = np.asarray(manifest["validation"][source_name], dtype=np.int32)
+        if split == "clean":
+            group.create_dataset("clean_episode_timestep", data=rows)
+            group.create_dataset(
+                "recovery_episode_timestep", data=np.empty((0, 2), dtype=np.int32)
+            )
+        else:
+            group.create_dataset("clean_episode_timestep", data=np.empty((0, 2), dtype=np.int32))
+            group.create_dataset("recovery_episode_timestep", data=rows)
+    try:
+        frames, previous, targets, _metadata = _load_pre_rl_phase_d_rows(
+            manifest_path,
+            temporary_variant,
+            label_view,
+        )
+    finally:
+        with h5py.File(manifest_path, "r+") as manifest:
+            del manifest[temporary_variant]
+    return frames, previous, targets
+
+
+def train_pre_rl_phase_d_visual_bc(
+    config: Config,
+    variant: str,
+    label_view: str = "query",
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    valid_variants = {"clean", "mixed_25", "mixed_50", "recovery_heavy"}
+    if variant not in valid_variants:
+        raise ValueError(f"Unknown Phase D dataset variant: {variant}")
+    manifest_path = create_pre_rl_phase_d_manifests(config, force=False)
+    artifact_dir = ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "pre_rl"
+        / "phase_d"
+        / "visual_bc"
+        / variant
+        / label_view
+        / f"seed{seed}"
+    )
+    checkpoint_path = artifact_dir / "policy.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Pre-RL Phase D visual BC exists: {checkpoint_path}")
+        return checkpoint_path
+    set_seed(seed)
+    frames, previous, targets, data_metadata = _load_pre_rl_phase_d_rows(
+        manifest_path,
+        variant,
+        label_view,
+    )
+    clean_val = _load_pre_rl_phase_d_validation(manifest_path, "clean", label_view)
+    recovery_val = _load_pre_rl_phase_d_validation(manifest_path, "recovery", label_view)
+    frame_norm = Standardizer.fit(frames)
+    action_norm = Standardizer.fit(targets)
+    frames -= frame_norm.mean
+    frames /= frame_norm.std
+    previous = action_norm.transform(previous)
+    targets = action_norm.transform(targets)
+    conditions = np.concatenate([frames, previous], axis=-1).astype(np.float32)
+    del frames, previous
+    def normalize_validation(
+        rows: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        val_frames, val_previous, val_targets = rows
+        val_cond = np.concatenate(
+            [frame_norm.transform(val_frames), action_norm.transform(val_previous)],
+            axis=-1,
+        ).astype(np.float32)
+        return val_cond, val_targets
+
+    clean_val_normalized = normalize_validation(clean_val)
+    recovery_val_normalized = normalize_validation(recovery_val)
+    del clean_val, recovery_val
+    dataset = TensorDataset(torch.from_numpy(conditions), torch.from_numpy(targets))
+    batch_size = int(config.get("pre_rl.phase_d.visual_bc_batch_size", 512))
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    hidden_dim = int(config.get("incremental.phase4.hidden_dim", 512))
+    model = _make_phase4_policy("concat", conditions.shape[-1], 1, 3, hidden_dim).to(
+        default_device()
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("pre_rl.phase_d.visual_bc_lr", 3e-4)),
+    )
+    epochs = int(config.get("pre_rl.phase_d.visual_bc_epochs", 50))
+    device = default_device()
+    best_state = None
+    best_recovery_mae = float("inf")
+    history = []
+
+    def validation_metrics(rows: tuple[np.ndarray, np.ndarray]) -> dict[str, Any]:
+        val_cond, val_targets = rows
+        predictions = []
+        with torch.inference_mode():
+            for start in range(0, len(val_cond), 2048):
+                x = torch.from_numpy(val_cond[start : start + 2048]).to(device).float()
+                predictions.append(action_norm.inverse(model(x[:, None, :]).cpu().numpy()))
+        return _action_regression_metrics(np.concatenate(predictions), val_targets)
+
+    for epoch in trange(1, epochs + 1, desc=f"train Phase D visual BC {variant}"):
+        model.train()
+        train_loss = 0.0
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            prediction = model(x[:, None, :])
+            loss = torch.mean((prediction - y) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            train_loss += float(loss.detach().cpu()) * len(x)
+        model.eval()
+        recovery_metrics = validation_metrics(recovery_val_normalized)
+        clean_metrics = validation_metrics(clean_val_normalized)
+        history.append(
+            {
+                "epoch": epoch,
+                "train_mse": train_loss / len(dataset),
+                "clean_validation_mae": clean_metrics["mae"],
+                "recovery_validation_mae": recovery_metrics["mae"],
+            }
+        )
+        if recovery_metrics["mae"] < best_recovery_mae:
+            best_recovery_mae = recovery_metrics["mae"]
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Phase D visual BC training produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    final_clean = validation_metrics(clean_val_normalized)
+    final_recovery = validation_metrics(recovery_val_normalized)
+    payload = {
+        "phase": "D6",
+        "method": "direct_visual_bc",
+        "variant": variant,
+        "label_view": label_view,
+        "seed": seed,
+        "model": best_state,
+        "architecture": "concat",
+        "history": 1,
+        "step_dim": int(conditions.shape[-1]),
+        "action_dim": 3,
+        "hidden_dim": hidden_dim,
+        "frame_norm": frame_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "data": data_metadata,
+        "clean_validation_metrics": final_clean,
+        "recovery_validation_metrics": final_recovery,
+        "history_rows": history,
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "metrics.json",
+        {key: value for key, value in payload.items() if key not in {"model", "frame_norm", "action_norm"}},
+    )
+    console.print(f"Wrote Pre-RL Phase D visual BC: {checkpoint_path}")
+    return checkpoint_path
+
+
+@torch.inference_mode()
+def _evaluate_pre_rl_phase_d_visual_bc_distribution(
+    config: Config,
+    checkpoint: dict[str, Any],
+    episodes: int,
+    seed_start: int,
+    disturbed: bool,
+) -> dict[str, Any]:
+    device = default_device()
+    model = _make_phase4_policy(
+        str(checkpoint["architecture"]),
+        int(checkpoint["step_dim"]),
+        int(checkpoint["history"]),
+        int(checkpoint["action_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    max_num_envs = min(int(config.get("pre_rl.phase_d.eval_num_envs", 32)), episodes)
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    rng = np.random.default_rng(seed_start + (10_000 if disturbed else 0))
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    recovered: list[float] = []
+    recovery_times: list[int] = []
+    reward_drops: list[float] = []
+    family_recovered: dict[int, list[float]] = {
+        key: [] for key in PRE_RL_PHASE_D_PERTURBATIONS
+    }
+    progress = trange(episodes, desc=f"Phase D visual BC {'disturbed' if disturbed else 'clean'}")
+    for batch_start in range(0, episodes, max_num_envs):
+        batch_size = min(max_num_envs, episodes - batch_start)
+        env = _phase4_make_visual_env(config, batch_size)
+        reset_seeds = [seed_start + batch_start + index for index in range(batch_size)]
+        obs, _info = env.reset(seed=reset_seeds)
+        schedules = (
+            _pre_rl_phase_d_schedule(rng, batch_size, max_steps, 1, 1)
+            if disturbed
+            else [[] for _ in range(batch_size)]
+        )
+        if disturbed:
+            for events in schedules:
+                event = events[0]
+                duration = int(event["end"] - event["start"])
+                event["start"] = int(rng.integers(15, max_steps - duration - 20))
+                event["end"] = event["start"] + duration
+        action_low_np = np.asarray(env.single_action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(env.single_action_space.high, dtype=np.float32)
+        action_range = action_high_np - action_low_np
+        previous_executed = np.zeros((batch_size, 3), dtype=np.float32)
+        policy_history: list[np.ndarray] = []
+        bias_noise = np.zeros_like(previous_executed)
+        success_once = np.zeros(batch_size, dtype=bool)
+        recovered_batch = np.zeros(batch_size, dtype=bool)
+        recovery_time = np.full(batch_size, -1, dtype=np.int32)
+        batch_final_reward = np.zeros(batch_size, dtype=np.float32)
+        batch_max_reward = np.full(batch_size, -np.inf, dtype=np.float32)
+        pre_burst_max_reward = np.full(batch_size, -np.inf, dtype=np.float32)
+        post_burst_min_reward = np.full(batch_size, np.inf, dtype=np.float32)
+        try:
+            for step in range(max_steps):
+                frame = _phase4_frame_inputs(
+                    obs,
+                    dino,
+                    int(config.get("dino.batch_size", 64)),
+                )
+                condition = np.concatenate(
+                    [frame_norm.transform(frame), action_norm.transform(previous_executed)],
+                    axis=-1,
+                )
+                pred_norm = model(torch.from_numpy(condition[:, None, :]).to(device).float())
+                policy_action = action_norm.inverse(pred_norm.cpu().numpy()).astype(np.float32)
+                policy_history.append(policy_action.copy())
+                executed = policy_action.copy()
+                for env_index, events in enumerate(schedules):
+                    if not events:
+                        continue
+                    event = events[0]
+                    if not event["start"] <= step < event["end"]:
+                        continue
+                    kind = int(event["kind"])
+                    if kind == 1:
+                        bias_noise[env_index] = (
+                            0.7 * bias_noise[env_index]
+                            + 0.3
+                            * rng.normal(0.0, 0.01, size=3).astype(np.float32)
+                            * action_range
+                        )
+                        executed[env_index] += (
+                            event["bias_fraction"]
+                            * action_range
+                            * event["bias_direction"]
+                            + bias_noise[env_index]
+                        )
+                    elif kind == 2:
+                        executed[env_index] = previous_executed[env_index]
+                    elif kind == 3:
+                        source_step = max(0, step - int(event["delay"]))
+                        executed[env_index] = policy_history[source_step][env_index]
+                    else:
+                        executed[env_index] *= float(event["scale"])
+                executed = np.clip(executed, action_low_np, action_high_np)
+                obs, reward, _terminated, _truncated, info = env.step(
+                    torch.from_numpy(executed).to(device)
+                )
+                reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+                batch_final_reward = reward_np
+                batch_max_reward = np.maximum(batch_max_reward, reward_np)
+                step_success = (
+                    _numpy(info["success"]).reshape(-1).astype(bool)
+                    if "success" in info
+                    else np.zeros(batch_size, dtype=bool)
+                )
+                success_once |= step_success
+                if disturbed:
+                    for env_index, events in enumerate(schedules):
+                        event = events[0]
+                        if step < event["start"]:
+                            pre_burst_max_reward[env_index] = max(
+                                pre_burst_max_reward[env_index], reward_np[env_index]
+                            )
+                        if step >= event["end"]:
+                            post_burst_min_reward[env_index] = min(
+                                post_burst_min_reward[env_index], reward_np[env_index]
+                            )
+                            if step_success[env_index] and not recovered_batch[env_index]:
+                                recovered_batch[env_index] = True
+                                recovery_time[env_index] = step - int(event["end"]) + 1
+                previous_executed = executed
+        finally:
+            env.close()
+        successes.extend(success_once.astype(np.float32).tolist())
+        final_rewards.extend(batch_final_reward.tolist())
+        max_rewards.extend(batch_max_reward.tolist())
+        if disturbed:
+            recovered.extend(recovered_batch.astype(np.float32).tolist())
+            recovery_times.extend(recovery_time[recovery_time >= 0].tolist())
+            finite = np.isfinite(pre_burst_max_reward) & np.isfinite(post_burst_min_reward)
+            reward_drops.extend(
+                np.maximum(
+                    0.0,
+                    pre_burst_max_reward[finite] - post_burst_min_reward[finite],
+                ).tolist()
+            )
+            for env_index, events in enumerate(schedules):
+                family_recovered[int(events[0]["kind"])].append(
+                    float(recovered_batch[env_index])
+                )
+        progress.update(batch_size)
+    progress.close()
+    return {
+        "episodes": episodes,
+        "seed_start": seed_start,
+        "success": float(np.mean(successes)),
+        "success_wilson_95": _wilson_interval(float(np.mean(successes)), episodes),
+        "final_reward": float(np.mean(final_rewards)),
+        "max_reward": float(np.mean(max_rewards)),
+        "recovery_success": float(np.mean(recovered)) if recovered else None,
+        "mean_recovery_steps_when_recovered": (
+            float(np.mean(recovery_times)) if recovery_times else None
+        ),
+        "mean_reward_drop": float(np.mean(reward_drops)) if reward_drops else None,
+        "recovery_success_by_family": {
+            PRE_RL_PHASE_D_PERTURBATIONS[key]: float(np.mean(values))
+            for key, values in family_recovered.items()
+            if values
+        },
+    }
+
+
+def evaluate_pre_rl_phase_d_visual_bc(
+    config: Config,
+    variant: str,
+    label_view: str = "query",
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    checkpoint_path = train_pre_rl_phase_d_visual_bc(
+        config,
+        variant=variant,
+        label_view=label_view,
+        seed=seed,
+        force=False,
+    )
+    eval_episodes = int(episodes or config.get("pre_rl.phase_d.eval_episodes", 100))
+    result_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "pre_rl"
+        / "phase_d"
+        / "visual_bc"
+        / variant
+        / label_view
+        / f"seed{seed}"
+    )
+    output_path = result_dir / f"eval_{eval_episodes}.json"
+    if output_path.exists() and not force:
+        console.print(f"Pre-RL Phase D visual BC evaluation exists: {output_path}")
+        return output_path
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    seed_start = int(config.get("pre_rl.phase_d.eval_seed_start", 1_820_000))
+    clean = _evaluate_pre_rl_phase_d_visual_bc_distribution(
+        config,
+        checkpoint,
+        eval_episodes,
+        seed_start,
+        disturbed=False,
+    )
+    disturbed = _evaluate_pre_rl_phase_d_visual_bc_distribution(
+        config,
+        checkpoint,
+        eval_episodes,
+        seed_start,
+        disturbed=True,
+    )
+    payload = {
+        "phase": "D6-D7",
+        "method": "direct_visual_bc",
+        "variant": variant,
+        "label_view": label_view,
+        "seed": seed,
+        "checkpoint": str(checkpoint_path),
+        "data": checkpoint["data"],
+        "clean_validation_metrics": checkpoint["clean_validation_metrics"],
+        "recovery_validation_metrics": checkpoint["recovery_validation_metrics"],
+        "clean_evaluation": clean,
+        "disturbed_evaluation": disturbed,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
 @torch.inference_mode()
 def collect_phase7_oracle_dagger_queries(
     config: Config,

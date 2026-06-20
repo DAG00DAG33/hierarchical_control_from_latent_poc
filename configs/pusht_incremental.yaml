@@ -301,3 +301,9 @@ pre_rl:
     transition_budget: 80000
     recovery_train_episodes: 800
     manifest_seed: 1810000
+    visual_bc_epochs: 100
+    visual_bc_batch_size: 512
+    visual_bc_lr: 0.0003
+    eval_episodes: 100
+    eval_num_envs: 32
+    eval_seed_start: 1820000

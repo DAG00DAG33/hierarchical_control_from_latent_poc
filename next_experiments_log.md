@@ -310,3 +310,34 @@ State-query data is always reported separately from causal transitions.
 - **Next:** Train matched flat and hierarchical candidates from each manifest
   using teacher-query recovery labels first; retain executed-action imitation
   as a separate ablation.
+
+## 2026-06-20 - D-G02: Equal-budget direct visual BC comparison
+
+- **Method:** History-1 direct spatial-DINO/proprioception BC, identical
+  width-512 three-hidden-layer architecture, 80,000 transitions per variant,
+  and deterministic teacher-query labels on recovery states. Previous action
+  is always the action actually executed. All variants use the same clean and
+  recovery validation sets and 100 fixed clean/disturbed evaluation seeds.
+- **Initial 50-epoch comparison:**
+
+| dataset | clean validation MAE | recovery validation MAE | clean success | disturbed success | recovery success |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| clean | `0.0427` | `0.0797` | `0.66` | `0.60` | `0.53` |
+| mixed-25 | `0.0443` | `0.0643` | `0.54` | `0.51` | `0.43` |
+| mixed-50 | `0.0478` | `0.0636` | `0.53` | `0.51` | `0.43` |
+| recovery-heavy | `0.0489` | `0.0640` | `0.40` | `0.39` | `0.38` |
+
+- **Undertraining check:** Mixed-25 validation was still improving, so it was
+  retrained for 100 epochs. MAE improved to `0.0417` clean and `0.0622`
+  recovery. Closed-loop success improved to `0.59` clean, `0.55` disturbed,
+  and `0.50` recovery, but remained below clean-only by 7, 5, and 3 percentage
+  points respectively.
+- **Interpretation:** Teacher-query recovery data materially improves offline
+  recovery-state action prediction but does not improve direct visual BC under
+  causal disturbances. Larger recovery fractions increasingly hurt nominal
+  control. The clean policy already generalizes to these moderate action
+  bursts better than the mixed policies.
+- **Decision:** Select clean data for the direct visual BC reference. Keep
+  mixed-25 as the only recovery-data candidate for later matched hierarchy
+  tests; do not spend hierarchy/flow budget on mixed-50 or recovery-heavy
+  unless a later representation diagnostic provides a specific reason.
