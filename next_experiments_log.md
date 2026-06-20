@@ -284,3 +284,29 @@ State-query data is always reported separately from causal transitions.
   `k=10`, `U=10`, and one-step low-level action horizon `H=1`. The action-chunk
   ablation remains secondary because goal holding already supplies temporal
   abstraction without open-loop primitive execution.
+
+## 2026-06-20 - D-G01: Causal recovery corpus and equal-budget views
+
+- **Collection:** 1,000 CUDA episodes, 100 steps each, seeds beginning at
+  `1800000`. Each episode contains 1-3 causal action bursts from directional
+  bias, action hold, 1-3-step delay, or 0.7/1.3 scaling. The teacher resumes
+  from the reached state; no state restoration occurs.
+- **Stored signals:** Raw RGB, state, proprioception, executed behavior action,
+  same-state deterministic teacher query, perturbation/burst metadata,
+  recovery intervals/completions, reward, and success. Behavior and recovery
+  labels are explicitly separate.
+- **Recoverability:** 2,035 bursts, 46.1% overall recovery. Bias/hold/delay/
+  scaling recover at 50.6%/37.1%/40.7%/56.3%. Every family remains usable;
+  eight-step hold and delay are the hardest at 24.4% and 31.1%.
+- **Visual preparation:** Frozen `facebook/dinov2-small` spatial features
+  (`6528D`) plus `21D` proprioception for all 100,000 transitions. Prepared
+  file size is 2.5 GB; 97 GB disk remains.
+- **Equal-budget views:** Fixed 80,000-transition manifests are clean 80/0k,
+  mixed-25 60/20k, mixed-50 40/40k, and recovery-heavy 30/50k clean/
+  off-nominal. Recovery episodes 800-999 and the existing last 200 clean
+  episodes are held out.
+- **Specification:** Full schema, hashes, perturbation parameters, label
+  semantics, and split definitions are in `recovery_dataset_spec.md`.
+- **Next:** Train matched flat and hierarchical candidates from each manifest
+  using teacher-query recovery labels first; retain executed-action imitation
+  as a separate ablation.

@@ -52,6 +52,9 @@ from hcl_poc.incremental import (
     aggregate_pre_rl_phase_b,
     run_pre_rl_phase_c_oracle_sweep,
     train_pre_rl_phase_c_time_conditioned,
+    collect_pre_rl_phase_d_recovery_dataset,
+    prepare_pre_rl_phase_d_features,
+    create_pre_rl_phase_d_manifests,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -805,6 +808,20 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             force=args.force,
         )
+    elif args.incremental_command == "pre-rl-d-collect":
+        collect_pre_rl_phase_d_recovery_dataset(
+            config,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-d-prepare":
+        prepare_pre_rl_phase_d_features(
+            config,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-d-manifests":
+        create_pre_rl_phase_d_manifests(config, force=args.force)
     else:
         raise ValueError(args.incremental_command)
 
@@ -1279,6 +1296,20 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_c_train.add_argument("--seed", type=int, default=0)
     pre_rl_c_train.add_argument("--force", action="store_true")
     pre_rl_c_train.set_defaults(func=incremental_cmd)
+    pre_rl_d_collect = incremental_sub.add_parser("pre-rl-d-collect")
+    add_config_arg(pre_rl_d_collect)
+    pre_rl_d_collect.add_argument("--episodes", type=int)
+    pre_rl_d_collect.add_argument("--force", action="store_true")
+    pre_rl_d_collect.set_defaults(func=incremental_cmd)
+    pre_rl_d_prepare = incremental_sub.add_parser("pre-rl-d-prepare")
+    add_config_arg(pre_rl_d_prepare)
+    pre_rl_d_prepare.add_argument("--episodes", type=int)
+    pre_rl_d_prepare.add_argument("--force", action="store_true")
+    pre_rl_d_prepare.set_defaults(func=incremental_cmd)
+    pre_rl_d_manifests = incremental_sub.add_parser("pre-rl-d-manifests")
+    add_config_arg(pre_rl_d_manifests)
+    pre_rl_d_manifests.add_argument("--force", action="store_true")
+    pre_rl_d_manifests.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

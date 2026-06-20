@@ -290,3 +290,14 @@ pre_rl:
     development_eval_episodes: 100
     replay_branch_num_envs: 32
     eval_seed_start: 1700000
+  phase_d:
+    pilot_episodes: 200
+    dataset_episodes: 1000
+    num_envs: 16
+    seed: 1800000
+    bursts_min: 1
+    bursts_max: 3
+    feature_episode_batch: 8
+    transition_budget: 80000
+    recovery_train_episodes: 800
+    manifest_seed: 1810000

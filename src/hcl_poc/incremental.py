@@ -9312,6 +9312,485 @@ def run_pre_rl_phase_c_oracle_sweep(
     return output_path
 
 
+PRE_RL_PHASE_D_PERTURBATIONS = {
+    1: "directional_bias",
+    2: "action_hold",
+    3: "action_delay",
+    4: "action_scaling",
+}
+
+
+def _pre_rl_phase_d_schedule(
+    rng: np.random.Generator,
+    episodes: int,
+    max_steps: int,
+    bursts_min: int,
+    bursts_max: int,
+) -> list[list[dict[str, Any]]]:
+    schedules: list[list[dict[str, Any]]] = []
+    durations = np.asarray([2, 4, 8], dtype=np.int32)
+    for _ in range(episodes):
+        count = int(rng.integers(bursts_min, bursts_max + 1))
+        anchors = np.linspace(8, max_steps - 20, count, dtype=np.int32)
+        events = []
+        for anchor in anchors:
+            duration = int(rng.choice(durations))
+            start = int(np.clip(anchor + rng.integers(-3, 4), 5, max_steps - duration - 5))
+            kind = int(rng.integers(1, len(PRE_RL_PHASE_D_PERTURBATIONS) + 1))
+            direction = rng.normal(size=3).astype(np.float32)
+            direction /= max(float(np.linalg.norm(direction)), 1e-6)
+            events.append(
+                {
+                    "start": start,
+                    "end": start + duration,
+                    "kind": kind,
+                    "bias_fraction": float(rng.choice([0.05, 0.10, 0.20])),
+                    "bias_direction": direction,
+                    "delay": int(rng.integers(1, 4)),
+                    "scale": float(rng.choice([0.7, 1.3])),
+                }
+            )
+        schedules.append(sorted(events, key=lambda event: event["start"]))
+    return schedules
+
+
+@torch.inference_mode()
+def collect_pre_rl_phase_d_recovery_dataset(
+    config: Config,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    requested_episodes = int(episodes or config.get("pre_rl.phase_d.pilot_episodes", 200))
+    output_path = (
+        config.path_value("paths.incremental_data_dir")
+        / f"pre_rl_phase_d_recovery_{requested_episodes}.h5"
+    )
+    if output_path.exists() and not force:
+        console.print(f"Pre-RL Phase D recovery dataset exists: {output_path}")
+        return output_path
+
+    seed = int(config.get("pre_rl.phase_d.seed", 1_800_000))
+    num_envs_limit = int(config.get("pre_rl.phase_d.num_envs", 16))
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    bursts_min = int(config.get("pre_rl.phase_d.bursts_min", 1))
+    bursts_max = int(config.get("pre_rl.phase_d.bursts_max", 3))
+    rng = np.random.default_rng(seed)
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    ensure_dir(output_path.parent)
+    tmp_path = output_path.with_suffix(".tmp.h5")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    completed = 0
+    recovered_episodes = 0
+    successful_episodes = 0
+    perturbation_steps = 0
+    recovery_steps = 0
+    progress = trange(requested_episodes, desc="collect pre-RL Phase D recovery episodes")
+    with h5py.File(tmp_path, "w") as h5:
+        meta = h5.create_group("meta")
+        for key, value in _runtime_metadata(config).items():
+            meta.attrs[key] = value
+        meta.attrs["dataset_type"] = "causal_action_perturbation_recovery"
+        meta.attrs["requested_episodes"] = requested_episodes
+        meta.attrs["seed"] = seed
+        meta.attrs["semantics"] = (
+            "executed_actions are causal behavior actions; teacher_actions are a separate "
+            "deterministic recovery-query view from the same visited state"
+        )
+        meta.attrs["perturbation_types"] = ";".join(
+            f"{key}:{value}" for key, value in PRE_RL_PHASE_D_PERTURBATIONS.items()
+        )
+
+        while completed < requested_episodes:
+            batch_size = min(num_envs_limit, requested_episodes - completed)
+            env = _phase4_make_visual_env(config, batch_size)
+            reset_seeds = [seed + completed + index for index in range(batch_size)]
+            obs, _info = env.reset(seed=reset_seeds)
+            schedules = _pre_rl_phase_d_schedule(
+                rng,
+                batch_size,
+                max_steps,
+                bursts_min,
+                bursts_max,
+            )
+            action_low_np = np.asarray(env.single_action_space.low, dtype=np.float32)
+            action_high_np = np.asarray(env.single_action_space.high, dtype=np.float32)
+            action_low = torch.as_tensor(action_low_np, device=device)
+            action_high = torch.as_tensor(action_high_np, device=device)
+            action_range = action_high_np - action_low_np
+            previous_executed = np.zeros((batch_size, len(action_low_np)), dtype=np.float32)
+            teacher_history: list[np.ndarray] = []
+            bias_noise = np.zeros_like(previous_executed)
+            recovery_pending = np.zeros(batch_size, dtype=bool)
+            recovered = np.zeros(batch_size, dtype=bool)
+            success_once = np.zeros(batch_size, dtype=bool)
+            buffers: list[dict[str, list[np.ndarray | float | int | bool]]] = [
+                {
+                    "rgb": [],
+                    "states": [],
+                    "proprioception": [],
+                    "executed_actions": [],
+                    "teacher_actions": [],
+                    "perturbation_type": [],
+                    "burst_id": [],
+                    "perturbation_parameter": [],
+                    "perturbation_active": [],
+                    "perturbation_start": [],
+                    "perturbation_end": [],
+                    "recovery_active": [],
+                    "recovery_completion": [],
+                    "reward": [],
+                    "success": [],
+                }
+                for _ in range(batch_size)
+            ]
+            try:
+                for step in range(max_steps):
+                    rgb, states = _phase4_rgb_state(obs)
+                    state_t = _phase7_obs_state_tensor(obs, device)
+                    teacher_action = torch.clamp(
+                        teacher.actor_mean(state_t), action_low, action_high
+                    )
+                    teacher_np = teacher_action.cpu().numpy().astype(np.float32)
+                    teacher_history.append(teacher_np.copy())
+                    executed = teacher_np.copy()
+                    kinds = np.zeros(batch_size, dtype=np.int8)
+                    burst_ids = np.full(batch_size, -1, dtype=np.int16)
+                    parameters = np.zeros(batch_size, dtype=np.float32)
+                    starts = np.zeros(batch_size, dtype=bool)
+                    ends = np.zeros(batch_size, dtype=bool)
+                    active = np.zeros(batch_size, dtype=bool)
+                    for env_index, events in enumerate(schedules):
+                        active_event = next(
+                            (
+                                (event_index, item)
+                                for event_index, item in enumerate(events)
+                                if item["start"] <= step < item["end"]
+                            ),
+                            None,
+                        )
+                        event = None if active_event is None else active_event[1]
+                        starts[env_index] = any(item["start"] == step for item in events)
+                        ends[env_index] = any(item["end"] == step for item in events)
+                        if starts[env_index]:
+                            recovery_pending[env_index] = False
+                            recovered[env_index] = False
+                        if ends[env_index]:
+                            recovery_pending[env_index] = True
+                        if event is None:
+                            continue
+                        active[env_index] = True
+                        kind = int(event["kind"])
+                        kinds[env_index] = kind
+                        burst_ids[env_index] = int(active_event[0])
+                        if kind == 1:
+                            parameters[env_index] = float(event["bias_fraction"])
+                            bias_noise[env_index] = (
+                                0.7 * bias_noise[env_index]
+                                + 0.3
+                                * rng.normal(0.0, 0.01, size=len(action_low_np)).astype(np.float32)
+                                * action_range
+                            )
+                            executed[env_index] += (
+                                event["bias_fraction"]
+                                * action_range
+                                * event["bias_direction"]
+                                + bias_noise[env_index]
+                            )
+                        elif kind == 2:
+                            parameters[env_index] = 1.0
+                            executed[env_index] = previous_executed[env_index]
+                        elif kind == 3:
+                            parameters[env_index] = float(event["delay"])
+                            source_step = max(0, step - int(event["delay"]))
+                            executed[env_index] = teacher_history[source_step][env_index]
+                        elif kind == 4:
+                            parameters[env_index] = float(event["scale"])
+                            executed[env_index] *= float(event["scale"])
+                    executed = np.clip(executed, action_low_np, action_high_np)
+                    next_obs, reward, _terminated, _truncated, info = env.step(
+                        torch.from_numpy(executed).to(device)
+                    )
+                    reward_np = _numpy(reward).reshape(-1).astype(np.float32)
+                    step_success = (
+                        _numpy(info["success"]).reshape(-1).astype(bool)
+                        if "success" in info
+                        else np.zeros(batch_size, dtype=bool)
+                    )
+                    completion = recovery_pending & step_success & ~recovered
+                    recovered |= completion
+                    recovery_pending &= ~completion
+                    success_once |= step_success
+                    for env_index in range(batch_size):
+                        row = buffers[env_index]
+                        row["rgb"].append(rgb[env_index])
+                        row["states"].append(states[env_index])
+                        row["proprioception"].append(states[env_index, :21])
+                        row["executed_actions"].append(executed[env_index])
+                        row["teacher_actions"].append(teacher_np[env_index])
+                        row["perturbation_type"].append(int(kinds[env_index]))
+                        row["burst_id"].append(int(burst_ids[env_index]))
+                        row["perturbation_parameter"].append(float(parameters[env_index]))
+                        row["perturbation_active"].append(bool(active[env_index]))
+                        row["perturbation_start"].append(bool(starts[env_index]))
+                        row["perturbation_end"].append(bool(ends[env_index]))
+                        row["recovery_active"].append(bool(recovery_pending[env_index]))
+                        row["recovery_completion"].append(bool(completion[env_index]))
+                        row["reward"].append(float(reward_np[env_index]))
+                        row["success"].append(bool(step_success[env_index]))
+                    previous_executed = executed
+                    obs = next_obs
+            finally:
+                env.close()
+
+            for env_index, row in enumerate(buffers):
+                group = h5.create_group(f"episode_{completed + env_index:05d}")
+                group.attrs["seed"] = reset_seeds[env_index]
+                group.attrs["success"] = bool(success_once[env_index])
+                group.attrs["recovered_after_final_burst"] = bool(recovered[env_index])
+                group.attrs["burst_count"] = len(schedules[env_index])
+                for name, values in row.items():
+                    array = np.asarray(values)
+                    compression = "gzip" if name == "rgb" else "lzf"
+                    group.create_dataset(name, data=array, compression=compression)
+                burst_group = group.create_group("bursts")
+                events = schedules[env_index]
+                burst_group.create_dataset(
+                    "start", data=np.asarray([event["start"] for event in events], dtype=np.int16)
+                )
+                burst_group.create_dataset(
+                    "end", data=np.asarray([event["end"] for event in events], dtype=np.int16)
+                )
+                burst_group.create_dataset(
+                    "type", data=np.asarray([event["kind"] for event in events], dtype=np.int8)
+                )
+                burst_group.create_dataset(
+                    "bias_fraction",
+                    data=np.asarray([event["bias_fraction"] for event in events], dtype=np.float32),
+                )
+                burst_group.create_dataset(
+                    "bias_direction",
+                    data=np.stack([event["bias_direction"] for event in events]),
+                )
+                burst_group.create_dataset(
+                    "delay", data=np.asarray([event["delay"] for event in events], dtype=np.int8)
+                )
+                burst_group.create_dataset(
+                    "scale", data=np.asarray([event["scale"] for event in events], dtype=np.float32)
+                )
+                successful_episodes += int(success_once[env_index])
+                recovered_episodes += int(recovered[env_index])
+                perturbation_steps += int(np.sum(row["perturbation_active"]))
+                recovery_steps += int(np.sum(row["recovery_active"]))
+                progress.update(1)
+            completed += batch_size
+        meta.attrs["episodes"] = completed
+        meta.attrs["successful_episodes"] = successful_episodes
+        meta.attrs["recovered_episodes"] = recovered_episodes
+        meta.attrs["perturbation_steps"] = perturbation_steps
+        meta.attrs["recovery_steps"] = recovery_steps
+    progress.close()
+    tmp_path.replace(output_path)
+    console.print(f"Wrote Pre-RL Phase D recovery dataset: {output_path}")
+    return output_path
+
+
+@torch.inference_mode()
+def prepare_pre_rl_phase_d_features(
+    config: Config,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    requested_episodes = int(episodes or config.get("pre_rl.phase_d.dataset_episodes", 1000))
+    source_path = collect_pre_rl_phase_d_recovery_dataset(
+        config,
+        episodes=requested_episodes,
+        force=False,
+    )
+    output_path = (
+        config.path_value("paths.incremental_data_dir")
+        / f"pre_rl_phase_d_recovery_dino_{requested_episodes}.h5"
+    )
+    if output_path.exists() and not force:
+        console.print(f"Pre-RL Phase D DINO dataset exists: {output_path}")
+        return output_path
+    device = default_device()
+    extractor = _phase4_dino_from_config(config, device)
+    dino_batch_size = int(config.get("dino.batch_size", 64))
+    episode_batch_size = int(config.get("pre_rl.phase_d.feature_episode_batch", 8))
+    tmp_path = output_path.with_suffix(".tmp.h5")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    progress = trange(requested_episodes, desc="encode Phase D recovery RGB")
+    with h5py.File(source_path, "r") as source, h5py.File(tmp_path, "w") as target:
+        source_keys = sorted(key for key in source if key.startswith("episode_"))
+        if len(source_keys) < requested_episodes:
+            raise ValueError(
+                f"{source_path} contains {len(source_keys)} episodes, "
+                f"requires {requested_episodes}"
+            )
+        meta = target.create_group("meta")
+        for key, value in _runtime_metadata(config).items():
+            meta.attrs[key] = value
+        meta.attrs["source_h5"] = str(source_path)
+        meta.attrs["episodes"] = requested_episodes
+        meta.attrs["dino_model"] = str(config.get("dino.model_name"))
+        meta.attrs["dino_feature_type"] = str(config.get("dino.feature_type", "spatial"))
+        meta.attrs["dino_spatial_pool"] = int(config.get("dino.spatial_pool", 4))
+        for start in range(0, requested_episodes, episode_batch_size):
+            keys = source_keys[start : start + episode_batch_size]
+            rgbs = [np.asarray(source[key]["rgb"], dtype=np.uint8) for key in keys]
+            lengths = [len(rgb) for rgb in rgbs]
+            all_rgb = np.concatenate(rgbs, axis=0)
+            all_features = np.concatenate(
+                [extractor.encode_batch(chunk) for chunk in batched(all_rgb, dino_batch_size)],
+                axis=0,
+            ).astype(np.float32)
+            offset = 0
+            for key, length in zip(keys, lengths, strict=True):
+                source_group = source[key]
+                group = target.create_group(key)
+                group.create_dataset(
+                    "dino",
+                    data=all_features[offset : offset + length],
+                    compression="lzf",
+                )
+                offset += length
+                for name in (
+                    "proprioception",
+                    "states",
+                    "executed_actions",
+                    "teacher_actions",
+                    "perturbation_type",
+                    "perturbation_active",
+                    "burst_id",
+                    "recovery_active",
+                    "recovery_completion",
+                    "reward",
+                    "success",
+                ):
+                    group.create_dataset(
+                        name,
+                        data=np.asarray(source_group[name]),
+                        compression="lzf",
+                    )
+                for attr_name, attr_value in source_group.attrs.items():
+                    group.attrs[attr_name] = attr_value
+                progress.update(1)
+    progress.close()
+    tmp_path.replace(output_path)
+    console.print(f"Wrote Pre-RL Phase D DINO dataset: {output_path}")
+    return output_path
+
+
+def create_pre_rl_phase_d_manifests(
+    config: Config,
+    force: bool = False,
+) -> Path:
+    recovery_episodes = int(config.get("pre_rl.phase_d.dataset_episodes", 1000))
+    recovery_path = prepare_pre_rl_phase_d_features(
+        config,
+        episodes=recovery_episodes,
+        force=False,
+    )
+    clean_path = _phase4_prepared_path(config)
+    budget = int(config.get("pre_rl.phase_d.transition_budget", 80_000))
+    recovery_train_episodes = int(config.get("pre_rl.phase_d.recovery_train_episodes", 800))
+    seed = int(config.get("pre_rl.phase_d.manifest_seed", 1_810_000))
+    output_path = config.path_value("paths.incremental_data_dir") / "pre_rl_phase_d_manifests.h5"
+    if output_path.exists() and not force:
+        console.print(f"Pre-RL Phase D manifests exist: {output_path}")
+        return output_path
+    rng = np.random.default_rng(seed)
+
+    with h5py.File(clean_path, "r") as clean, h5py.File(recovery_path, "r") as recovery:
+        clean_keys = sorted(key for key in clean if key.startswith("episode_"))
+        recovery_keys = sorted(key for key in recovery if key.startswith("episode_"))
+        clean_train_keys = clean_keys[: int(config.get("incremental.phase4.train_episodes", 1800))]
+        clean_validation_keys = clean_keys[-int(config.get("incremental.phase4.validation_episodes", 200)) :]
+        recovery_train_keys = recovery_keys[:recovery_train_episodes]
+        recovery_validation_keys = recovery_keys[recovery_train_episodes:]
+
+        def all_indices(h5: h5py.File, keys: list[str], dataset: str) -> np.ndarray:
+            rows = [
+                np.column_stack(
+                    [
+                        np.full(len(h5[key][dataset]), int(key.split("_")[-1]), dtype=np.int32),
+                        np.arange(len(h5[key][dataset]), dtype=np.int32),
+                    ]
+                )
+                for key in keys
+            ]
+            return np.concatenate(rows, axis=0)
+
+        clean_indices = all_indices(clean, clean_train_keys, "actions")
+        recovery_indices = all_indices(recovery, recovery_train_keys, "teacher_actions")
+        off_nominal_mask = np.concatenate(
+            [
+                np.asarray(recovery[key]["perturbation_active"], dtype=bool)
+                | np.asarray(recovery[key]["recovery_active"], dtype=bool)
+                for key in recovery_train_keys
+            ]
+        )
+        off_nominal_indices = recovery_indices[off_nominal_mask]
+        if len(clean_indices) < budget or len(off_nominal_indices) < 50_000:
+            raise ValueError(
+                f"Insufficient Phase D candidates: clean={len(clean_indices)}, "
+                f"off_nominal={len(off_nominal_indices)}"
+            )
+        compositions = {
+            "clean": (budget, 0),
+            "mixed_25": (int(0.75 * budget), budget - int(0.75 * budget)),
+            "mixed_50": (budget // 2, budget - budget // 2),
+            "recovery_heavy": (budget - 50_000, 50_000),
+        }
+        tmp_path = output_path.with_suffix(".tmp.h5")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        with h5py.File(tmp_path, "w") as target:
+            meta = target.create_group("meta")
+            meta.attrs["clean_source"] = str(clean_path)
+            meta.attrs["recovery_source"] = str(recovery_path)
+            meta.attrs["transition_budget"] = budget
+            meta.attrs["manifest_seed"] = seed
+            meta.attrs["recovery_label_views"] = "behavior:executed_actions;query:teacher_actions"
+            for name, (clean_count, recovery_count) in compositions.items():
+                group = target.create_group(name)
+                selected_clean = clean_indices[
+                    rng.choice(len(clean_indices), size=clean_count, replace=False)
+                ]
+                selected_recovery = (
+                    off_nominal_indices[
+                        rng.choice(
+                            len(off_nominal_indices),
+                            size=recovery_count,
+                            replace=False,
+                        )
+                    ]
+                    if recovery_count
+                    else np.empty((0, 2), dtype=np.int32)
+                )
+                group.create_dataset("clean_episode_timestep", data=selected_clean)
+                group.create_dataset("recovery_episode_timestep", data=selected_recovery)
+                group.attrs["clean_transitions"] = clean_count
+                group.attrs["recovery_transitions"] = recovery_count
+                group.attrs["total_transitions"] = clean_count + recovery_count
+            validation = target.create_group("validation")
+            validation.create_dataset(
+                "clean_episode_timestep",
+                data=all_indices(clean, clean_validation_keys, "actions"),
+            )
+            validation.create_dataset(
+                "recovery_episode_timestep",
+                data=all_indices(recovery, recovery_validation_keys, "teacher_actions"),
+            )
+        tmp_path.replace(output_path)
+    console.print(f"Wrote Pre-RL Phase D manifests: {output_path}")
+    return output_path
+
+
 @torch.inference_mode()
 def collect_phase7_oracle_dagger_queries(
     config: Config,
