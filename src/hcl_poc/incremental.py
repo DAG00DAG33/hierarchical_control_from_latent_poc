@@ -5687,6 +5687,8 @@ def _phase7_privileged_results_dir(config: Config, horizon_steps: int, seed: int
 def _load_phase7_privileged_episodes(
     config: Config,
     horizon_steps: int,
+    *,
+    cap_train_to_usable: bool = False,
 ) -> tuple[list[dict[str, np.ndarray]], list[dict[str, np.ndarray]], dict[str, Any]]:
     dataset_path = collect_phase1_query_dataset(config, force=False)
     subset = str(config.get("incremental.phase7.privileged_subset", "successful"))
@@ -5704,11 +5706,22 @@ def _load_phase7_privileged_episodes(
     with h5py.File(dataset_path, "r") as h5:
         keys = _phase1_episode_keys(h5, subset)
         usable = [key for key in keys if len(h5[key]["teacher_clipped_actions"]) > horizon_steps]
-        required = train_episodes + validation_episodes
-        if len(usable) < required:
+        requested_train_episodes = train_episodes
+        required = requested_train_episodes + validation_episodes
+        if len(usable) < required and not cap_train_to_usable:
             raise ValueError(
                 f"Phase 7 privileged subset '{subset}' has {len(usable)} usable episodes, "
                 f"requires {required}"
+            )
+        train_episodes = min(
+            requested_train_episodes,
+            len(usable) - validation_episodes,
+        )
+        if train_episodes <= 0:
+            raise ValueError(
+                f"Phase 7 privileged subset '{subset}' has {len(usable)} usable episodes, "
+                f"which cannot provide {validation_episodes} validation episodes and any "
+                "training episodes"
             )
         train_keys = usable[:train_episodes]
         validation_keys = usable[-validation_episodes:]
@@ -5731,7 +5744,9 @@ def _load_phase7_privileged_episodes(
         "subset": subset,
         "label_kind": label_kind,
         "train_episodes": train_episodes,
+        "requested_train_episodes": requested_train_episodes,
         "validation_episodes": validation_episodes,
+        "usable_episodes": len(usable),
     }
     return train, validation, metadata
 
@@ -8635,7 +8650,9 @@ def train_pre_rl_phase_b_horizon(
         console.print(f"Pre-RL Phase B models exist: {checkpoint_path}")
         return checkpoint_path
     train_episodes, validation_episodes, data_metadata = _load_phase7_privileged_episodes(
-        config, horizon_steps
+        config,
+        horizon_steps,
+        cap_train_to_usable=True,
     )
     train_actions = np.concatenate([episode["actions"] for episode in train_episodes], axis=0)
     action_norm = Standardizer.fit(train_actions)

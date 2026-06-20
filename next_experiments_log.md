@@ -172,3 +172,47 @@ State-query data is always reported separately from causal transitions.
 - **Execution plan:** Run 20-episode smoke evaluations first. Promote all
   valid settings to the required 100 fixed episodes after checking state
   slicing, replay equality, and goal sensitivity.
+
+## 2026-06-20 - B-G01: Oracle-information decomposition smoke sweep
+
+- **Commands:** `pre-rl-b-train` and `pre-rl-b-eval --episodes 20` for
+  `k={2,5,10,20}`, followed by `pre-rl-b-aggregate --episodes 20`.
+- **Evaluation:** All variants use the same 20 reset seeds beginning at
+  `1600000`. Exact replay current-state error is zero for every branch-goal
+  rollout. These small samples are screening results, not final effect-size
+  estimates.
+- **Success rates:**
+
+| horizon | flat | full | robot | TCP | object | object pose |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `k=2` (0.10 s) | `0.25` | `0.75` | `0.60` | `0.50` | `0.40` | `0.25` |
+| `k=5` (0.25 s) | `0.20` | `0.55` | `0.30` | `0.25` | `0.15` | `0.25` |
+| `k=10` (0.50 s) | `0.00` | `0.40` | `0.35` | `0.50` | `0.20` | `0.20` |
+| `k=20` (1.00 s) | `0.20` | `0.20` | `0.15` | `0.05` | `0.25` | `0.10` |
+
+- **Information diagnosis:** At the strongest horizon (`k=2`), robot state
+  retains 80% of full-oracle success and TCP retains 67%, whereas object state
+  retains 53%. At `k=10`, TCP is the strongest point estimate. Future robot
+  motion therefore explains substantially more of the oracle advantage than
+  future object state alone; the current full-state oracle is partly a motor
+  waypoint interface rather than a pure desired-effect interface.
+- **Horizon diagnosis:** Full-oracle performance falls from `0.75` at `k=2`
+  to `0.20` at `k=20`, while one-step TCP subgoal error grows from `0.021 m`
+  to `0.116 m`. One second is too long for this one-step low-level formulation.
+  The `k=20` object/full ratio exceeds one only because both estimates are weak
+  and their Wilson intervals are broad; it is not treated as a gate pass.
+- **Dataset constraint:** A 20-step future exists in only 1,954 successful
+  episodes. `k=20` therefore used 1,754 train and 200 validation episodes,
+  versus the requested 1,800/200 and the full split at shorter horizons. The
+  loader now records requested, usable, and effective counts and only applies
+  this explicit cap for Phase B.
+- **Decision:** Use larger evaluation budgets only for promising diagnostic
+  settings: the short full/robot/TCP interfaces and the `k=10` TCP result.
+  Do not spend development budget expanding every clearly weak `k=20` or
+  object-only setting. Phase C should focus on whether short future TCP/robot
+  goals provide genuine temporal abstraction rather than leaked teacher
+  waypoints.
+- **Artifacts:** `results/incremental/pre_rl/phase_b/phase_b_aggregate_20.json`,
+  `oracle_goal_decomposition.csv`, and
+  `oracle_goal_decomposition_20.png` (tracked copies under
+  `docs/results/pre_rl/phase_b/`).
