@@ -2641,7 +2641,12 @@ def record_learned_interface_videos(
     paths: list[Path] = []
 
     def render_frame(env: gym.Env) -> np.ndarray:
-        frame = np.asarray(env.render())
+        rendered = env.render()
+        frame = (
+            rendered.detach().cpu().numpy()
+            if isinstance(rendered, torch.Tensor)
+            else np.asarray(rendered)
+        )
         if frame.ndim == 4:
             frame = frame[0]
         return frame.astype(np.uint8)
