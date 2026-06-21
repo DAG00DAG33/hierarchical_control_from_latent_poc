@@ -93,6 +93,7 @@ from hcl_poc.learned_interface import (
     evaluate_learned_interface_hierarchy,
     prepare_learned_interface_episodes,
     probe_learned_interface_representation,
+    record_learned_interface_videos,
     run_learned_interface_candidate,
     train_learned_interface_hierarchy,
     train_learned_interface_representation,
@@ -968,6 +969,16 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             force=args.force,
         )
+    elif args.incremental_command == "learned-interface-record":
+        record_learned_interface_videos(
+            config,
+            candidate=args.candidate,
+            goal_source=args.goal_source,
+            seed=args.seed,
+            episodes=args.episodes,
+            eval_seed_start=args.eval_seed_start,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1584,20 +1595,27 @@ def build_parser() -> argparse.ArgumentParser:
         "learned-interface-train-hierarchy",
         "learned-interface-eval",
         "learned-interface-run",
+        "learned-interface-record",
     ]:
         learned_interface = incremental_sub.add_parser(command)
         add_config_arg(learned_interface)
         learned_interface.add_argument("--candidate", required=True)
         learned_interface.add_argument("--seed", type=int, default=0)
         learned_interface.add_argument("--force", action="store_true")
-        if command in {"learned-interface-eval", "learned-interface-run"}:
+        if command in {
+            "learned-interface-eval",
+            "learned-interface-run",
+            "learned-interface-record",
+        }:
             learned_interface.add_argument("--episodes", type=int)
-        if command == "learned-interface-eval":
+        if command in {"learned-interface-eval", "learned-interface-record"}:
             learned_interface.add_argument(
                 "--goal-source",
                 choices=["learned", "oracle"],
                 required=True,
             )
+        if command == "learned-interface-record":
+            learned_interface.add_argument("--eval-seed-start", type=int)
         learned_interface.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")

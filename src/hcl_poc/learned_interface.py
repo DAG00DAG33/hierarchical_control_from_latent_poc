@@ -2591,6 +2591,262 @@ def evaluate_learned_interface_hierarchy(
     return output_path
 
 
+@torch.inference_mode()
+def record_learned_interface_videos(
+    config: Config,
+    candidate: str,
+    goal_source: str,
+    seed: int = 0,
+    episodes: int = 6,
+    eval_seed_start: int | None = None,
+    force: bool = False,
+) -> list[Path]:
+    import imageio.v2 as imageio
+
+    if goal_source not in {"learned", "oracle"}:
+        raise ValueError(f"Unknown goal source: {goal_source}")
+    hierarchy_path = train_learned_interface_hierarchy(
+        config, candidate, seed, force=False
+    )
+    checkpoint = torch.load(
+        hierarchy_path, map_location="cpu", weights_only=False
+    )
+    device = default_device()
+    high_model, low_model = _load_hierarchy(checkpoint, device)
+    encoder, representation_checkpoint = _load_representation(
+        Path(checkpoint["representation_checkpoint"]), device
+    )
+    representation_frame_norm = Standardizer.from_state_dict(
+        representation_checkpoint["frame_norm"]
+    )
+    is_effect = representation_checkpoint["encoder_type"] == "effect"
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    goal_norm = Standardizer.from_state_dict(checkpoint["goal_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    horizon_steps = int(checkpoint["horizon_steps"])
+    update_period = int(checkpoint["update_period"])
+    conditioning = str(checkpoint.get("conditioning", "concat"))
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    control_freq = int(config.get("control_freq", 20))
+    seed_start = int(
+        eval_seed_start
+        if eval_seed_start is not None
+        else config.get("learned_interface.evaluation.video_seed_start", 2_120_000)
+    )
+    output_dir = ensure_dir(
+        _result_dir(config, candidate, seed) / "videos" / goal_source
+    )
+    paths: list[Path] = []
+
+    def render_frame(env: gym.Env) -> np.ndarray:
+        frame = np.asarray(env.render())
+        if frame.ndim == 4:
+            frame = frame[0]
+        return frame.astype(np.uint8)
+
+    for episode_index in trange(
+        episodes, desc=f"record {candidate} {goal_source}"
+    ):
+        rollout_seed = seed_start + episode_index
+        existing = sorted(output_dir.glob(f"seed{rollout_seed}_*.mp4"))
+        if existing and not force:
+            paths.append(existing[0])
+            continue
+        student = gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode="rgb_array",
+            sim_backend=_rl_backend(config),
+            num_envs=1,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+        branch = (
+            gym.make(
+                config.get("env_id"),
+                obs_mode="rgb+state",
+                control_mode=config.get("control_mode"),
+                reward_mode="normalized_dense",
+                render_mode=None,
+                sim_backend=_rl_backend(config),
+                num_envs=1,
+                reconfiguration_freq=config.get(
+                    "rl.eval_reconfiguration_freq", 1
+                ),
+            )
+            if goal_source == "oracle"
+            else None
+        )
+        action_low_np = np.asarray(student.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device)
+        action_high = torch.as_tensor(action_high_np, device=device)
+        previous_action = action_norm.transform(
+            np.zeros((1, 3), dtype=np.float32)
+        )
+        held_goal = np.zeros(
+            (1, int(checkpoint["goal_dim"])), dtype=np.float32
+        )
+        countdown = 0
+        history: list[torch.Tensor] = []
+        frames_out: list[np.ndarray] = []
+        success = False
+        final_reward = 0.0
+        max_reward = -float("inf")
+        try:
+            obs, _info = student.reset(seed=[rollout_seed])
+            frames_out.append(render_frame(student))
+            for _step in range(max_steps):
+                frames = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                normalized_frames = frame_norm.transform(frames)
+                if countdown <= 0:
+                    predicted_goal = (
+                        high_model(
+                            torch.from_numpy(
+                                np.concatenate(
+                                    [normalized_frames, previous_action],
+                                    axis=-1,
+                                )
+                            )
+                            .to(device)
+                            .float()
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                    if branch is None:
+                        held_goal = predicted_goal
+                    else:
+                        branch_obs, _branch_info = branch.reset(
+                            seed=[rollout_seed]
+                        )
+                        for action_history in history:
+                            branch_obs, _reward, _terminated, _truncated, _info = (
+                                branch.step(action_history)
+                            )
+                        for _ in range(horizon_steps):
+                            branch_action = torch.clamp(
+                                teacher.actor_mean(
+                                    _phase7_obs_state_tensor(
+                                        branch_obs, device
+                                    )
+                                ),
+                                action_low,
+                                action_high,
+                            )
+                            branch_obs, _reward, _terminated, _truncated, _info = (
+                                branch.step(branch_action)
+                            )
+                        branch_frames = _phase4_frame_inputs(
+                            branch_obs,
+                            dino,
+                            int(config.get("dino.batch_size", 64)),
+                        )
+                        oracle_encoding = (
+                            _encode_effect_array(
+                                encoder,
+                                representation_frame_norm,
+                                frames,
+                                branch_frames,
+                                np.ones(1, dtype=np.float32),
+                                device,
+                            )
+                            if is_effect
+                            else _encode_array(
+                                encoder,
+                                representation_frame_norm,
+                                branch_frames,
+                                device,
+                            )
+                        )
+                        held_goal = goal_norm.transform(oracle_encoding)
+                    countdown = update_period
+                if conditioning in {"delta", "relation"}:
+                    if is_effect:
+                        raise ValueError(
+                            "Effect-code video requires absolute or FiLM "
+                            "conditioning."
+                        )
+                    current_goal = goal_norm.transform(
+                        _encode_array(
+                            encoder,
+                            representation_frame_norm,
+                            frames,
+                            device,
+                        )
+                    )
+                else:
+                    current_goal = np.empty_like(held_goal)
+                condition = _low_condition_array(
+                    normalized_frames,
+                    current_goal,
+                    held_goal,
+                    previous_action,
+                    np.asarray(
+                        [[max(countdown, 1) / horizon_steps]],
+                        dtype=np.float32,
+                    ),
+                    conditioning,
+                )
+                raw_action = action_norm.inverse(
+                    low_model(
+                        torch.from_numpy(condition).to(device).float()
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                action = torch.clamp(
+                    torch.from_numpy(raw_action).to(device).float(),
+                    action_low,
+                    action_high,
+                )
+                obs, reward, terminated, truncated, info = student.step(action)
+                history.append(action.detach().clone())
+                previous_action = action_norm.transform(
+                    action.cpu().numpy().astype(np.float32)
+                )
+                countdown -= 1
+                frames_out.append(render_frame(student))
+                final_reward = float(np.asarray(reward.cpu()).reshape(-1)[0])
+                max_reward = max(max_reward, final_reward)
+                if "success" in info:
+                    success = success or bool(
+                        np.asarray(info["success"].cpu()).reshape(-1)[0]
+                    )
+                if bool(
+                    np.asarray(
+                        torch.logical_or(terminated, truncated).cpu()
+                    ).reshape(-1)[0]
+                ):
+                    break
+        finally:
+            student.close()
+            if branch is not None:
+                branch.close()
+        path = output_dir / (
+            f"seed{rollout_seed}_success{int(success)}_"
+            f"final{final_reward:.3f}_max{max_reward:.3f}.mp4"
+        )
+        imageio.mimsave(
+            path,
+            frames_out,
+            fps=control_freq,
+            macro_block_size=1,
+        )
+        paths.append(path)
+    for path in paths:
+        console.print(f"Wrote {path}")
+    return paths
+
+
 def run_learned_interface_candidate(
     config: Config,
     candidate: str,
