@@ -1,0 +1,1290 @@
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+from typing import Any
+
+import gymnasium as gym
+import numpy as np
+import torch
+from rich.console import Console
+from torch import nn
+from torch.utils.data import DataLoader
+from tqdm import trange
+
+from hcl_poc.config import Config
+from hcl_poc.incremental import (
+    _load_phase6_train_episodes,
+    _phase4_dino_from_config,
+    _phase4_fit_standardizers,
+    _phase4_frame_inputs,
+    _phase6_train_probe_heads,
+    _phase7_obs_state_tensor,
+    _rl_backend,
+    _runtime_metadata,
+    _wilson_interval,
+    collect_phase6_probe_dataset,
+)
+from hcl_poc.models import MLP, ObservationEncoder, VariationalObservationEncoder
+from hcl_poc.rl import _rl_paths, load_ppo_agent
+from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
+
+console = Console()
+
+
+def _candidate_specs(config: Config) -> dict[str, dict[str, Any]]:
+    specs = config.get("learned_interface.candidates")
+    if not isinstance(specs, dict):
+        raise ValueError("learned_interface.candidates must be a mapping")
+    return {str(name): dict(value) for name, value in specs.items()}
+
+
+def learned_interface_candidate_spec(config: Config, candidate: str) -> dict[str, Any]:
+    specs = _candidate_specs(config)
+    if candidate not in specs:
+        raise ValueError(
+            f"Unknown learned-interface candidate {candidate!r}; "
+            f"available: {sorted(specs)}"
+        )
+    spec = specs[candidate]
+    spec.setdefault("family", "vae")
+    spec.setdefault("encoder_type", "vae")
+    spec.setdefault("latent_dim", 256)
+    spec.setdefault("width", 1024)
+    spec.setdefault("beta", 0.0)
+    spec.setdefault("kl_warmup_steps", 0)
+    spec.setdefault("free_bits", 0.0)
+    spec.setdefault("dino_noise_std", 0.0)
+    spec.setdefault("proprio_noise_std", 0.0)
+    spec.setdefault("reconstruction_weight", 0.1)
+    return spec
+
+
+def _artifact_dir(config: Config, candidate: str, seed: int) -> Path:
+    return ensure_dir(
+        config.path_value("paths.incremental_artifact_dir")
+        / "learned_interface"
+        / candidate
+        / f"seed{seed}"
+    )
+
+
+def _result_dir(config: Config, candidate: str, seed: int) -> Path:
+    return ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "learned_interface"
+        / candidate
+        / f"seed{seed}"
+    )
+
+
+def _write_representation_metrics(path: Path, payload: dict[str, Any]) -> None:
+    write_json(
+        path,
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in {"encoder", "decoder", "frame_norm"}
+        },
+    )
+
+
+class _RepresentationDataset(torch.utils.data.Dataset):
+    def __init__(self, episodes: list[dict[str, np.ndarray]], length: int) -> None:
+        self.episodes = [episode for episode in episodes if len(episode["actions"]) > 0]
+        self.length = length
+        if not self.episodes:
+            raise ValueError("No learned-interface representation episodes")
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _index: int) -> torch.Tensor:
+        episode = self.episodes[np.random.randint(0, len(self.episodes))]
+        t = int(np.random.randint(0, len(episode["frames"])))
+        return torch.from_numpy(episode["frames"][t])
+
+
+def _reconstruction_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    proprio_dim: int,
+    proprio_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    dino = torch.mean(
+        (prediction[:, :-proprio_dim] - target[:, :-proprio_dim]) ** 2
+    )
+    proprio = torch.mean(
+        (prediction[:, -proprio_dim:] - target[:, -proprio_dim:]) ** 2
+    )
+    return dino + proprio_weight * proprio, dino, proprio
+
+
+def _vae_kl(
+    mean: torch.Tensor,
+    logvar: torch.Tensor,
+    free_bits: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    per_dimension = -0.5 * (1.0 + logvar - mean.square() - logvar.exp())
+    optimized = torch.clamp(per_dimension, min=free_bits)
+    return optimized.sum(dim=-1).mean(), per_dimension.mean()
+
+
+def train_learned_interface_representation(
+    config: Config,
+    candidate: str,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    spec = learned_interface_candidate_spec(config, candidate)
+    artifact_dir = _artifact_dir(config, candidate, seed)
+    checkpoint_path = artifact_dir / "representation.pt"
+    if checkpoint_path.exists() and not force:
+        metrics_path = artifact_dir / "representation_metrics.json"
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+        _write_representation_metrics(metrics_path, checkpoint)
+        console.print(f"Learned-interface representation exists: {checkpoint_path}")
+        return checkpoint_path
+    set_seed(seed)
+    train_episodes, validation_episodes, data_metadata = _load_phase6_train_episodes(
+        config
+    )
+    frame_norm, _action_norm = _phase4_fit_standardizers(train_episodes)
+
+    def normalized(
+        episodes: list[dict[str, np.ndarray]],
+    ) -> list[dict[str, np.ndarray]]:
+        return [
+            {
+                "frames": frame_norm.transform(episode["frames"]),
+                "actions": episode["actions"],
+            }
+            for episode in episodes
+        ]
+
+    train = normalized(train_episodes)
+    validation = normalized(validation_episodes)
+    input_dim = int(data_metadata["frame_dim"])
+    latent_dim = int(spec["latent_dim"])
+    width = int(spec["width"])
+    encoder_type = str(spec["encoder_type"])
+    device = default_device()
+    if encoder_type == "vae":
+        encoder: nn.Module = VariationalObservationEncoder(
+            input_dim, latent_dim, width
+        ).to(device)
+    elif encoder_type == "deterministic":
+        encoder = ObservationEncoder(input_dim, latent_dim, width).to(device)
+    else:
+        raise ValueError(f"Unsupported encoder type: {encoder_type}")
+    decoder = MLP(latent_dim, input_dim, width, depth=3).to(device)
+    optimizer = torch.optim.AdamW(
+        list(encoder.parameters()) + list(decoder.parameters()),
+        lr=float(config.get("learned_interface.representation.lr", 3e-4)),
+    )
+    batch_size = int(config.get("learned_interface.representation.batch_size", 512))
+    batches_per_epoch = int(
+        config.get("learned_interface.representation.batches_per_epoch", 400)
+    )
+    epochs = int(config.get("learned_interface.representation.epochs", 60))
+    dataset = _RepresentationDataset(
+        train, length=batch_size * batches_per_epoch
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    validation_samples = int(
+        config.get("learned_interface.representation.validation_samples", 8192)
+    )
+    validation_dataset = _RepresentationDataset(
+        validation, length=validation_samples
+    )
+    validation_loader = DataLoader(
+        validation_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+    beta = float(spec["beta"])
+    warmup_steps = int(spec["kl_warmup_steps"])
+    free_bits = float(spec["free_bits"])
+    dino_noise = float(spec["dino_noise_std"])
+    proprio_noise = float(spec["proprio_noise_std"])
+    reconstruction_weight = float(spec["reconstruction_weight"])
+    proprio_dim = int(config.get("incremental.phase6.proprio_dim", 21))
+    proprio_weight = float(
+        config.get("incremental.phase6.proprio_reconstruction_weight", 1.0)
+    )
+    best_state: dict[str, Any] | None = None
+    best_validation = float("inf")
+    history: list[dict[str, Any]] = []
+    global_step = 0
+    timer = Timer()
+
+    def add_noise(x: torch.Tensor) -> torch.Tensor:
+        if dino_noise <= 0.0 and proprio_noise <= 0.0:
+            return x
+        corrupted = x.clone()
+        if dino_noise > 0.0:
+            corrupted[:, :-proprio_dim] += torch.randn_like(
+                corrupted[:, :-proprio_dim]
+            ) * dino_noise
+        if proprio_noise > 0.0:
+            corrupted[:, -proprio_dim:] += torch.randn_like(
+                corrupted[:, -proprio_dim:]
+            ) * proprio_noise
+        return corrupted
+
+    def encode_training(
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if encoder_type == "vae":
+            assert isinstance(encoder, VariationalObservationEncoder)
+            z, mean, logvar = encoder.sample(x)
+            kl_total, kl_per_dim = _vae_kl(mean, logvar, free_bits)
+            return z, kl_total, kl_per_dim
+        return (
+            encoder(x),
+            torch.zeros((), device=x.device),
+            torch.zeros((), device=x.device),
+        )
+
+    def validation_metrics() -> dict[str, Any]:
+        recon_total = []
+        recon_dino = []
+        recon_proprio = []
+        kl_total = []
+        kl_per_dim = []
+        posterior_variance = []
+        latent_rows = []
+        with torch.inference_mode():
+            for x in validation_loader:
+                x = x.to(device).float()
+                if encoder_type == "vae":
+                    assert isinstance(encoder, VariationalObservationEncoder)
+                    mean, logvar = encoder.encode_stats(x)
+                    z = mean
+                    total, per_dim = _vae_kl(mean, logvar, 0.0)
+                    kl_total.append(float(total.cpu()))
+                    kl_per_dim.append(float(per_dim.cpu()))
+                    posterior_variance.append(
+                        float(logvar.exp().mean().cpu())
+                    )
+                else:
+                    z = encoder(x)
+                reconstruction = decoder(z)
+                total, dino, proprio = _reconstruction_loss(
+                    reconstruction, x, proprio_dim, proprio_weight
+                )
+                recon_total.append(float(total.cpu()))
+                recon_dino.append(float(dino.cpu()))
+                recon_proprio.append(float(proprio.cpu()))
+                latent_rows.append(z.cpu().numpy())
+        latents = np.concatenate(latent_rows)
+        latent_std = latents.std(axis=0)
+        return {
+            "reconstruction_mse": float(np.mean(recon_total)),
+            "dino_reconstruction_mse": float(np.mean(recon_dino)),
+            "proprio_reconstruction_mse": float(np.mean(recon_proprio)),
+            "kl_total": float(np.mean(kl_total)) if kl_total else 0.0,
+            "kl_per_dimension": float(np.mean(kl_per_dim)) if kl_per_dim else 0.0,
+            "active_dimensions_std_gt_0_1": int(np.sum(latent_std > 0.1)),
+            "posterior_variance_mean": (
+                float(np.mean(posterior_variance))
+                if posterior_variance
+                else 0.0
+            ),
+            "latent_norm_mean": float(np.linalg.norm(latents, axis=-1).mean()),
+            "latent_norm_std": float(np.linalg.norm(latents, axis=-1).std()),
+        }
+
+    for epoch in trange(
+        1, epochs + 1, desc=f"train learned interface {candidate}"
+    ):
+        encoder.train()
+        decoder.train()
+        sums = {
+            "loss": 0.0,
+            "reconstruction": 0.0,
+            "dino": 0.0,
+            "proprio": 0.0,
+            "kl_total": 0.0,
+            "kl_per_dimension": 0.0,
+            "beta": 0.0,
+        }
+        count = 0
+        for x in loader:
+            x = x.to(device, non_blocking=True).float()
+            z, kl_total, kl_per_dim = encode_training(add_noise(x))
+            reconstruction = decoder(z)
+            recon, dino, proprio = _reconstruction_loss(
+                reconstruction, x, proprio_dim, proprio_weight
+            )
+            beta_scale = (
+                min(1.0, global_step / warmup_steps)
+                if warmup_steps > 0
+                else 1.0
+            )
+            effective_beta = beta * beta_scale
+            loss = reconstruction_weight * recon + effective_beta * kl_total
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            batch_count = len(x)
+            sums["loss"] += float(loss.detach().cpu()) * batch_count
+            sums["reconstruction"] += float(recon.detach().cpu()) * batch_count
+            sums["dino"] += float(dino.detach().cpu()) * batch_count
+            sums["proprio"] += float(proprio.detach().cpu()) * batch_count
+            sums["kl_total"] += float(kl_total.detach().cpu()) * batch_count
+            sums["kl_per_dimension"] += (
+                float(kl_per_dim.detach().cpu()) * batch_count
+            )
+            sums["beta"] += effective_beta * batch_count
+            count += batch_count
+            global_step += 1
+        encoder.eval()
+        decoder.eval()
+        validation_metrics_row = validation_metrics()
+        history.append(
+            {
+                "epoch": epoch,
+                **{f"train_{key}": value / count for key, value in sums.items()},
+                **{
+                    f"validation_{key}": value
+                    for key, value in validation_metrics_row.items()
+                },
+            }
+        )
+        selection = float(validation_metrics_row["reconstruction_mse"])
+        if selection < best_validation:
+            best_validation = selection
+            best_state = {
+                "encoder": copy.deepcopy(encoder.state_dict()),
+                "decoder": copy.deepcopy(decoder.state_dict()),
+                "epoch": epoch,
+            }
+    if best_state is None:
+        raise RuntimeError("Learned-interface representation produced no checkpoint")
+    encoder.load_state_dict(best_state["encoder"])
+    decoder.load_state_dict(best_state["decoder"])
+    encoder.eval()
+    decoder.eval()
+    final_validation = validation_metrics()
+    payload = {
+        "candidate": candidate,
+        "family": spec["family"],
+        "spec": spec,
+        "encoder_type": encoder_type,
+        "input_dim": input_dim,
+        "latent_dim": latent_dim,
+        "hidden_dim": width,
+        "encoder": encoder.state_dict(),
+        "decoder": decoder.state_dict(),
+        "frame_norm": frame_norm.state_dict(),
+        "best_epoch": best_state["epoch"],
+        "validation_metrics": final_validation,
+        "history": history,
+        "data": data_metadata,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    _write_representation_metrics(
+        artifact_dir / "representation_metrics.json",
+        payload,
+    )
+    console.print(f"Wrote learned-interface representation: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_representation(
+    checkpoint_path: Path,
+    device: torch.device,
+) -> tuple[nn.Module, dict[str, Any]]:
+    checkpoint = torch.load(
+        checkpoint_path, map_location=device, weights_only=False
+    )
+    encoder_cls = (
+        VariationalObservationEncoder
+        if checkpoint["encoder_type"] == "vae"
+        else ObservationEncoder
+    )
+    encoder = encoder_cls(
+        int(checkpoint["input_dim"]),
+        int(checkpoint["latent_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).to(device)
+    encoder.load_state_dict(checkpoint["encoder"])
+    encoder.eval()
+    return encoder, checkpoint
+
+
+@torch.inference_mode()
+def _encode_array(
+    encoder: nn.Module,
+    frame_norm: Standardizer,
+    frames: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    normalized = frame_norm.transform(frames)
+    rows = []
+    for start in range(0, len(normalized), 2048):
+        rows.append(
+            encoder(
+                torch.from_numpy(normalized[start : start + 2048])
+                .to(device)
+                .float()
+            )
+            .cpu()
+            .numpy()
+        )
+    return np.concatenate(rows).astype(np.float32)
+
+
+def probe_learned_interface_representation(
+    config: Config,
+    candidate: str,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    output_path = _result_dir(config, candidate, seed) / "representation_probe.json"
+    if output_path.exists() and not force:
+        console.print(f"Learned-interface probe exists: {output_path}")
+        return output_path
+    checkpoint_path = train_learned_interface_representation(
+        config, candidate, seed, force=False
+    )
+    device = default_device()
+    encoder, checkpoint = _load_representation(checkpoint_path, device)
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    dataset_path = collect_phase6_probe_dataset(config, force=False)
+    with np.load(dataset_path) as data:
+        inputs = np.asarray(data["inputs"], dtype=np.float32)
+        next_inputs = np.asarray(data["next_inputs"], dtype=np.float32)
+        actions = np.asarray(data["actions"], dtype=np.float32)
+        labels = np.asarray(data["labels"], dtype=np.float32)
+        next_labels = np.asarray(data["next_labels"], dtype=np.float32)
+        contact = np.asarray(data["contact"], dtype=np.float32)
+        reward = np.asarray(data["reward"], dtype=np.float32)
+    representations = _encode_array(encoder, frame_norm, inputs, device)
+    next_representations = _encode_array(
+        encoder, frame_norm, next_inputs, device
+    )
+    metrics = _phase6_train_probe_heads(
+        config,
+        representations,
+        next_representations,
+        actions,
+        labels,
+        next_labels,
+        contact,
+        reward,
+        seed,
+    )
+    payload = {
+        "stage": "representation_probe",
+        "candidate": candidate,
+        "representation_checkpoint": str(checkpoint_path),
+        "representation_validation": checkpoint["validation_metrics"],
+        "probe_dataset": str(dataset_path),
+        **metrics,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def prepare_learned_interface_episodes(
+    config: Config,
+    candidate: str,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    artifact_dir = _artifact_dir(config, candidate, seed)
+    output_path = artifact_dir / "encoded_episodes.pt"
+    if output_path.exists() and not force:
+        console.print(f"Learned-interface encoded episodes exist: {output_path}")
+        return output_path
+    checkpoint_path = train_learned_interface_representation(
+        config, candidate, seed, force=False
+    )
+    device = default_device()
+    encoder, checkpoint = _load_representation(checkpoint_path, device)
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    train, validation, data_metadata = _load_phase6_train_episodes(config)
+
+    def convert(
+        episodes: list[dict[str, np.ndarray]],
+    ) -> list[dict[str, np.ndarray]]:
+        return [
+            {
+                "frames": episode["frames"],
+                "goals": _encode_array(
+                    encoder, frame_norm, episode["frames"], device
+                ),
+                "actions": episode["actions"],
+            }
+            for episode in episodes
+        ]
+
+    payload = {
+        "candidate": candidate,
+        "representation_checkpoint": str(checkpoint_path),
+        "train": convert(train),
+        "validation": convert(validation),
+        "data": data_metadata,
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, output_path)
+    console.print(f"Wrote learned-interface encoded episodes: {output_path}")
+    return output_path
+
+
+class _HeldGoalDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        episodes: list[dict[str, np.ndarray]],
+        frame_norm: Standardizer,
+        goal_norm: Standardizer,
+        action_norm: Standardizer,
+        horizon_steps: int,
+        mode: str,
+        length: int,
+    ) -> None:
+        if mode not in {"high", "low"}:
+            raise ValueError(f"Unknown held-goal mode: {mode}")
+        self.episodes = [
+            episode
+            for episode in episodes
+            if len(episode["actions"]) > horizon_steps
+        ]
+        self.frame_norm = frame_norm
+        self.goal_norm = goal_norm
+        self.action_norm = action_norm
+        self.horizon_steps = horizon_steps
+        self.mode = mode
+        self.length = length
+        self.zero_action = action_norm.transform(
+            np.zeros((1, 3), dtype=np.float32)
+        )[0]
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        episode = self.episodes[np.random.randint(0, len(self.episodes))]
+        base = int(
+            np.random.randint(0, len(episode["actions"]) - self.horizon_steps)
+        )
+        previous = (
+            self.action_norm.transform(
+                episode["actions"][base - 1 : base]
+            )[0]
+            if base > 0
+            else self.zero_action
+        )
+        if self.mode == "high":
+            condition = np.concatenate(
+                [
+                    self.frame_norm.transform(
+                        episode["frames"][base : base + 1]
+                    )[0],
+                    previous,
+                ]
+            )
+            target = self.goal_norm.transform(
+                episode["goals"][
+                    base + self.horizon_steps : base + self.horizon_steps + 1
+                ]
+            )[0]
+        else:
+            offset = int(np.random.randint(0, self.horizon_steps))
+            current = base + offset
+            previous = (
+                self.action_norm.transform(
+                    episode["actions"][current - 1 : current]
+                )[0]
+                if current > 0
+                else self.zero_action
+            )
+            condition = np.concatenate(
+                [
+                    self.frame_norm.transform(
+                        episode["frames"][current : current + 1]
+                    )[0],
+                    self.goal_norm.transform(
+                        episode["goals"][
+                            base
+                            + self.horizon_steps : base
+                            + self.horizon_steps
+                            + 1
+                        ]
+                    )[0],
+                    previous,
+                    np.asarray(
+                        [
+                            (self.horizon_steps - offset)
+                            / self.horizon_steps
+                        ],
+                        dtype=np.float32,
+                    ),
+                ]
+            )
+            target = self.action_norm.transform(
+                episode["actions"][current : current + 1]
+            )[0]
+        return (
+            torch.from_numpy(condition.astype(np.float32)),
+            torch.from_numpy(target.astype(np.float32)),
+        )
+
+
+@torch.inference_mode()
+def _hierarchy_validation_metrics(
+    high_model: nn.Module,
+    low_model: nn.Module,
+    episodes: list[dict[str, np.ndarray]],
+    frame_norm: Standardizer,
+    goal_norm: Standardizer,
+    action_norm: Standardizer,
+    horizon_steps: int,
+    samples: int,
+    seed: int,
+) -> dict[str, float]:
+    device = next(high_model.parameters()).device
+    rng = np.random.default_rng(seed)
+    zero_action = action_norm.transform(np.zeros((1, 3), dtype=np.float32))[0]
+    high_conditions = []
+    oracle_goals = []
+    current_frames = []
+    previous_actions = []
+    target_actions = []
+    remaining_values = []
+    for _ in range(samples):
+        episode = episodes[int(rng.integers(0, len(episodes)))]
+        base = int(rng.integers(0, len(episode["actions"]) - horizon_steps))
+        offset = int(rng.integers(0, horizon_steps))
+        current = base + offset
+        high_previous = (
+            action_norm.transform(episode["actions"][base - 1 : base])[0]
+            if base > 0
+            else zero_action
+        )
+        previous = (
+            action_norm.transform(
+                episode["actions"][current - 1 : current]
+            )[0]
+            if current > 0
+            else zero_action
+        )
+        high_conditions.append(
+            np.concatenate(
+                [
+                    frame_norm.transform(
+                        episode["frames"][base : base + 1]
+                    )[0],
+                    high_previous,
+                ]
+            )
+        )
+        oracle_goals.append(
+            goal_norm.transform(
+                episode["goals"][
+                    base + horizon_steps : base + horizon_steps + 1
+                ]
+            )[0]
+        )
+        current_frames.append(
+            frame_norm.transform(
+                episode["frames"][current : current + 1]
+            )[0]
+        )
+        previous_actions.append(previous)
+        target_actions.append(episode["actions"][current])
+        remaining_values.append((horizon_steps - offset) / horizon_steps)
+    high_conditions_np = np.asarray(high_conditions, dtype=np.float32)
+    oracle_goals_np = np.asarray(oracle_goals, dtype=np.float32)
+    predicted_goals = high_model(
+        torch.from_numpy(high_conditions_np).to(device).float()
+    ).cpu().numpy()
+
+    def low_actions(goals: np.ndarray) -> np.ndarray:
+        condition = np.concatenate(
+            [
+                np.asarray(current_frames, dtype=np.float32),
+                goals,
+                np.asarray(previous_actions, dtype=np.float32),
+                np.asarray(remaining_values, dtype=np.float32)[:, None],
+            ],
+            axis=-1,
+        )
+        return action_norm.inverse(
+            low_model(torch.from_numpy(condition).to(device).float())
+            .cpu()
+            .numpy()
+        )
+
+    target_actions_np = np.asarray(target_actions, dtype=np.float32)
+    oracle_actions = low_actions(oracle_goals_np)
+    predicted_actions = low_actions(predicted_goals)
+    goal_errors = np.linalg.norm(predicted_goals - oracle_goals_np, axis=-1)
+    return {
+        "normalized_goal_l2": float(np.mean(goal_errors)),
+        "oracle_action_mae": float(
+            np.mean(np.abs(oracle_actions - target_actions_np))
+        ),
+        "predicted_action_mae": float(
+            np.mean(np.abs(predicted_actions - target_actions_np))
+        ),
+        "prediction_induced_action_l2": float(
+            np.mean(np.linalg.norm(predicted_actions - oracle_actions, axis=-1))
+        ),
+    }
+
+
+def train_learned_interface_hierarchy(
+    config: Config,
+    candidate: str,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    artifact_dir = _artifact_dir(config, candidate, seed)
+    checkpoint_path = artifact_dir / "hierarchy.pt"
+    if checkpoint_path.exists() and not force:
+        console.print(f"Learned-interface hierarchy exists: {checkpoint_path}")
+        return checkpoint_path
+    set_seed(seed)
+    encoded_path = prepare_learned_interface_episodes(
+        config, candidate, seed, force=False
+    )
+    encoded = torch.load(encoded_path, map_location="cpu", weights_only=False)
+    representation_checkpoint = torch.load(
+        encoded["representation_checkpoint"],
+        map_location="cpu",
+        weights_only=False,
+    )
+    train = encoded["train"]
+    validation = encoded["validation"]
+    frame_norm = Standardizer.from_state_dict(
+        representation_checkpoint["frame_norm"]
+    )
+    goal_norm = Standardizer.fit(
+        np.concatenate([episode["goals"] for episode in train], axis=0)
+    )
+    action_norm = Standardizer.fit(
+        np.concatenate([episode["actions"] for episode in train], axis=0)
+    )
+    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
+    batch_size = int(config.get("learned_interface.policy.batch_size", 512))
+    batches_per_epoch = int(
+        config.get("learned_interface.policy.batches_per_epoch", 200)
+    )
+    epochs = int(config.get("learned_interface.policy.epochs", 60))
+    high_dataset = _HeldGoalDataset(
+        train,
+        frame_norm,
+        goal_norm,
+        action_norm,
+        horizon_steps,
+        "high",
+        batch_size * batches_per_epoch,
+    )
+    low_dataset = _HeldGoalDataset(
+        train,
+        frame_norm,
+        goal_norm,
+        action_norm,
+        horizon_steps,
+        "low",
+        batch_size * batches_per_epoch,
+    )
+    high_loader = DataLoader(
+        high_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    low_loader = DataLoader(
+        low_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    frame_dim = int(representation_checkpoint["input_dim"])
+    goal_dim = int(representation_checkpoint["latent_dim"])
+    hidden_dim = int(config.get("learned_interface.policy.hidden_dim", 512))
+    device = default_device()
+    high_model = MLP(frame_dim + 3, goal_dim, hidden_dim, depth=4).to(device)
+    low_model = MLP(
+        frame_dim + goal_dim + 3 + 1, 3, hidden_dim, depth=4
+    ).to(device)
+    learning_rate = float(config.get("learned_interface.policy.lr", 3e-4))
+    high_optimizer = torch.optim.AdamW(high_model.parameters(), lr=learning_rate)
+    low_optimizer = torch.optim.AdamW(low_model.parameters(), lr=learning_rate)
+    validation_samples = int(
+        config.get("learned_interface.policy.validation_samples", 5000)
+    )
+    history = []
+    best_score = float("inf")
+    best_state: dict[str, Any] | None = None
+    timer = Timer()
+    for epoch in trange(
+        1, epochs + 1, desc=f"train learned hierarchy {candidate}"
+    ):
+        high_model.train()
+        low_model.train()
+        high_sum = 0.0
+        low_sum = 0.0
+        for (high_x, high_y), (low_x, low_y) in zip(
+            high_loader, low_loader, strict=True
+        ):
+            high_x = high_x.to(device, non_blocking=True)
+            high_y = high_y.to(device, non_blocking=True)
+            high_loss = torch.mean((high_model(high_x) - high_y) ** 2)
+            high_optimizer.zero_grad(set_to_none=True)
+            high_loss.backward()
+            high_optimizer.step()
+            high_sum += float(high_loss.detach().cpu())
+
+            low_x = low_x.to(device, non_blocking=True)
+            low_y = low_y.to(device, non_blocking=True)
+            low_loss = torch.mean((low_model(low_x) - low_y) ** 2)
+            low_optimizer.zero_grad(set_to_none=True)
+            low_loss.backward()
+            low_optimizer.step()
+            low_sum += float(low_loss.detach().cpu())
+        high_model.eval()
+        low_model.eval()
+        metrics = _hierarchy_validation_metrics(
+            high_model,
+            low_model,
+            validation,
+            frame_norm,
+            goal_norm,
+            action_norm,
+            horizon_steps,
+            validation_samples,
+            seed + 3000,
+        )
+        history.append(
+            {
+                "epoch": epoch,
+                "high_train_mse": high_sum / batches_per_epoch,
+                "low_train_mse": low_sum / batches_per_epoch,
+                **metrics,
+            }
+        )
+        if metrics["predicted_action_mae"] < best_score:
+            best_score = metrics["predicted_action_mae"]
+            best_state = {
+                "high_model": copy.deepcopy(high_model.state_dict()),
+                "low_model": copy.deepcopy(low_model.state_dict()),
+                "validation": metrics,
+                "epoch": epoch,
+            }
+    if best_state is None:
+        raise RuntimeError("Learned-interface hierarchy produced no checkpoint")
+    payload = {
+        "candidate": candidate,
+        "representation_checkpoint": encoded["representation_checkpoint"],
+        "horizon_steps": horizon_steps,
+        "update_period": int(config.get("learned_interface.update_period", 10)),
+        "frame_dim": frame_dim,
+        "goal_dim": goal_dim,
+        "hidden_dim": hidden_dim,
+        "high_model": best_state["high_model"],
+        "low_model": best_state["low_model"],
+        "frame_norm": frame_norm.state_dict(),
+        "goal_norm": goal_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "best_epoch": best_state["epoch"],
+        "validation_metrics": best_state["validation"],
+        "history": history,
+        "elapsed_s": timer.elapsed(),
+        "data": encoded["data"],
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        artifact_dir / "hierarchy_metrics.json",
+        {
+            key: value
+            for key, value in payload.items()
+            if key
+            not in {
+                "high_model",
+                "low_model",
+                "frame_norm",
+                "goal_norm",
+                "action_norm",
+            }
+        },
+    )
+    console.print(f"Wrote learned-interface hierarchy: {checkpoint_path}")
+    return checkpoint_path
+
+
+def _load_hierarchy(
+    checkpoint: dict[str, Any],
+    device: torch.device,
+) -> tuple[nn.Module, nn.Module]:
+    high_model = MLP(
+        int(checkpoint["frame_dim"]) + 3,
+        int(checkpoint["goal_dim"]),
+        int(checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    low_model = MLP(
+        int(checkpoint["frame_dim"]) + int(checkpoint["goal_dim"]) + 4,
+        3,
+        int(checkpoint["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    high_model.load_state_dict(checkpoint["high_model"])
+    low_model.load_state_dict(checkpoint["low_model"])
+    high_model.eval()
+    low_model.eval()
+    return high_model, low_model
+
+
+@torch.inference_mode()
+def evaluate_learned_interface_hierarchy(
+    config: Config,
+    candidate: str,
+    goal_source: str,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    if goal_source not in {"learned", "oracle"}:
+        raise ValueError(f"Unknown goal source: {goal_source}")
+    eval_episodes = int(
+        episodes
+        or (
+            config.get("learned_interface.evaluation.oracle_episodes", 20)
+            if goal_source == "oracle"
+            else config.get("learned_interface.evaluation.screening_episodes", 20)
+        )
+    )
+    output_path = (
+        _result_dir(config, candidate, seed)
+        / f"{goal_source}_hierarchy_eval_{eval_episodes}.json"
+    )
+    if output_path.exists() and not force:
+        console.print(f"Learned-interface evaluation exists: {output_path}")
+        return output_path
+    hierarchy_path = train_learned_interface_hierarchy(
+        config, candidate, seed, force=False
+    )
+    checkpoint = torch.load(
+        hierarchy_path, map_location="cpu", weights_only=False
+    )
+    device = default_device()
+    high_model, low_model = _load_hierarchy(checkpoint, device)
+    encoder, representation_checkpoint = _load_representation(
+        Path(checkpoint["representation_checkpoint"]), device
+    )
+    frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    goal_norm = Standardizer.from_state_dict(checkpoint["goal_norm"])
+    action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    horizon_steps = int(checkpoint["horizon_steps"])
+    update_period = int(checkpoint["update_period"])
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    max_num_envs = min(
+        int(config.get("learned_interface.evaluation.num_envs", 16)),
+        eval_episodes,
+    )
+    seed_start = int(
+        config.get("learned_interface.evaluation.seed_start", 2_100_000)
+    )
+    successes: list[float] = []
+    final_rewards: list[float] = []
+    max_rewards: list[float] = []
+    teacher_maes: list[float] = []
+    goal_errors: list[float] = []
+    replay_errors: list[float] = []
+    high_decisions = 0
+    progress = trange(
+        eval_episodes, desc=f"eval {candidate} {goal_source}"
+    )
+    for batch_start in range(0, eval_episodes, max_num_envs):
+        num_envs = min(max_num_envs, eval_episodes - batch_start)
+        reset_seeds = [
+            seed_start + batch_start + index for index in range(num_envs)
+        ]
+        student = gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=num_envs,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+        branch = (
+            gym.make(
+                config.get("env_id"),
+                obs_mode="rgb+state",
+                control_mode=config.get("control_mode"),
+                reward_mode="normalized_dense",
+                render_mode=None,
+                sim_backend=_rl_backend(config),
+                num_envs=num_envs,
+                reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+            )
+            if goal_source == "oracle"
+            else None
+        )
+        action_low_np = np.asarray(student.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device)
+        action_high = torch.as_tensor(action_high_np, device=device)
+        zero_action = action_norm.transform(
+            np.zeros((1, 3), dtype=np.float32)
+        )[0]
+        previous_action = np.repeat(zero_action[None], num_envs, axis=0)
+        held_goal = np.zeros(
+            (num_envs, int(checkpoint["goal_dim"])), dtype=np.float32
+        )
+        countdown = np.zeros(num_envs, dtype=np.int32)
+        active = np.ones(num_envs, dtype=bool)
+        success_once = np.zeros(num_envs, dtype=bool)
+        batch_final = np.zeros(num_envs, dtype=np.float32)
+        batch_max = np.full(num_envs, -np.inf, dtype=np.float32)
+        history: list[torch.Tensor] = []
+        try:
+            obs, _info = student.reset(seed=reset_seeds)
+            for _step in range(max_steps):
+                if not np.any(active):
+                    break
+                frames = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                normalized_frames = frame_norm.transform(frames)
+                replan = active & (countdown <= 0)
+                if np.any(replan):
+                    predicted_goal = high_model(
+                        torch.from_numpy(
+                            np.concatenate(
+                                [normalized_frames, previous_action], axis=-1
+                            )
+                        )
+                        .to(device)
+                        .float()
+                    ).cpu().numpy()
+                    selected_goal = predicted_goal
+                    if branch is not None:
+                        branch_obs, _branch_info = branch.reset(seed=reset_seeds)
+                        for action_history in history:
+                            branch_obs, _reward, _terminated, _truncated, _info = (
+                                branch.step(action_history)
+                            )
+                        replay_error = torch.max(
+                            torch.abs(
+                                student.unwrapped.get_state()
+                                - branch.unwrapped.get_state()
+                            ),
+                            dim=1,
+                        ).values
+                        replay_errors.extend(
+                            replay_error.cpu().numpy()[replan].tolist()
+                        )
+                        for _ in range(horizon_steps):
+                            branch_state = _phase7_obs_state_tensor(
+                                branch_obs, device
+                            )
+                            branch_action = torch.clamp(
+                                teacher.actor_mean(branch_state),
+                                action_low,
+                                action_high,
+                            )
+                            branch_obs, _reward, _terminated, _truncated, _info = (
+                                branch.step(branch_action)
+                            )
+                        branch_frames = _phase4_frame_inputs(
+                            branch_obs,
+                            dino,
+                            int(config.get("dino.batch_size", 64)),
+                        )
+                        oracle_goal = goal_norm.transform(
+                            _encode_array(
+                                encoder,
+                                Standardizer.from_state_dict(
+                                    representation_checkpoint["frame_norm"]
+                                ),
+                                branch_frames,
+                                device,
+                            )
+                        )
+                        goal_errors.extend(
+                            np.linalg.norm(
+                                predicted_goal[replan] - oracle_goal[replan],
+                                axis=-1,
+                            ).tolist()
+                        )
+                        selected_goal = oracle_goal
+                    held_goal[replan] = selected_goal[replan]
+                    countdown[replan] = update_period
+                    high_decisions += int(np.sum(replan))
+                remaining = np.maximum(countdown, 1).astype(np.float32)
+                condition = np.concatenate(
+                    [
+                        normalized_frames,
+                        held_goal,
+                        previous_action,
+                        (remaining / horizon_steps)[:, None],
+                    ],
+                    axis=-1,
+                )
+                raw_action = action_norm.inverse(
+                    low_model(
+                        torch.from_numpy(condition).to(device).float()
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                teacher_action = (
+                    torch.clamp(
+                        teacher.actor_mean(_phase7_obs_state_tensor(obs, device)),
+                        action_low,
+                        action_high,
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                teacher_maes.extend(
+                    np.mean(
+                        np.abs(raw_action[active] - teacher_action[active]),
+                        axis=-1,
+                    ).tolist()
+                )
+                action = torch.clamp(
+                    torch.from_numpy(raw_action).to(device).float(),
+                    action_low,
+                    action_high,
+                )
+                action[~torch.from_numpy(active).to(device)] = 0.0
+                obs, reward, terminated, truncated, info = student.step(action)
+                history.append(action.detach().clone())
+                previous_action = action_norm.transform(
+                    action.cpu().numpy().astype(np.float32)
+                )
+                countdown -= 1
+                reward_np = reward.detach().cpu().numpy().reshape(-1)
+                batch_final[active] = reward_np[active]
+                batch_max[active] = np.maximum(
+                    batch_max[active], reward_np[active]
+                )
+                if "success" in info:
+                    success_once |= (
+                        info["success"].detach().cpu().numpy().reshape(-1).astype(bool)
+                    )
+                done = (
+                    torch.logical_or(terminated, truncated)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .reshape(-1)
+                    .astype(bool)
+                )
+                newly_done = active & done
+                if np.any(newly_done):
+                    progress.update(int(np.sum(newly_done)))
+                    active[newly_done] = False
+            if np.any(active):
+                progress.update(int(np.sum(active)))
+            successes.extend(success_once.astype(float).tolist())
+            final_rewards.extend(batch_final.astype(float).tolist())
+            max_rewards.extend(batch_max.astype(float).tolist())
+        finally:
+            student.close()
+            if branch is not None:
+                branch.close()
+    progress.close()
+    success = float(np.mean(successes))
+    payload = {
+        "stage": "closed_loop_interface",
+        "candidate": candidate,
+        "goal_source": goal_source,
+        "seed": seed,
+        "checkpoint": str(hierarchy_path),
+        "episodes": eval_episodes,
+        "seed_start": seed_start,
+        "success": success,
+        "success_wilson_95": _wilson_interval(success, eval_episodes),
+        "final_reward": float(np.mean(final_rewards)),
+        "max_reward": float(np.mean(max_rewards)),
+        "teacher_action_mae": float(np.mean(teacher_maes)),
+        "high_level_decisions_per_episode": high_decisions / eval_episodes,
+        "normalized_goal_prediction_l2": (
+            float(np.mean(goal_errors)) if goal_errors else None
+        ),
+        "replay_current_state_error_max": (
+            float(np.max(replay_errors)) if replay_errors else None
+        ),
+        "offline_validation": checkpoint["validation_metrics"],
+        "representation_validation": representation_checkpoint[
+            "validation_metrics"
+        ],
+        "data": checkpoint["data"],
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(payload)
+    return output_path
+
+
+def run_learned_interface_candidate(
+    config: Config,
+    candidate: str,
+    seed: int = 0,
+    episodes: int | None = None,
+    force: bool = False,
+) -> dict[str, Path]:
+    representation = train_learned_interface_representation(
+        config, candidate, seed, force=force
+    )
+    probe = probe_learned_interface_representation(
+        config, candidate, seed, force=force
+    )
+    hierarchy = train_learned_interface_hierarchy(
+        config, candidate, seed, force=force
+    )
+    learned = evaluate_learned_interface_hierarchy(
+        config,
+        candidate,
+        "learned",
+        seed,
+        episodes=episodes,
+        force=force,
+    )
+    oracle = evaluate_learned_interface_hierarchy(
+        config,
+        candidate,
+        "oracle",
+        seed,
+        episodes=episodes,
+        force=force,
+    )
+    return {
+        "representation": representation,
+        "probe": probe,
+        "hierarchy": hierarchy,
+        "learned": learned,
+        "oracle": oracle,
+    }

@@ -89,6 +89,14 @@ from hcl_poc.incremental import (
     train_phase10_robust_low_level,
     sweep_phase8_deterministic_predictors,
 )
+from hcl_poc.learned_interface import (
+    evaluate_learned_interface_hierarchy,
+    prepare_learned_interface_episodes,
+    probe_learned_interface_representation,
+    run_learned_interface_candidate,
+    train_learned_interface_hierarchy,
+    train_learned_interface_representation,
+)
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.train import (
@@ -915,6 +923,51 @@ def incremental_cmd(args: argparse.Namespace) -> None:
         )
     elif args.incremental_command == "pre-rl-g-tcp-diagnostics":
         analyze_pre_rl_phase_g_tcp_predictor(config, force=args.force)
+    elif args.incremental_command == "learned-interface-train-representation":
+        train_learned_interface_representation(
+            config,
+            candidate=args.candidate,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "learned-interface-probe":
+        probe_learned_interface_representation(
+            config,
+            candidate=args.candidate,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "learned-interface-prepare":
+        prepare_learned_interface_episodes(
+            config,
+            candidate=args.candidate,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "learned-interface-train-hierarchy":
+        train_learned_interface_hierarchy(
+            config,
+            candidate=args.candidate,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "learned-interface-eval":
+        evaluate_learned_interface_hierarchy(
+            config,
+            candidate=args.candidate,
+            goal_source=args.goal_source,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
+    elif args.incremental_command == "learned-interface-run":
+        run_learned_interface_candidate(
+            config,
+            candidate=args.candidate,
+            seed=args.seed,
+            episodes=args.episodes,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1524,6 +1577,28 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(pre_rl_g_tcp_diagnostics)
     pre_rl_g_tcp_diagnostics.add_argument("--force", action="store_true")
     pre_rl_g_tcp_diagnostics.set_defaults(func=incremental_cmd)
+    for command in [
+        "learned-interface-train-representation",
+        "learned-interface-probe",
+        "learned-interface-prepare",
+        "learned-interface-train-hierarchy",
+        "learned-interface-eval",
+        "learned-interface-run",
+    ]:
+        learned_interface = incremental_sub.add_parser(command)
+        add_config_arg(learned_interface)
+        learned_interface.add_argument("--candidate", required=True)
+        learned_interface.add_argument("--seed", type=int, default=0)
+        learned_interface.add_argument("--force", action="store_true")
+        if command in {"learned-interface-eval", "learned-interface-run"}:
+            learned_interface.add_argument("--episodes", type=int)
+        if command == "learned-interface-eval":
+            learned_interface.add_argument(
+                "--goal-source",
+                choices=["learned", "oracle"],
+                required=True,
+            )
+        learned_interface.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

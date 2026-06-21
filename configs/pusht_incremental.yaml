@@ -337,3 +337,94 @@ pre_rl:
     audit_episodes: 20
     audit_seed_start: 1950100
     validation_samples: 5000
+learned_interface:
+  horizon_steps: 10
+  update_period: 10
+  representation:
+    batch_size: 512
+    batches_per_epoch: 400
+    epochs: 60
+    validation_samples: 8192
+    lr: 0.0003
+  policy:
+    hidden_dim: 512
+    batch_size: 512
+    batches_per_epoch: 200
+    epochs: 60
+    validation_samples: 5000
+    lr: 0.0003
+  evaluation:
+    screening_episodes: 20
+    oracle_episodes: 20
+    num_envs: 16
+    seed_start: 2100000
+  candidates:
+    ae256_control:
+      family: vae_sweep_control
+      encoder_type: deterministic
+      latent_dim: 256
+      width: 1024
+      beta: 0.0
+      kl_warmup_steps: 0
+      free_bits: 0.0
+    vae256_b1e7:
+      family: vae
+      encoder_type: vae
+      latent_dim: 256
+      width: 1024
+      beta: 0.0000001
+      kl_warmup_steps: 20000
+      free_bits: 0.01
+    vae256_b1e6:
+      family: vae
+      encoder_type: vae
+      latent_dim: 256
+      width: 1024
+      beta: 0.000001
+      kl_warmup_steps: 20000
+      free_bits: 0.01
+    vae256_b1e5:
+      family: vae
+      encoder_type: vae
+      latent_dim: 256
+      width: 1024
+      beta: 0.00001
+      kl_warmup_steps: 20000
+      free_bits: 0.01
+    vae512_w2048_b1e7:
+      family: vae
+      encoder_type: vae
+      latent_dim: 512
+      width: 2048
+      beta: 0.0000001
+      kl_warmup_steps: 20000
+      free_bits: 0.01
+    vae512_w2048_b1e6:
+      family: vae
+      encoder_type: vae
+      latent_dim: 512
+      width: 2048
+      beta: 0.000001
+      kl_warmup_steps: 20000
+      free_bits: 0.01
+    dae256_n005:
+      family: denoising_ae
+      encoder_type: deterministic
+      latent_dim: 256
+      width: 1024
+      dino_noise_std: 0.005
+      proprio_noise_std: 0.005
+    dae256_n010:
+      family: denoising_ae
+      encoder_type: deterministic
+      latent_dim: 256
+      width: 1024
+      dino_noise_std: 0.01
+      proprio_noise_std: 0.01
+    dae512_w2048_n005:
+      family: denoising_ae
+      encoder_type: deterministic
+      latent_dim: 512
+      width: 2048
+      dino_noise_std: 0.005
+      proprio_noise_std: 0.005

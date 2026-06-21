@@ -11,6 +11,7 @@ from hcl_poc.incremental import (
     action_alignment_metrics,
     copied_actor_student,
 )
+from hcl_poc.learned_interface import _HeldGoalDataset, _vae_kl
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
@@ -39,6 +40,36 @@ def test_world_model_requires_actions() -> None:
     horizons = torch.tensor([1, 5, 8])
     out = wm(z, action_seq, horizons)
     assert out.shape == (3, 4)
+
+
+def test_vae_free_bits_apply_per_dimension() -> None:
+    mean = torch.zeros(2, 4)
+    logvar = torch.zeros(2, 4)
+    total, per_dimension = _vae_kl(mean, logvar, free_bits=0.01)
+    torch.testing.assert_close(total, torch.tensor(0.04))
+    torch.testing.assert_close(per_dimension, torch.tensor(0.0))
+
+
+def test_held_goal_dataset_keeps_fixed_future_goal() -> None:
+    frames = np.arange(12 * 2, dtype=np.float32).reshape(12, 2)
+    goals = np.arange(12 * 3, dtype=np.float32).reshape(12, 3)
+    actions = np.arange(12 * 3, dtype=np.float32).reshape(12, 3)
+    frame_norm = Standardizer.fit(frames)
+    goal_norm = Standardizer.fit(goals)
+    action_norm = Standardizer.fit(actions)
+    dataset = _HeldGoalDataset(
+        [{"frames": frames, "goals": goals, "actions": actions}],
+        frame_norm,
+        goal_norm,
+        action_norm,
+        horizon_steps=10,
+        mode="low",
+        length=1,
+    )
+    condition, target = dataset[0]
+    assert condition.shape == (2 + 3 + 3 + 1,)
+    assert target.shape == (3,)
+    assert 0.1 <= float(condition[-1]) <= 1.0
 
 
 def test_flow_shapes_and_sample() -> None:
