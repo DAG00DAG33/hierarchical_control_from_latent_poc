@@ -260,3 +260,40 @@ candidate improves on the selected VAE after adequate closed-loop sampling.
 No denoising candidate is promoted. Across 256D and 512D models, modest input
 noise changes reconstruction and probes little, while closed-loop learned
 success remains unstable or inferior to `vae512_w2048_b1e6`.
+
+## 2026-06-21 - LI-10: JEPA-style predictive latent sweep
+
+All candidates use a 256D online encoder, an EMA target encoder
+(`momentum=0.99`), an action-sequence GRU predictor, horizons
+`{1,2,5,10}`, and VICReg variance/covariance regularization. The target future
+latent is stop-gradient. The objective sweep changes reconstruction,
+variance, and covariance weights.
+
+| candidate | recon / var / cov | prediction MSE | recon MSE | inverse action MAE | screen learned/oracle |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `jepa256_predonly_v1_c001` | 0 / 1 / 0.01 | 0.217 | - | 0.0575 | 0.40 / 0.70 |
+| `jepa256_r001_v1_c001` | 0.01 / 1 / 0.01 | 0.221 | 0.311 | 0.0561 | 0.75 / 0.75 |
+| `jepa256_r01_v1_c01` | 0.1 / 1 / 0.1 | 0.428 | 0.213 | 0.0538 | 0.80 / 0.55 |
+| `jepa256_r1_v10_c01` | 1 / 10 / 0.1 | 0.478 | 0.117 | 0.0404 | 0.60 / 0.60 |
+
+All 256 dimensions remain active. Predictive-only training preserves object
+pose and contact but removes substantial one-step action information. More
+reconstruction improves inverse dynamics while worsening predictive loss.
+
+The two promising screens were promoted:
+
+- **Weak reconstruction, 100 episodes:** learned `0.61` (Wilson
+  `[0.512,0.700]`), oracle `0.66` (`[0.563,0.746]`).
+- **Balanced reconstruction, 100 episodes:** learned `0.65` (`[0.553,0.736]`),
+  oracle `0.58` (`[0.482,0.672]`).
+
+Training used a 60-epoch ceiling. The first two candidates selected epochs
+6-7, motivating validation early stopping with patience 10; the balanced
+candidate stopped after 28 epochs. The strong-reconstruction objective
+continued to the 60-epoch ceiling, so the stopping rule did not truncate a
+still-improving run.
+
+**Decision:** Reject the JEPA candidates as primary interfaces. Weak
+reconstruction is useful but remains 11 points below the selected VAE in
+learned success. Predictive loss alone is insufficient; some reconstruction
+is necessary, but increasing it does not produce a monotonic control gain.
