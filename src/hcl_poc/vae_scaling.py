@@ -838,6 +838,8 @@ def _rollout_payload(
     max_rewards: list[float],
     teacher_maes: list[float],
     checkpoint_path: Path,
+    saturated_actions: int,
+    active_actions: int,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     episodes = len(successes)
@@ -854,6 +856,7 @@ def _rollout_payload(
         "final_reward": float(np.mean(final_rewards)),
         "max_reward": float(np.mean(max_rewards)),
         "teacher_action_mae": float(np.mean(teacher_maes)),
+        "action_saturation_rate": saturated_actions / max(active_actions, 1),
         "episode_success": successes,
         "episode_final_reward": final_rewards,
         "episode_max_reward": max_rewards,
@@ -916,6 +919,8 @@ def evaluate_vae_scaling_flat_policy(
     final_rewards: list[float] = []
     max_rewards: list[float] = []
     teacher_maes: list[float] = []
+    saturated_actions = 0
+    active_actions = 0
     timer = Timer()
     progress = trange(eval_episodes, desc=f"eval {method} n={n_trajectories}")
     for batch_start in range(0, eval_episodes, num_envs_max):
@@ -992,6 +997,16 @@ def evaluate_vae_scaling_flat_policy(
                 raw_action = action_norm.inverse(
                     normalized_action.cpu().numpy()
                 )
+                saturated_actions += int(
+                    np.sum(
+                        np.any(
+                            (raw_action[active] < action_low_np)
+                            | (raw_action[active] > action_high_np),
+                            axis=-1,
+                        )
+                    )
+                )
+                active_actions += int(np.sum(active))
                 teacher_action = (
                     torch.clamp(
                         teacher.actor_mean(_phase7_obs_state_tensor(obs, device)),
@@ -1062,6 +1077,8 @@ def evaluate_vae_scaling_flat_policy(
         max_rewards,
         teacher_maes,
         checkpoint_path,
+        saturated_actions,
+        active_actions,
         {
             "policy_type": policy_type,
             "representation": representation,
@@ -1131,6 +1148,8 @@ def evaluate_vae_scaling_flow_hierarchy(
     final_rewards: list[float] = []
     max_rewards: list[float] = []
     teacher_maes: list[float] = []
+    saturated_actions = 0
+    active_actions = 0
     goal_norms: list[float] = []
     timer = Timer()
     progress = trange(
@@ -1225,6 +1244,16 @@ def evaluate_vae_scaling_flow_hierarchy(
                     .cpu()
                     .numpy()
                 )
+                saturated_actions += int(
+                    np.sum(
+                        np.any(
+                            (raw_action[active] < action_low_np)
+                            | (raw_action[active] > action_high_np),
+                            axis=-1,
+                        )
+                    )
+                )
+                active_actions += int(np.sum(active))
                 teacher_action = (
                     torch.clamp(
                         teacher.actor_mean(_phase7_obs_state_tensor(obs, device)),
@@ -1296,6 +1325,8 @@ def evaluate_vae_scaling_flow_hierarchy(
         max_rewards,
         teacher_maes,
         checkpoint_path,
+        saturated_actions,
+        active_actions,
         {
             "elapsed_s": timer.elapsed(),
             "mean_normalized_goal_norm": float(np.mean(goal_norms)),
@@ -1328,7 +1359,10 @@ def evaluate_vae_scaling_point(
     )
     train_vae_scaling_point(config, n_trajectories, seed, force=False)
     result_dir = _point_result_dir(point_config, seed)
-    summary_path = result_dir / "summary.json"
+    summary_path = (
+        result_dir
+        / f"summary_deploy{deployable_count}_oracle{oracle_count}.json"
+    )
     if summary_path.exists() and not force:
         return summary_path
     deterministic_path = evaluate_learned_interface_hierarchy(

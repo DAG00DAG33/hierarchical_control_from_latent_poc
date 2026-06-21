@@ -2332,6 +2332,8 @@ def evaluate_learned_interface_hierarchy(
     teacher_maes: list[float] = []
     goal_errors: list[float] = []
     replay_errors: list[float] = []
+    saturated_actions = 0
+    active_actions = 0
     high_decisions = 0
     progress = trange(
         eval_episodes, desc=f"eval {candidate} {goal_source}"
@@ -2500,6 +2502,16 @@ def evaluate_learned_interface_hierarchy(
                     .cpu()
                     .numpy()
                 )
+                saturated_actions += int(
+                    np.sum(
+                        np.any(
+                            (raw_action[active] < action_low_np)
+                            | (raw_action[active] > action_high_np),
+                            axis=-1,
+                        )
+                    )
+                )
+                active_actions += int(np.sum(active))
                 teacher_action = (
                     torch.clamp(
                         teacher.actor_mean(_phase7_obs_state_tensor(obs, device)),
@@ -2571,6 +2583,7 @@ def evaluate_learned_interface_hierarchy(
         "success_wilson_95": _wilson_interval(success, eval_episodes),
         "final_reward": float(np.mean(final_rewards)),
         "max_reward": float(np.mean(max_rewards)),
+        "action_saturation_rate": saturated_actions / max(active_actions, 1),
         "teacher_action_mae": float(np.mean(teacher_maes)),
         "high_level_decisions_per_episode": high_decisions / eval_episodes,
         "normalized_goal_prediction_l2": (
@@ -2583,6 +2596,9 @@ def evaluate_learned_interface_hierarchy(
         "representation_validation": representation_checkpoint[
             "validation_metrics"
         ],
+        "episode_success": successes,
+        "episode_final_reward": final_rewards,
+        "episode_max_reward": max_rewards,
         "data": checkpoint["data"],
         "metadata": _runtime_metadata(config),
     }

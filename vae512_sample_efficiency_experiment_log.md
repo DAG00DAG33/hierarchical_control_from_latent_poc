@@ -23,3 +23,41 @@ This is the chronological execution record for
 
 Implementation and the `N=50, seed=0` smoke benchmark are in progress. Runtime
 ETA will be added only after measuring the complete smoke point.
+
+## 2026-06-22 - SE-01: `N=50, seed=0` full-training smoke
+
+- **Implementation commit:** `f653bb5`.
+- **Manifest:** 50 nested-prefix trajectories, 2,311 transitions, fixed 200
+  validation trajectories with 8,969 transitions, SHA256
+  `03a45f4c83acd382153f80c0a3968b821b8dda359dd894bf50b3349faf9f7b5f`.
+- **VAE-512:** 791 s, selected epoch 1, validation reconstruction `0.4623`.
+- **Shared deterministic hierarchy:** 437 s, selected epoch 58, oracle and
+  predicted validation action MAE `0.1340/0.1354`.
+- **Flow high level:** 200 s, selected epoch 45, predicted-goal action MAE
+  `0.1390`.
+- **Flat latent deterministic/flow:** 89/96 s, validation action MAE
+  `0.1343/0.1316`.
+- **Flat observation deterministic/flow:** 171/175 s, validation action MAE
+  `0.1325/0.1405`.
+- **Total training wall time:** approximately 28 minutes.
+- **Storage:** 318,470,959 artifact bytes (about 304 MiB).
+
+Short rollout audit on 20 fixed deployable seeds and five oracle seeds:
+
+| method | success | final reward |
+| --- | ---: | ---: |
+| deterministic hierarchy | 0.05 | 0.232 |
+| flow hierarchy | 0.05 | 0.191 |
+| flat latent deterministic | 0.10 | 0.225 |
+| flat latent flow | 0.00 | 0.150 |
+| flat observation deterministic | 0.10 | 0.244 |
+| flat observation flow | 0.00 | 0.145 |
+| oracle hierarchy (5 episodes) | 0.00 | 0.129 |
+
+The low-budget values are plausible and all seven deployment paths execute.
+The oracle sample is only an implementation audit and is not interpreted.
+
+**Projected full runtime:** approximately 14-16 sequential GPU-hours for 18
+training points, 54,000 deployable episodes, and 900 oracle episodes. Projected
+artifact storage is about 5.5 GiB plus results. The existing 82 GiB free disk
+space is sufficient.
