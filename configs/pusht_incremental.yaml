@@ -407,6 +407,36 @@ learned_interface:
       beta: 0.000001
       kl_warmup_steps: 20000
       free_bits: 0.01
+    ae256_delta:
+      family: conditioning_ablation
+      representation_candidate: ae256_control
+      high_level_candidate: ae256_control
+      conditioning: delta
+    ae256_relation:
+      family: conditioning_ablation
+      representation_candidate: ae256_control
+      high_level_candidate: ae256_control
+      conditioning: relation
+    ae256_film:
+      family: conditioning_ablation
+      representation_candidate: ae256_control
+      high_level_candidate: ae256_control
+      conditioning: film
+    vae512_b1e6_delta:
+      family: conditioning_ablation
+      representation_candidate: vae512_w2048_b1e6
+      high_level_candidate: vae512_w2048_b1e6
+      conditioning: delta
+    vae512_b1e6_relation:
+      family: conditioning_ablation
+      representation_candidate: vae512_w2048_b1e6
+      high_level_candidate: vae512_w2048_b1e6
+      conditioning: relation
+    vae512_b1e6_film:
+      family: conditioning_ablation
+      representation_candidate: vae512_w2048_b1e6
+      high_level_candidate: vae512_w2048_b1e6
+      conditioning: film
     dae256_n005:
       family: denoising_ae
       encoder_type: deterministic

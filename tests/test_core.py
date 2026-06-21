@@ -11,7 +11,11 @@ from hcl_poc.incremental import (
     action_alignment_metrics,
     copied_actor_student,
 )
-from hcl_poc.learned_interface import _HeldGoalDataset, _vae_kl
+from hcl_poc.learned_interface import (
+    _GoalConditionedLowPolicy,
+    _HeldGoalDataset,
+    _vae_kl,
+)
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
@@ -70,6 +74,36 @@ def test_held_goal_dataset_keeps_fixed_future_goal() -> None:
     assert condition.shape == (2 + 3 + 3 + 1,)
     assert target.shape == (3,)
     assert 0.1 <= float(condition[-1]) <= 1.0
+
+
+def test_goal_conditioning_variants_have_consistent_policy_outputs() -> None:
+    frames = np.arange(12 * 2, dtype=np.float32).reshape(12, 2)
+    goals = np.arange(12 * 3, dtype=np.float32).reshape(12, 3)
+    actions = np.arange(12 * 3, dtype=np.float32).reshape(12, 3)
+    norms = (
+        Standardizer.fit(frames),
+        Standardizer.fit(goals),
+        Standardizer.fit(actions),
+    )
+    expected_dims = {"concat": 9, "delta": 9, "relation": 12, "film": 9}
+    for conditioning, expected_dim in expected_dims.items():
+        dataset = _HeldGoalDataset(
+            [{"frames": frames, "goals": goals, "actions": actions}],
+            *norms,
+            horizon_steps=10,
+            mode="low",
+            length=1,
+            conditioning=conditioning,
+        )
+        condition, _target = dataset[0]
+        assert condition.shape == (expected_dim,)
+        policy = _GoalConditionedLowPolicy(
+            frame_dim=2,
+            goal_dim=3,
+            hidden_dim=16,
+            conditioning=conditioning,
+        )
+        assert policy(condition[None]).shape == (1, 3)
 
 
 def test_flow_shapes_and_sample() -> None:

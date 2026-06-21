@@ -57,6 +57,9 @@ def learned_interface_candidate_spec(config: Config, candidate: str) -> dict[str
     spec.setdefault("dino_noise_std", 0.0)
     spec.setdefault("proprio_noise_std", 0.0)
     spec.setdefault("reconstruction_weight", 0.1)
+    spec.setdefault("representation_candidate", candidate)
+    spec.setdefault("high_level_candidate", candidate)
+    spec.setdefault("conditioning", "concat")
     return spec
 
 
@@ -137,6 +140,11 @@ def train_learned_interface_representation(
     force: bool = False,
 ) -> Path:
     spec = learned_interface_candidate_spec(config, candidate)
+    representation_candidate = str(spec["representation_candidate"])
+    if representation_candidate != candidate:
+        return train_learned_interface_representation(
+            config, representation_candidate, seed, force=force
+        )
     artifact_dir = _artifact_dir(config, candidate, seed)
     checkpoint_path = artifact_dir / "representation.pt"
     if checkpoint_path.exists() and not force:
@@ -522,23 +530,18 @@ def prepare_learned_interface_episodes(
 
     def convert(
         episodes: list[dict[str, np.ndarray]],
-    ) -> list[dict[str, np.ndarray]]:
+    ) -> list[np.ndarray]:
         return [
-            {
-                "frames": episode["frames"],
-                "goals": _encode_array(
-                    encoder, frame_norm, episode["frames"], device
-                ),
-                "actions": episode["actions"],
-            }
+            _encode_array(encoder, frame_norm, episode["frames"], device)
             for episode in episodes
         ]
 
     payload = {
+        "format_version": 2,
         "candidate": candidate,
         "representation_checkpoint": str(checkpoint_path),
-        "train": convert(train),
-        "validation": convert(validation),
+        "train_goals": convert(train),
+        "validation_goals": convert(validation),
         "data": data_metadata,
         "metadata": _runtime_metadata(config),
     }
@@ -557,9 +560,12 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
         horizon_steps: int,
         mode: str,
         length: int,
+        conditioning: str = "concat",
     ) -> None:
         if mode not in {"high", "low"}:
             raise ValueError(f"Unknown held-goal mode: {mode}")
+        if conditioning not in {"concat", "delta", "relation", "film"}:
+            raise ValueError(f"Unknown goal conditioning: {conditioning}")
         self.episodes = [
             episode
             for episode in episodes
@@ -571,6 +577,7 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
         self.horizon_steps = horizon_steps
         self.mode = mode
         self.length = length
+        self.conditioning = conditioning
         self.zero_action = action_norm.transform(
             np.zeros((1, 3), dtype=np.float32)
         )[0]
@@ -614,29 +621,32 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
                 if current > 0
                 else self.zero_action
             )
-            condition = np.concatenate(
-                [
-                    self.frame_norm.transform(
-                        episode["frames"][current : current + 1]
-                    )[0],
-                    self.goal_norm.transform(
-                        episode["goals"][
-                            base
-                            + self.horizon_steps : base
-                            + self.horizon_steps
-                            + 1
-                        ]
-                    )[0],
-                    previous,
-                    np.asarray(
-                        [
-                            (self.horizon_steps - offset)
-                            / self.horizon_steps
-                        ],
-                        dtype=np.float32,
-                    ),
+            frame = self.frame_norm.transform(
+                episode["frames"][current : current + 1]
+            )
+            current_goal = self.goal_norm.transform(
+                episode["goals"][current : current + 1]
+            )
+            future_goal = self.goal_norm.transform(
+                episode["goals"][
+                    base
+                    + self.horizon_steps : base
+                    + self.horizon_steps
+                    + 1
                 ]
             )
+            remaining = np.asarray(
+                [[(self.horizon_steps - offset) / self.horizon_steps]],
+                dtype=np.float32,
+            )
+            condition = _low_condition_array(
+                frame,
+                current_goal,
+                future_goal,
+                previous[None],
+                remaining,
+                self.conditioning,
+            )[0]
             target = self.action_norm.transform(
                 episode["actions"][current : current + 1]
             )[0]
@@ -644,6 +654,96 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
             torch.from_numpy(condition.astype(np.float32)),
             torch.from_numpy(target.astype(np.float32)),
         )
+
+
+def _low_condition_array(
+    frames: np.ndarray,
+    current_goals: np.ndarray,
+    future_goals: np.ndarray,
+    previous_actions: np.ndarray,
+    remaining: np.ndarray,
+    conditioning: str,
+) -> np.ndarray:
+    if conditioning == "concat" or conditioning == "film":
+        goal_features = future_goals
+    elif conditioning == "delta":
+        goal_features = future_goals - current_goals
+    elif conditioning == "relation":
+        goal_features = np.concatenate(
+            [current_goals, future_goals], axis=-1
+        )
+    else:
+        raise ValueError(f"Unknown goal conditioning: {conditioning}")
+    return np.concatenate(
+        [frames, goal_features, previous_actions, remaining], axis=-1
+    ).astype(np.float32)
+
+
+class _GoalConditionedLowPolicy(nn.Module):
+    def __init__(
+        self,
+        frame_dim: int,
+        goal_dim: int,
+        hidden_dim: int,
+        conditioning: str,
+    ) -> None:
+        super().__init__()
+        self.frame_dim = frame_dim
+        self.goal_dim = goal_dim
+        self.hidden_dim = hidden_dim
+        self.conditioning = conditioning
+        if conditioning in {"concat", "delta"}:
+            self.policy = MLP(
+                frame_dim + goal_dim + 4, 3, hidden_dim, depth=4
+            )
+        elif conditioning == "relation":
+            self.relation = MLP(
+                2 * goal_dim + 1, goal_dim, hidden_dim, depth=2
+            )
+            self.policy = MLP(
+                frame_dim + goal_dim + 4, 3, hidden_dim, depth=4
+            )
+        elif conditioning == "film":
+            self.input_layer = nn.Linear(frame_dim + 4, hidden_dim)
+            self.hidden_layers = nn.ModuleList(
+                [nn.Linear(hidden_dim, hidden_dim) for _ in range(3)]
+            )
+            self.modulators = nn.ModuleList(
+                [nn.Linear(goal_dim, 2 * hidden_dim) for _ in range(4)]
+            )
+            self.output_layer = nn.Linear(hidden_dim, 3)
+            for modulator in self.modulators:
+                nn.init.zeros_(modulator.weight)
+                nn.init.zeros_(modulator.bias)
+        else:
+            raise ValueError(f"Unknown goal conditioning: {conditioning}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.conditioning in {"concat", "delta"}:
+            return self.policy(x)
+        if self.conditioning == "relation":
+            frame = x[:, : self.frame_dim]
+            goals = x[
+                :, self.frame_dim : self.frame_dim + 2 * self.goal_dim
+            ]
+            tail = x[:, self.frame_dim + 2 * self.goal_dim :]
+            relation = self.relation(
+                torch.cat([goals, tail[:, -1:]], dim=-1)
+            )
+            return self.policy(torch.cat([frame, relation, tail], dim=-1))
+        frame = x[:, : self.frame_dim]
+        goal = x[
+            :, self.frame_dim : self.frame_dim + self.goal_dim
+        ]
+        tail = x[:, self.frame_dim + self.goal_dim :]
+        base = torch.cat([frame, tail], dim=-1)
+        layers = [self.input_layer, *self.hidden_layers]
+        h = base
+        for layer, modulator in zip(layers, self.modulators, strict=True):
+            h = torch.nn.functional.silu(layer(h))
+            gamma, beta = modulator(goal).chunk(2, dim=-1)
+            h = (1.0 + gamma) * h + beta
+        return self.output_layer(h)
 
 
 @torch.inference_mode()
@@ -657,6 +757,7 @@ def _hierarchy_validation_metrics(
     horizon_steps: int,
     samples: int,
     seed: int,
+    conditioning: str,
 ) -> dict[str, float]:
     device = next(high_model.parameters()).device
     rng = np.random.default_rng(seed)
@@ -664,6 +765,7 @@ def _hierarchy_validation_metrics(
     high_conditions = []
     oracle_goals = []
     current_frames = []
+    current_goals = []
     previous_actions = []
     target_actions = []
     remaining_values = []
@@ -706,6 +808,11 @@ def _hierarchy_validation_metrics(
                 episode["frames"][current : current + 1]
             )[0]
         )
+        current_goals.append(
+            goal_norm.transform(
+                episode["goals"][current : current + 1]
+            )[0]
+        )
         previous_actions.append(previous)
         target_actions.append(episode["actions"][current])
         remaining_values.append((horizon_steps - offset) / horizon_steps)
@@ -716,14 +823,13 @@ def _hierarchy_validation_metrics(
     ).cpu().numpy()
 
     def low_actions(goals: np.ndarray) -> np.ndarray:
-        condition = np.concatenate(
-            [
-                np.asarray(current_frames, dtype=np.float32),
-                goals,
-                np.asarray(previous_actions, dtype=np.float32),
-                np.asarray(remaining_values, dtype=np.float32)[:, None],
-            ],
-            axis=-1,
+        condition = _low_condition_array(
+            np.asarray(current_frames, dtype=np.float32),
+            np.asarray(current_goals, dtype=np.float32),
+            goals,
+            np.asarray(previous_actions, dtype=np.float32),
+            np.asarray(remaining_values, dtype=np.float32)[:, None],
+            conditioning,
         )
         return action_norm.inverse(
             low_model(torch.from_numpy(condition).to(device).float())
@@ -770,8 +876,35 @@ def train_learned_interface_hierarchy(
         map_location="cpu",
         weights_only=False,
     )
-    train = encoded["train"]
-    validation = encoded["validation"]
+    if int(encoded.get("format_version", 1)) == 2:
+        train_frames, validation_frames, _data_metadata = (
+            _load_phase6_train_episodes(config)
+        )
+
+        def combine(
+            frame_episodes: list[dict[str, np.ndarray]],
+            goal_episodes: list[np.ndarray],
+        ) -> list[dict[str, np.ndarray]]:
+            if len(frame_episodes) != len(goal_episodes):
+                raise ValueError("Learned-interface goal cache episode mismatch")
+            return [
+                {
+                    "frames": frame_episode["frames"],
+                    "goals": goals,
+                    "actions": frame_episode["actions"],
+                }
+                for frame_episode, goals in zip(
+                    frame_episodes, goal_episodes, strict=True
+                )
+            ]
+
+        train = combine(train_frames, encoded["train_goals"])
+        validation = combine(
+            validation_frames, encoded["validation_goals"]
+        )
+    else:
+        train = encoded["train"]
+        validation = encoded["validation"]
     frame_norm = Standardizer.from_state_dict(
         representation_checkpoint["frame_norm"]
     )
@@ -782,6 +915,9 @@ def train_learned_interface_hierarchy(
         np.concatenate([episode["actions"] for episode in train], axis=0)
     )
     horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
+    conditioning = str(
+        learned_interface_candidate_spec(config, candidate)["conditioning"]
+    )
     batch_size = int(config.get("learned_interface.policy.batch_size", 512))
     batches_per_epoch = int(
         config.get("learned_interface.policy.batches_per_epoch", 200)
@@ -795,6 +931,7 @@ def train_learned_interface_hierarchy(
         horizon_steps,
         "high",
         batch_size * batches_per_epoch,
+        conditioning,
     )
     low_dataset = _HeldGoalDataset(
         train,
@@ -804,6 +941,7 @@ def train_learned_interface_hierarchy(
         horizon_steps,
         "low",
         batch_size * batches_per_epoch,
+        conditioning,
     )
     high_loader = DataLoader(
         high_dataset,
@@ -824,11 +962,37 @@ def train_learned_interface_hierarchy(
     hidden_dim = int(config.get("learned_interface.policy.hidden_dim", 512))
     device = default_device()
     high_model = MLP(frame_dim + 3, goal_dim, hidden_dim, depth=4).to(device)
-    low_model = MLP(
-        frame_dim + goal_dim + 3 + 1, 3, hidden_dim, depth=4
+    high_level_candidate = str(
+        learned_interface_candidate_spec(config, candidate)[
+            "high_level_candidate"
+        ]
+    )
+    reused_high_level = high_level_candidate != candidate
+    if reused_high_level:
+        source_path = train_learned_interface_hierarchy(
+            config, high_level_candidate, seed, force=False
+        )
+        source_checkpoint = torch.load(
+            source_path, map_location="cpu", weights_only=False
+        )
+        if (
+            int(source_checkpoint["frame_dim"]) != frame_dim
+            or int(source_checkpoint["goal_dim"]) != goal_dim
+        ):
+            raise ValueError(
+                "Reused high-level checkpoint has incompatible dimensions"
+            )
+        high_model.load_state_dict(source_checkpoint["high_model"])
+        high_model.requires_grad_(False)
+    low_model = _GoalConditionedLowPolicy(
+        frame_dim, goal_dim, hidden_dim, conditioning
     ).to(device)
     learning_rate = float(config.get("learned_interface.policy.lr", 3e-4))
-    high_optimizer = torch.optim.AdamW(high_model.parameters(), lr=learning_rate)
+    high_optimizer = (
+        None
+        if reused_high_level
+        else torch.optim.AdamW(high_model.parameters(), lr=learning_rate)
+    )
     low_optimizer = torch.optim.AdamW(low_model.parameters(), lr=learning_rate)
     validation_samples = int(
         config.get("learned_interface.policy.validation_samples", 5000)
@@ -840,20 +1004,24 @@ def train_learned_interface_hierarchy(
     for epoch in trange(
         1, epochs + 1, desc=f"train learned hierarchy {candidate}"
     ):
-        high_model.train()
+        if reused_high_level:
+            high_model.eval()
+        else:
+            high_model.train()
         low_model.train()
         high_sum = 0.0
         low_sum = 0.0
         for (high_x, high_y), (low_x, low_y) in zip(
             high_loader, low_loader, strict=True
         ):
-            high_x = high_x.to(device, non_blocking=True)
-            high_y = high_y.to(device, non_blocking=True)
-            high_loss = torch.mean((high_model(high_x) - high_y) ** 2)
-            high_optimizer.zero_grad(set_to_none=True)
-            high_loss.backward()
-            high_optimizer.step()
-            high_sum += float(high_loss.detach().cpu())
+            if high_optimizer is not None:
+                high_x = high_x.to(device, non_blocking=True)
+                high_y = high_y.to(device, non_blocking=True)
+                high_loss = torch.mean((high_model(high_x) - high_y) ** 2)
+                high_optimizer.zero_grad(set_to_none=True)
+                high_loss.backward()
+                high_optimizer.step()
+                high_sum += float(high_loss.detach().cpu())
 
             low_x = low_x.to(device, non_blocking=True)
             low_y = low_y.to(device, non_blocking=True)
@@ -874,6 +1042,7 @@ def train_learned_interface_hierarchy(
             horizon_steps,
             validation_samples,
             seed + 3000,
+            conditioning,
         )
         history.append(
             {
@@ -901,6 +1070,8 @@ def train_learned_interface_hierarchy(
         "frame_dim": frame_dim,
         "goal_dim": goal_dim,
         "hidden_dim": hidden_dim,
+        "conditioning": conditioning,
+        "high_level_candidate": high_level_candidate,
         "high_model": best_state["high_model"],
         "low_model": best_state["low_model"],
         "frame_norm": frame_norm.state_dict(),
@@ -943,14 +1114,17 @@ def _load_hierarchy(
         int(checkpoint["hidden_dim"]),
         depth=4,
     ).to(device)
-    low_model = MLP(
-        int(checkpoint["frame_dim"]) + int(checkpoint["goal_dim"]) + 4,
-        3,
+    low_model = _GoalConditionedLowPolicy(
+        int(checkpoint["frame_dim"]),
+        int(checkpoint["goal_dim"]),
         int(checkpoint["hidden_dim"]),
-        depth=4,
+        str(checkpoint.get("conditioning", "concat")),
     ).to(device)
     high_model.load_state_dict(checkpoint["high_model"])
-    low_model.load_state_dict(checkpoint["low_model"])
+    low_state = checkpoint["low_model"]
+    if "conditioning" not in checkpoint:
+        low_state = {f"policy.{key}": value for key, value in low_state.items()}
+    low_model.load_state_dict(low_state)
     high_model.eval()
     low_model.eval()
     return high_model, low_model
@@ -1000,6 +1174,7 @@ def evaluate_learned_interface_hierarchy(
     teacher = load_ppo_agent(_rl_paths(config).best, device)
     horizon_steps = int(checkpoint["horizon_steps"])
     update_period = int(checkpoint["update_period"])
+    conditioning = str(checkpoint.get("conditioning", "concat"))
     max_steps = int(config.get("env_max_episode_steps", 100))
     max_num_envs = min(
         int(config.get("learned_interface.evaluation.num_envs", 16)),
@@ -1142,14 +1317,26 @@ def evaluate_learned_interface_hierarchy(
                     countdown[replan] = update_period
                     high_decisions += int(np.sum(replan))
                 remaining = np.maximum(countdown, 1).astype(np.float32)
-                condition = np.concatenate(
-                    [
-                        normalized_frames,
-                        held_goal,
-                        previous_action,
-                        (remaining / horizon_steps)[:, None],
-                    ],
-                    axis=-1,
+                if conditioning in {"delta", "relation"}:
+                    current_goal = goal_norm.transform(
+                        _encode_array(
+                            encoder,
+                            Standardizer.from_state_dict(
+                                representation_checkpoint["frame_norm"]
+                            ),
+                            frames,
+                            device,
+                        )
+                    )
+                else:
+                    current_goal = np.empty_like(held_goal)
+                condition = _low_condition_array(
+                    normalized_frames,
+                    current_goal,
+                    held_goal,
+                    previous_action,
+                    (remaining / horizon_steps)[:, None],
+                    conditioning,
                 )
                 raw_action = action_norm.inverse(
                     low_model(
