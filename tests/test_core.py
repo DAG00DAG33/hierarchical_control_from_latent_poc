@@ -12,6 +12,8 @@ from hcl_poc.incremental import (
     copied_actor_student,
 )
 from hcl_poc.learned_interface import (
+    _EffectEncoder,
+    _EffectRepresentationDataset,
     _GoalConditionedLowPolicy,
     _HeldGoalDataset,
     _PredictiveRepresentationDataset,
@@ -125,6 +127,34 @@ def test_predictive_dataset_and_regularizers() -> None:
     assert covariance.ndim == 0
     assert variance >= 0
     assert covariance >= 0
+
+
+def test_effect_dataset_uses_one_fixed_pair_for_held_goal() -> None:
+    frames = np.arange(12 * 4, dtype=np.float32).reshape(12, 4)
+    actions = np.arange(11 * 3, dtype=np.float32).reshape(11, 3)
+    auxiliary = np.arange(12 * 12, dtype=np.float32).reshape(12, 12)
+    dataset = _EffectRepresentationDataset(
+        [
+            {
+                "frames": frames,
+                "actions": actions,
+                "zero_action": np.zeros(3, dtype=np.float32),
+                "auxiliary": auxiliary,
+            }
+        ],
+        horizon_steps=10,
+        length=1,
+    )
+    sample = dataset[0]
+    np.testing.assert_array_equal(sample["x_start"], frames[0])
+    np.testing.assert_array_equal(sample["x_future"], frames[10])
+    np.testing.assert_array_equal(sample["auxiliary"], auxiliary[10])
+    assert 0.1 <= float(sample["remaining"]) <= 1.0
+    encoder = _EffectEncoder(input_dim=4, effect_dim=8, hidden_dim=16)
+    pair = torch.cat(
+        [sample["x_start"], sample["x_future"], torch.ones(1)]
+    )[None]
+    assert encoder(pair).shape == (1, 8)
 
 
 def test_flow_shapes_and_sample() -> None:

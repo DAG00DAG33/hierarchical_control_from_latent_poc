@@ -353,6 +353,11 @@ learned_interface:
     epochs: 60
     validation_samples: 5000
     lr: 0.0003
+  effect:
+    teacher_hidden_dim: 512
+    teacher_batch_size: 512
+    teacher_epochs: 100
+    teacher_lr: 0.0003
   evaluation:
     screening_episodes: 20
     oracle_episodes: 20
@@ -506,3 +511,36 @@ learned_interface:
       lambda_cov: 0.1
       lambda_recon: 1.0
       horizon_offsets: [1, 2, 5, 10]
+    effect16:
+      family: effect_code
+      encoder_type: effect
+      latent_dim: 16
+      width: 512
+      lambda_action: 1.0
+      lambda_auxiliary: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.01
+      batches_per_epoch: 200
+      epochs: 40
+    effect32:
+      family: effect_code
+      encoder_type: effect
+      latent_dim: 32
+      width: 512
+      lambda_action: 1.0
+      lambda_auxiliary: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.01
+      batches_per_epoch: 200
+      epochs: 40
+    effect64:
+      family: effect_code
+      encoder_type: effect
+      latent_dim: 64
+      width: 512
+      lambda_action: 1.0
+      lambda_auxiliary: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.01
+      batches_per_epoch: 200
+      epochs: 40

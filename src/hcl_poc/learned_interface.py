@@ -9,12 +9,13 @@ import numpy as np
 import torch
 from rich.console import Console
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import trange
 
 from hcl_poc.config import Config
 from hcl_poc.incremental import (
     _load_phase6_train_episodes,
+    _binary_auc,
     _phase4_dino_from_config,
     _phase4_fit_standardizers,
     _phase4_frame_inputs,
@@ -73,6 +74,8 @@ def learned_interface_candidate_spec(config: Config, candidate: str) -> dict[str
     spec.setdefault("lambda_recon", 0.1)
     spec.setdefault("horizon_offsets", [1, 2, 5, 10])
     spec.setdefault("early_stopping_patience", 10)
+    spec.setdefault("lambda_action", 1.0)
+    spec.setdefault("lambda_auxiliary", 1.0)
     spec["horizon_offsets"] = [
         int(value) for value in spec["horizon_offsets"]
     ]
@@ -174,6 +177,77 @@ class _PredictiveRepresentationDataset(torch.utils.data.Dataset):
             "x_future": torch.from_numpy(episode["frames"][t + horizon]),
             "actions": torch.from_numpy(actions),
             "horizon": torch.tensor(horizon, dtype=torch.long),
+        }
+
+
+class _EffectEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        effect_dim: int,
+        hidden_dim: int,
+    ) -> None:
+        super().__init__()
+        self.model = MLP(
+            2 * input_dim + 1,
+            effect_dim,
+            hidden_dim,
+            depth=3,
+        )
+
+    def forward(self, pair: torch.Tensor) -> torch.Tensor:
+        return self.model(pair)
+
+
+class _EffectRepresentationDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        episodes: list[dict[str, np.ndarray]],
+        horizon_steps: int,
+        length: int,
+    ) -> None:
+        self.episodes = [
+            episode
+            for episode in episodes
+            if len(episode["actions"]) > horizon_steps
+        ]
+        self.horizon_steps = horizon_steps
+        self.length = length
+        if not self.episodes:
+            raise ValueError("No action-aware effect-code episodes")
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _index: int) -> dict[str, torch.Tensor]:
+        episode = self.episodes[np.random.randint(0, len(self.episodes))]
+        base = int(
+            np.random.randint(
+                0, len(episode["actions"]) - self.horizon_steps
+            )
+        )
+        offset = int(np.random.randint(0, self.horizon_steps))
+        current = base + offset
+        previous = (
+            episode["actions"][current - 1]
+            if current > 0
+            else episode["zero_action"]
+        )
+        return {
+            "x_start": torch.from_numpy(episode["frames"][base]),
+            "x_future": torch.from_numpy(
+                episode["frames"][base + self.horizon_steps]
+            ),
+            "x_current": torch.from_numpy(episode["frames"][current]),
+            "previous": torch.from_numpy(previous),
+            "remaining": torch.tensor(
+                (self.horizon_steps - offset) / self.horizon_steps,
+                dtype=torch.float32,
+            ),
+            "action": torch.from_numpy(episode["actions"][current]),
+            "auxiliary": torch.from_numpy(
+                episode["auxiliary"][base + self.horizon_steps]
+            ),
         }
 
 
@@ -279,9 +353,17 @@ def _train_predictive_representation(
     )
     batch_size = int(config.get("learned_interface.representation.batch_size", 512))
     batches_per_epoch = int(
-        config.get("learned_interface.representation.batches_per_epoch", 400)
+        spec.get(
+            "batches_per_epoch",
+            config.get("learned_interface.representation.batches_per_epoch", 400),
+        )
     )
-    epochs = int(config.get("learned_interface.representation.epochs", 60))
+    epochs = int(
+        spec.get(
+            "epochs",
+            config.get("learned_interface.representation.epochs", 60),
+        )
+    )
     train_loader = DataLoader(
         _PredictiveRepresentationDataset(
             train, horizons, batch_size * batches_per_epoch
@@ -558,6 +640,515 @@ def _train_predictive_representation(
     return checkpoint_path
 
 
+def _encode_physical_labels(labels: np.ndarray) -> np.ndarray:
+    yaw = labels[:, 2]
+    return np.concatenate(
+        [
+            labels[:, :2],
+            np.sin(yaw)[:, None],
+            np.cos(yaw)[:, None],
+            labels[:, 3:],
+        ],
+        axis=-1,
+    ).astype(np.float32)
+
+
+def _effect_teacher_path(config: Config, seed: int) -> Path:
+    return (
+        ensure_dir(
+            config.path_value("paths.incremental_artifact_dir")
+            / "learned_interface"
+            / "effect_auxiliary_teacher"
+        )
+        / f"seed{seed}.pt"
+    )
+
+
+def _train_effect_auxiliary_teacher(
+    config: Config,
+    frame_norm: Standardizer,
+    input_dim: int,
+    seed: int,
+    force: bool,
+) -> tuple[nn.Module, dict[str, Any]]:
+    path = _effect_teacher_path(config, seed)
+    device = default_device()
+    if path.exists() and not force:
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+        model = MLP(
+            input_dim,
+            int(checkpoint["output_dim"]),
+            int(checkpoint["hidden_dim"]),
+            depth=3,
+        ).to(device)
+        model.load_state_dict(checkpoint["model"])
+        model.eval()
+        return model, checkpoint
+
+    set_seed(seed + 17)
+    probe_path = collect_phase6_probe_dataset(config, force=False)
+    with np.load(probe_path) as data:
+        inputs = np.asarray(data["inputs"], dtype=np.float32)
+        labels = _encode_physical_labels(
+            np.asarray(data["labels"], dtype=np.float32)
+        )
+        contact = np.asarray(data["contact"], dtype=np.float32)
+    rng = np.random.default_rng(seed + 17)
+    order = rng.permutation(len(inputs))
+    split = int(0.8 * len(order))
+    train_idx, validation_idx = order[:split], order[split:]
+    label_norm = Standardizer.fit(labels[train_idx])
+    x = frame_norm.transform(inputs)
+    y = label_norm.transform(labels)
+    hidden_dim = int(
+        config.get("learned_interface.effect.teacher_hidden_dim", 512)
+    )
+    model = MLP(input_dim, y.shape[-1] + 1, hidden_dim, depth=3).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.get("learned_interface.effect.teacher_lr", 3e-4)),
+    )
+    batch_size = int(
+        config.get("learned_interface.effect.teacher_batch_size", 512)
+    )
+    loader = DataLoader(
+        TensorDataset(
+            torch.from_numpy(x[train_idx]),
+            torch.from_numpy(y[train_idx]),
+            torch.from_numpy(contact[train_idx]),
+        ),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    best_state: dict[str, torch.Tensor] | None = None
+    best_loss = float("inf")
+    epochs = int(config.get("learned_interface.effect.teacher_epochs", 100))
+    for _epoch in trange(epochs, desc="train effect auxiliary teacher"):
+        model.train()
+        for batch_x, batch_y, batch_contact in loader:
+            batch_x = batch_x.to(device, non_blocking=True).float()
+            batch_y = batch_y.to(device, non_blocking=True).float()
+            batch_contact = batch_contact.to(
+                device, non_blocking=True
+            ).float()
+            prediction = model(batch_x)
+            loss = torch.mean((prediction[:, :-1] - batch_y) ** 2)
+            loss = loss + torch.nn.functional.binary_cross_entropy_with_logits(
+                prediction[:, -1:], batch_contact
+            )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+        model.eval()
+        with torch.inference_mode():
+            validation_prediction = model(
+                torch.from_numpy(x[validation_idx]).to(device).float()
+            )
+            validation_loss = torch.mean(
+                (
+                    validation_prediction[:, :-1]
+                    - torch.from_numpy(y[validation_idx]).to(device).float()
+                )
+                ** 2
+            )
+            validation_loss = (
+                validation_loss
+                + torch.nn.functional.binary_cross_entropy_with_logits(
+                    validation_prediction[:, -1:],
+                    torch.from_numpy(contact[validation_idx])
+                    .to(device)
+                    .float(),
+                )
+            )
+        score = float(validation_loss.cpu())
+        if score < best_loss:
+            best_loss = score
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is None:
+        raise RuntimeError("Effect auxiliary teacher produced no checkpoint")
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.inference_mode():
+        prediction = (
+            model(torch.from_numpy(x[validation_idx]).to(device).float())
+            .cpu()
+            .numpy()
+        )
+    decoded = label_norm.inverse(prediction[:, :-1])
+    target = labels[validation_idx]
+    yaw_prediction = np.arctan2(decoded[:, 2], decoded[:, 3])
+    yaw_target = np.arctan2(target[:, 2], target[:, 3])
+    yaw_error = np.arctan2(
+        np.sin(yaw_prediction - yaw_target),
+        np.cos(yaw_prediction - yaw_target),
+    )
+    contact_logits = prediction[:, -1]
+    contact_target = contact[validation_idx, 0]
+    checkpoint = {
+        "model": model.state_dict(),
+        "input_dim": input_dim,
+        "output_dim": int(y.shape[-1] + 1),
+        "hidden_dim": hidden_dim,
+        "frame_norm": frame_norm.state_dict(),
+        "label_norm": label_norm.state_dict(),
+        "probe_dataset": str(probe_path),
+        "validation": {
+            "normalized_loss": best_loss,
+            "object_position_rmse_m": float(
+                np.sqrt(np.mean((decoded[:, :2] - target[:, :2]) ** 2))
+            ),
+            "object_yaw_mae_rad": float(np.mean(np.abs(yaw_error))),
+            "tcp_position_rmse_m": float(
+                np.sqrt(np.mean((decoded[:, 7:9] - target[:, 7:9]) ** 2))
+            ),
+            "contact_accuracy": float(
+                np.mean((contact_logits >= 0.0) == contact_target.astype(bool))
+            ),
+            "contact_auroc": _binary_auc(contact_logits, contact_target),
+        },
+        "semantics": (
+            "Frozen observation-to-physical-state probe trained on the "
+            "causal Phase 6 probe dataset; its outputs are pseudo-labels, "
+            "not privileged inputs to the deployed hierarchy."
+        ),
+    }
+    torch.save(checkpoint, path)
+    write_json(
+        path.with_suffix(".json"),
+        {key: value for key, value in checkpoint.items() if key != "model"},
+    )
+    return model, checkpoint
+
+
+@torch.inference_mode()
+def _effect_auxiliary_predictions(
+    model: nn.Module,
+    frame_norm: Standardizer,
+    frames: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    normalized = frame_norm.transform(frames)
+    rows = []
+    for start in range(0, len(normalized), 2048):
+        prediction = model(
+            torch.from_numpy(normalized[start : start + 2048])
+            .to(device)
+            .float()
+        )
+        rows.append(
+            torch.cat(
+                [prediction[:, :-1], prediction[:, -1:].sigmoid()], dim=-1
+            )
+            .cpu()
+            .numpy()
+        )
+    return np.concatenate(rows).astype(np.float32)
+
+
+def _train_effect_representation(
+    config: Config,
+    candidate: str,
+    spec: dict[str, Any],
+    seed: int,
+    force: bool,
+) -> Path:
+    artifact_dir = _artifact_dir(config, candidate, seed)
+    checkpoint_path = artifact_dir / "representation.pt"
+    if checkpoint_path.exists() and not force:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+        _write_representation_metrics(
+            artifact_dir / "representation_metrics.json", checkpoint
+        )
+        console.print(f"Learned-interface representation exists: {checkpoint_path}")
+        return checkpoint_path
+    set_seed(seed)
+    train_episodes, validation_episodes, data_metadata = (
+        _load_phase6_train_episodes(config)
+    )
+    frame_norm, action_norm = _phase4_fit_standardizers(train_episodes)
+    input_dim = int(data_metadata["frame_dim"])
+    effect_dim = int(spec["latent_dim"])
+    width = int(spec["width"])
+    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
+    device = default_device()
+    auxiliary_teacher, teacher_checkpoint = (
+        _train_effect_auxiliary_teacher(
+            config, frame_norm, input_dim, seed, force=False
+        )
+    )
+
+    def normalized(
+        episodes: list[dict[str, np.ndarray]],
+    ) -> list[dict[str, np.ndarray]]:
+        zero_action = action_norm.transform(
+            np.zeros((1, 3), dtype=np.float32)
+        )[0]
+        return [
+            {
+                "frames": frame_norm.transform(episode["frames"]),
+                "actions": action_norm.transform(episode["actions"]),
+                "zero_action": zero_action,
+                "auxiliary": _effect_auxiliary_predictions(
+                    auxiliary_teacher,
+                    frame_norm,
+                    episode["frames"],
+                    device,
+                ),
+            }
+            for episode in episodes
+        ]
+
+    train = normalized(train_episodes)
+    validation = normalized(validation_episodes)
+    encoder = _EffectEncoder(input_dim, effect_dim, width).to(device)
+    action_head = MLP(
+        input_dim + effect_dim + 4, 3, width, depth=4
+    ).to(device)
+    auxiliary_head = MLP(effect_dim, 12, width, depth=3).to(device)
+    optimizer = torch.optim.AdamW(
+        [
+            *encoder.parameters(),
+            *action_head.parameters(),
+            *auxiliary_head.parameters(),
+        ],
+        lr=float(config.get("learned_interface.representation.lr", 3e-4)),
+    )
+    batch_size = int(config.get("learned_interface.representation.batch_size", 512))
+    batches_per_epoch = int(
+        spec.get(
+            "batches_per_epoch",
+            config.get("learned_interface.representation.batches_per_epoch", 400),
+        )
+    )
+    train_loader = DataLoader(
+        _EffectRepresentationDataset(
+            train,
+            horizon_steps,
+            batch_size * batches_per_epoch,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    validation_loader = DataLoader(
+        _EffectRepresentationDataset(
+            validation,
+            horizon_steps,
+            int(
+                config.get(
+                    "learned_interface.representation.validation_samples",
+                    8192,
+                )
+            ),
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+    lambda_action = float(spec["lambda_action"])
+    lambda_auxiliary = float(spec["lambda_auxiliary"])
+    lambda_var = float(spec["lambda_var"])
+    lambda_cov = float(spec["lambda_cov"])
+    history: list[dict[str, Any]] = []
+    best_state: dict[str, Any] | None = None
+    best_validation = float("inf")
+    patience = int(spec["early_stopping_patience"])
+    epochs_without_improvement = 0
+    timer = Timer()
+
+    def losses(
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
+        x_start = batch["x_start"].to(device).float()
+        x_future = batch["x_future"].to(device).float()
+        x_current = batch["x_current"].to(device).float()
+        previous = batch["previous"].to(device).float()
+        remaining = batch["remaining"].to(device).float()[:, None]
+        target_action = batch["action"].to(device).float()
+        target_auxiliary = batch["auxiliary"].to(device).float()
+        pair = torch.cat(
+            [x_start, x_future, torch.ones_like(remaining)], dim=-1
+        )
+        effect = encoder(pair)
+        action_prediction = action_head(
+            torch.cat(
+                [x_current, effect, previous, remaining], dim=-1
+            )
+        )
+        auxiliary_prediction = auxiliary_head(effect)
+        action_loss = torch.mean((action_prediction - target_action) ** 2)
+        auxiliary_continuous = torch.mean(
+            (auxiliary_prediction[:, :-1] - target_auxiliary[:, :-1]) ** 2
+        )
+        auxiliary_contact = (
+            torch.nn.functional.binary_cross_entropy_with_logits(
+                auxiliary_prediction[:, -1:],
+                target_auxiliary[:, -1:],
+            )
+        )
+        variance, covariance = _variance_covariance_losses(effect)
+        total = (
+            lambda_action * action_loss
+            + lambda_auxiliary * (auxiliary_continuous + auxiliary_contact)
+            + lambda_var * variance
+            + lambda_cov * covariance
+        )
+        return (
+            total,
+            {
+                "action_mse": action_loss,
+                "auxiliary_continuous_mse": auxiliary_continuous,
+                "auxiliary_contact_bce": auxiliary_contact,
+                "variance_loss": variance,
+                "covariance_loss": covariance,
+            },
+            effect,
+        )
+
+    def validation_metrics() -> dict[str, Any]:
+        rows: dict[str, list[float]] = {
+            "action_mse": [],
+            "auxiliary_continuous_mse": [],
+            "auxiliary_contact_bce": [],
+            "variance_loss": [],
+            "covariance_loss": [],
+        }
+        effects = []
+        with torch.inference_mode():
+            for batch in validation_loader:
+                _total, metrics, effect = losses(batch)
+                for key, value in metrics.items():
+                    rows[key].append(float(value.cpu()))
+                effects.append(effect.cpu().numpy())
+        effect_array = np.concatenate(effects)
+        effect_std = effect_array.std(axis=0)
+        result = {key: float(np.mean(value)) for key, value in rows.items()}
+        result.update(
+            {
+                "active_dimensions_std_gt_0_1": int(
+                    np.sum(effect_std > 0.1)
+                ),
+                "latent_norm_mean": float(
+                    np.linalg.norm(effect_array, axis=-1).mean()
+                ),
+                "latent_norm_std": float(
+                    np.linalg.norm(effect_array, axis=-1).std()
+                ),
+                "reconstruction_mse": 0.0,
+                "kl_total": 0.0,
+                "kl_per_dimension": 0.0,
+                "posterior_variance_mean": 0.0,
+            }
+        )
+        return result
+
+    epochs = int(
+        spec.get(
+            "epochs",
+            config.get("learned_interface.representation.epochs", 60),
+        )
+    )
+    for epoch in trange(1, epochs + 1, desc=f"train effect {candidate}"):
+        encoder.train()
+        action_head.train()
+        auxiliary_head.train()
+        sums: dict[str, float] = {}
+        count = 0
+        for batch in train_loader:
+            total, metrics, _effect = losses(batch)
+            optimizer.zero_grad(set_to_none=True)
+            total.backward()
+            optimizer.step()
+            batch_count = len(batch["x_start"])
+            sums["loss"] = sums.get("loss", 0.0) + float(total.cpu()) * batch_count
+            for key, value in metrics.items():
+                sums[key] = sums.get(key, 0.0) + float(value.cpu()) * batch_count
+            count += batch_count
+        encoder.eval()
+        action_head.eval()
+        auxiliary_head.eval()
+        validation_row = validation_metrics()
+        selection = (
+            lambda_action * validation_row["action_mse"]
+            + lambda_auxiliary
+            * (
+                validation_row["auxiliary_continuous_mse"]
+                + validation_row["auxiliary_contact_bce"]
+            )
+            + lambda_var * validation_row["variance_loss"]
+            + lambda_cov * validation_row["covariance_loss"]
+        )
+        history.append(
+            {
+                "epoch": epoch,
+                **{f"train_{key}": value / count for key, value in sums.items()},
+                **{
+                    f"validation_{key}": value
+                    for key, value in validation_row.items()
+                },
+            }
+        )
+        if selection < best_validation:
+            best_validation = selection
+            epochs_without_improvement = 0
+            best_state = {
+                "encoder": copy.deepcopy(encoder.state_dict()),
+                "action_head": copy.deepcopy(action_head.state_dict()),
+                "auxiliary_head": copy.deepcopy(auxiliary_head.state_dict()),
+                "epoch": epoch,
+            }
+        else:
+            epochs_without_improvement += 1
+        if epochs_without_improvement >= patience:
+            break
+    if best_state is None:
+        raise RuntimeError("Effect representation produced no checkpoint")
+    encoder.load_state_dict(best_state["encoder"])
+    action_head.load_state_dict(best_state["action_head"])
+    auxiliary_head.load_state_dict(best_state["auxiliary_head"])
+    encoder.eval()
+    action_head.eval()
+    auxiliary_head.eval()
+    payload = {
+        "candidate": candidate,
+        "family": spec["family"],
+        "spec": spec,
+        "encoder_type": "effect",
+        "input_dim": input_dim,
+        "latent_dim": effect_dim,
+        "hidden_dim": width,
+        "encoder": encoder.state_dict(),
+        "action_head": action_head.state_dict(),
+        "auxiliary_head": auxiliary_head.state_dict(),
+        "frame_norm": frame_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "horizon_steps": horizon_steps,
+        "best_epoch": best_state["epoch"],
+        "trained_epochs": len(history),
+        "validation_metrics": validation_metrics(),
+        "auxiliary_teacher": {
+            "checkpoint": str(_effect_teacher_path(config, seed)),
+            "validation": teacher_checkpoint["validation"],
+            "semantics": teacher_checkpoint["semantics"],
+        },
+        "history": history,
+        "data": data_metadata,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    _write_representation_metrics(
+        artifact_dir / "representation_metrics.json", payload
+    )
+    console.print(f"Wrote learned-interface representation: {checkpoint_path}")
+    return checkpoint_path
+
+
 def train_learned_interface_representation(
     config: Config,
     candidate: str,
@@ -572,6 +1163,10 @@ def train_learned_interface_representation(
         )
     if str(spec["family"]) == "predictive_jepa":
         return _train_predictive_representation(
+            config, candidate, spec, seed, force
+        )
+    if str(spec["family"]) == "effect_code":
+        return _train_effect_representation(
             config, candidate, spec, seed, force
         )
     artifact_dir = _artifact_dir(config, candidate, seed)
@@ -847,16 +1442,23 @@ def _load_representation(
     checkpoint = torch.load(
         checkpoint_path, map_location=device, weights_only=False
     )
-    encoder_cls = (
-        VariationalObservationEncoder
-        if checkpoint["encoder_type"] == "vae"
-        else ObservationEncoder
-    )
-    encoder = encoder_cls(
-        int(checkpoint["input_dim"]),
-        int(checkpoint["latent_dim"]),
-        int(checkpoint["hidden_dim"]),
-    ).to(device)
+    if checkpoint["encoder_type"] == "effect":
+        encoder: nn.Module = _EffectEncoder(
+            int(checkpoint["input_dim"]),
+            int(checkpoint["latent_dim"]),
+            int(checkpoint["hidden_dim"]),
+        ).to(device)
+    else:
+        encoder_cls = (
+            VariationalObservationEncoder
+            if checkpoint["encoder_type"] == "vae"
+            else ObservationEncoder
+        )
+        encoder = encoder_cls(
+            int(checkpoint["input_dim"]),
+            int(checkpoint["latent_dim"]),
+            int(checkpoint["hidden_dim"]),
+        ).to(device)
     encoder.load_state_dict(checkpoint["encoder"])
     encoder.eval()
     return encoder, checkpoint
@@ -884,6 +1486,34 @@ def _encode_array(
     return np.concatenate(rows).astype(np.float32)
 
 
+@torch.inference_mode()
+def _encode_effect_array(
+    encoder: nn.Module,
+    frame_norm: Standardizer,
+    start_frames: np.ndarray,
+    future_frames: np.ndarray,
+    horizon_fraction: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    start = frame_norm.transform(start_frames)
+    future = frame_norm.transform(future_frames)
+    pair = np.concatenate(
+        [start, future, horizon_fraction.reshape(-1, 1)], axis=-1
+    ).astype(np.float32)
+    rows = []
+    for index in range(0, len(pair), 2048):
+        rows.append(
+            encoder(
+                torch.from_numpy(pair[index : index + 2048])
+                .to(device)
+                .float()
+            )
+            .cpu()
+            .numpy()
+        )
+    return np.concatenate(rows).astype(np.float32)
+
+
 def probe_learned_interface_representation(
     config: Config,
     candidate: str,
@@ -900,6 +1530,23 @@ def probe_learned_interface_representation(
     device = default_device()
     encoder, checkpoint = _load_representation(checkpoint_path, device)
     frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
+    if checkpoint["encoder_type"] == "effect":
+        payload = {
+            "stage": "representation_probe",
+            "candidate": candidate,
+            "representation_checkpoint": str(checkpoint_path),
+            "representation_validation": checkpoint["validation_metrics"],
+            "auxiliary_teacher": checkpoint["auxiliary_teacher"],
+            "probe_kind": (
+                "Pairwise effect codes are evaluated by their action and "
+                "future-physical-target auxiliary heads rather than the "
+                "unary Phase 6 state probe."
+            ),
+            "metadata": _runtime_metadata(config),
+        }
+        write_json(output_path, payload)
+        console.print(payload)
+        return output_path
     dataset_path = collect_phase6_probe_dataset(config, force=False)
     with np.load(dataset_path) as data:
         inputs = np.asarray(data["inputs"], dtype=np.float32)
@@ -956,14 +1603,33 @@ def prepare_learned_interface_episodes(
     encoder, checkpoint = _load_representation(checkpoint_path, device)
     frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
     train, validation, data_metadata = _load_phase6_train_episodes(config)
+    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
 
     def convert(
         episodes: list[dict[str, np.ndarray]],
     ) -> list[np.ndarray]:
-        return [
-            _encode_array(encoder, frame_norm, episode["frames"], device)
-            for episode in episodes
-        ]
+        if checkpoint["encoder_type"] != "effect":
+            return [
+                _encode_array(encoder, frame_norm, episode["frames"], device)
+                for episode in episodes
+            ]
+        converted = []
+        for episode in episodes:
+            goals = np.zeros(
+                (len(episode["frames"]), int(checkpoint["latent_dim"])),
+                dtype=np.float32,
+            )
+            if len(goals) > horizon_steps:
+                goals[horizon_steps:] = _encode_effect_array(
+                    encoder,
+                    frame_norm,
+                    episode["frames"][:-horizon_steps],
+                    episode["frames"][horizon_steps:],
+                    np.ones(len(goals) - horizon_steps, dtype=np.float32),
+                    device,
+                )
+            converted.append(goals)
+        return converted
 
     payload = {
         "format_version": 2,
@@ -1337,13 +2003,21 @@ def train_learned_interface_hierarchy(
     frame_norm = Standardizer.from_state_dict(
         representation_checkpoint["frame_norm"]
     )
+    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
+    goal_rows = (
+        [
+            episode["goals"][horizon_steps:]
+            for episode in train
+        ]
+        if representation_checkpoint["encoder_type"] == "effect"
+        else [episode["goals"] for episode in train]
+    )
     goal_norm = Standardizer.fit(
-        np.concatenate([episode["goals"] for episode in train], axis=0)
+        np.concatenate(goal_rows, axis=0)
     )
     action_norm = Standardizer.fit(
         np.concatenate([episode["actions"] for episode in train], axis=0)
     )
-    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
     conditioning = str(
         learned_interface_candidate_spec(config, candidate)["conditioning"]
     )
@@ -1596,6 +2270,10 @@ def evaluate_learned_interface_hierarchy(
     encoder, representation_checkpoint = _load_representation(
         Path(checkpoint["representation_checkpoint"]), device
     )
+    representation_frame_norm = Standardizer.from_state_dict(
+        representation_checkpoint["frame_norm"]
+    )
+    is_effect = representation_checkpoint["encoder_type"] == "effect"
     frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
     goal_norm = Standardizer.from_state_dict(checkpoint["goal_norm"])
     action_norm = Standardizer.from_state_dict(checkpoint["action_norm"])
@@ -1725,16 +2403,24 @@ def evaluate_learned_interface_hierarchy(
                             dino,
                             int(config.get("dino.batch_size", 64)),
                         )
-                        oracle_goal = goal_norm.transform(
-                            _encode_array(
+                        oracle_encoding = (
+                            _encode_effect_array(
                                 encoder,
-                                Standardizer.from_state_dict(
-                                    representation_checkpoint["frame_norm"]
-                                ),
+                                representation_frame_norm,
+                                frames,
+                                branch_frames,
+                                np.ones(num_envs, dtype=np.float32),
+                                device,
+                            )
+                            if is_effect
+                            else _encode_array(
+                                encoder,
+                                representation_frame_norm,
                                 branch_frames,
                                 device,
                             )
                         )
+                        oracle_goal = goal_norm.transform(oracle_encoding)
                         goal_errors.extend(
                             np.linalg.norm(
                                 predicted_goal[replan] - oracle_goal[replan],
@@ -1747,12 +2433,16 @@ def evaluate_learned_interface_hierarchy(
                     high_decisions += int(np.sum(replan))
                 remaining = np.maximum(countdown, 1).astype(np.float32)
                 if conditioning in {"delta", "relation"}:
+                    if is_effect:
+                        raise ValueError(
+                            "Effect-code candidates require absolute concat "
+                            "conditioning because a unary current effect is "
+                            "undefined."
+                        )
                     current_goal = goal_norm.transform(
                         _encode_array(
                             encoder,
-                            Standardizer.from_state_dict(
-                                representation_checkpoint["frame_norm"]
-                            ),
+                            representation_frame_norm,
                             frames,
                             device,
                         )
