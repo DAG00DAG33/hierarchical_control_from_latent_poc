@@ -458,3 +458,51 @@ learned_interface:
       width: 2048
       dino_noise_std: 0.005
       proprio_noise_std: 0.005
+    jepa256_predonly_v1_c001:
+      family: predictive_jepa
+      encoder_type: deterministic
+      latent_dim: 256
+      width: 1024
+      predictor_width: 1024
+      ema_momentum: 0.99
+      lambda_pred: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.01
+      lambda_recon: 0.0
+      horizon_offsets: [1, 2, 5, 10]
+    jepa256_r001_v1_c001:
+      family: predictive_jepa
+      encoder_type: deterministic
+      latent_dim: 256
+      width: 1024
+      predictor_width: 1024
+      ema_momentum: 0.99
+      lambda_pred: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.01
+      lambda_recon: 0.01
+      horizon_offsets: [1, 2, 5, 10]
+    jepa256_r01_v1_c01:
+      family: predictive_jepa
+      encoder_type: deterministic
+      latent_dim: 256
+      width: 1024
+      predictor_width: 1024
+      ema_momentum: 0.99
+      lambda_pred: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.1
+      lambda_recon: 0.1
+      horizon_offsets: [1, 2, 5, 10]
+    jepa256_r1_v10_c01:
+      family: predictive_jepa
+      encoder_type: deterministic
+      latent_dim: 256
+      width: 1024
+      predictor_width: 1024
+      ema_momentum: 0.99
+      lambda_pred: 1.0
+      lambda_var: 10.0
+      lambda_cov: 0.1
+      lambda_recon: 1.0
+      horizon_offsets: [1, 2, 5, 10]

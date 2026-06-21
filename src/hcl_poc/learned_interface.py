@@ -25,7 +25,12 @@ from hcl_poc.incremental import (
     _wilson_interval,
     collect_phase6_probe_dataset,
 )
-from hcl_poc.models import MLP, ObservationEncoder, VariationalObservationEncoder
+from hcl_poc.models import (
+    MLP,
+    ObservationEncoder,
+    RepresentationWorldModel,
+    VariationalObservationEncoder,
+)
 from hcl_poc.rl import _rl_paths, load_ppo_agent
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
 
@@ -60,6 +65,16 @@ def learned_interface_candidate_spec(config: Config, candidate: str) -> dict[str
     spec.setdefault("representation_candidate", candidate)
     spec.setdefault("high_level_candidate", candidate)
     spec.setdefault("conditioning", "concat")
+    spec.setdefault("predictor_width", spec["width"])
+    spec.setdefault("ema_momentum", 0.99)
+    spec.setdefault("lambda_pred", 1.0)
+    spec.setdefault("lambda_var", 1.0)
+    spec.setdefault("lambda_cov", 0.01)
+    spec.setdefault("lambda_recon", 0.1)
+    spec.setdefault("horizon_offsets", [1, 2, 5, 10])
+    spec["horizon_offsets"] = [
+        int(value) for value in spec["horizon_offsets"]
+    ]
     return spec
 
 
@@ -87,7 +102,15 @@ def _write_representation_metrics(path: Path, payload: dict[str, Any]) -> None:
         {
             key: value
             for key, value in payload.items()
-            if key not in {"encoder", "decoder", "frame_norm"}
+            if key
+            not in {
+                "encoder",
+                "target_encoder",
+                "world_model",
+                "decoder",
+                "frame_norm",
+                "action_norm",
+            }
         },
     )
 
@@ -106,6 +129,51 @@ class _RepresentationDataset(torch.utils.data.Dataset):
         episode = self.episodes[np.random.randint(0, len(self.episodes))]
         t = int(np.random.randint(0, len(episode["frames"])))
         return torch.from_numpy(episode["frames"][t])
+
+
+class _PredictiveRepresentationDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        episodes: list[dict[str, np.ndarray]],
+        horizons: list[int],
+        length: int,
+    ) -> None:
+        self.episodes = [
+            episode
+            for episode in episodes
+            if len(episode["actions"]) > min(horizons)
+        ]
+        self.horizons = horizons
+        self.max_horizon = max(horizons)
+        self.length = length
+        if not self.episodes:
+            raise ValueError("No predictive learned-interface episodes")
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, _index: int) -> dict[str, torch.Tensor]:
+        episode = self.episodes[np.random.randint(0, len(self.episodes))]
+        valid_horizons = [
+            horizon
+            for horizon in self.horizons
+            if len(episode["actions"]) > horizon
+        ]
+        horizon = int(
+            valid_horizons[np.random.randint(0, len(valid_horizons))]
+        )
+        t = int(np.random.randint(0, len(episode["actions"]) - horizon))
+        actions = np.zeros(
+            (self.max_horizon, episode["actions"].shape[-1]),
+            dtype=np.float32,
+        )
+        actions[:horizon] = episode["actions"][t : t + horizon]
+        return {
+            "x_t": torch.from_numpy(episode["frames"][t]),
+            "x_future": torch.from_numpy(episode["frames"][t + horizon]),
+            "actions": torch.from_numpy(actions),
+            "horizon": torch.tensor(horizon, dtype=torch.long),
+        }
 
 
 def _reconstruction_loss(
@@ -133,6 +201,354 @@ def _vae_kl(
     return optimized.sum(dim=-1).mean(), per_dimension.mean()
 
 
+def _variance_covariance_losses(
+    z: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    std = torch.sqrt(z.var(dim=0) + 1e-4)
+    variance = torch.relu(1.0 - std).mean()
+    centered = z - z.mean(dim=0)
+    covariance = centered.T @ centered / max(len(z) - 1, 1)
+    covariance = covariance - torch.diag_embed(torch.diagonal(covariance))
+    covariance_loss = covariance.square().sum() / z.shape[-1]
+    return variance, covariance_loss
+
+
+def _train_predictive_representation(
+    config: Config,
+    candidate: str,
+    spec: dict[str, Any],
+    seed: int,
+    force: bool,
+) -> Path:
+    artifact_dir = _artifact_dir(config, candidate, seed)
+    checkpoint_path = artifact_dir / "representation.pt"
+    if checkpoint_path.exists() and not force:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+        _write_representation_metrics(
+            artifact_dir / "representation_metrics.json", checkpoint
+        )
+        console.print(f"Learned-interface representation exists: {checkpoint_path}")
+        return checkpoint_path
+    set_seed(seed)
+    train_episodes, validation_episodes, data_metadata = (
+        _load_phase6_train_episodes(config)
+    )
+    frame_norm, action_norm = _phase4_fit_standardizers(train_episodes)
+
+    def normalized(
+        episodes: list[dict[str, np.ndarray]],
+    ) -> list[dict[str, np.ndarray]]:
+        return [
+            {
+                "frames": frame_norm.transform(episode["frames"]),
+                "actions": action_norm.transform(episode["actions"]),
+            }
+            for episode in episodes
+        ]
+
+    train = normalized(train_episodes)
+    validation = normalized(validation_episodes)
+    input_dim = int(data_metadata["frame_dim"])
+    action_dim = int(data_metadata["action_dim"])
+    latent_dim = int(spec["latent_dim"])
+    width = int(spec["width"])
+    predictor_width = int(spec["predictor_width"])
+    horizons = [int(value) for value in spec["horizon_offsets"]]
+    device = default_device()
+    encoder = ObservationEncoder(input_dim, latent_dim, width).to(device)
+    target_encoder = copy.deepcopy(encoder).to(device)
+    target_encoder.requires_grad_(False)
+    predictor = RepresentationWorldModel(
+        latent_dim, action_dim, predictor_width
+    ).to(device)
+    lambda_recon = float(spec["lambda_recon"])
+    decoder = (
+        MLP(latent_dim, input_dim, width, depth=3).to(device)
+        if lambda_recon > 0.0
+        else None
+    )
+    parameters = list(encoder.parameters()) + list(predictor.parameters())
+    if decoder is not None:
+        parameters += list(decoder.parameters())
+    optimizer = torch.optim.AdamW(
+        parameters,
+        lr=float(config.get("learned_interface.representation.lr", 3e-4)),
+    )
+    batch_size = int(config.get("learned_interface.representation.batch_size", 512))
+    batches_per_epoch = int(
+        config.get("learned_interface.representation.batches_per_epoch", 400)
+    )
+    epochs = int(config.get("learned_interface.representation.epochs", 60))
+    train_loader = DataLoader(
+        _PredictiveRepresentationDataset(
+            train, horizons, batch_size * batches_per_epoch
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    validation_loader = DataLoader(
+        _PredictiveRepresentationDataset(
+            validation,
+            horizons,
+            int(
+                config.get(
+                    "learned_interface.representation.validation_samples",
+                    8192,
+                )
+            ),
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+    proprio_dim = int(config.get("incremental.phase6.proprio_dim", 21))
+    proprio_weight = float(
+        config.get("incremental.phase6.proprio_reconstruction_weight", 1.0)
+    )
+    lambda_pred = float(spec["lambda_pred"])
+    lambda_var = float(spec["lambda_var"])
+    lambda_cov = float(spec["lambda_cov"])
+    ema_momentum = float(spec["ema_momentum"])
+    history: list[dict[str, Any]] = []
+    best_state: dict[str, Any] | None = None
+    best_validation = float("inf")
+    timer = Timer()
+
+    @torch.no_grad()
+    def update_target() -> None:
+        for target_parameter, parameter in zip(
+            target_encoder.parameters(), encoder.parameters(), strict=True
+        ):
+            target_parameter.lerp_(parameter, 1.0 - ema_momentum)
+
+    def validation_metrics() -> dict[str, Any]:
+        prediction_rows = []
+        reconstruction_rows = []
+        dino_rows = []
+        proprio_rows = []
+        variance_rows = []
+        covariance_rows = []
+        latent_rows = []
+        with torch.inference_mode():
+            for batch in validation_loader:
+                x_t = batch["x_t"].to(device).float()
+                x_future = batch["x_future"].to(device).float()
+                actions = batch["actions"].to(device).float()
+                horizon = batch["horizon"].to(device)
+                z_t = encoder(x_t)
+                z_future = encoder(x_future)
+                target = target_encoder(x_future)
+                prediction = predictor(z_t, actions, horizon)
+                prediction_rows.append(
+                    float(torch.mean((prediction - target) ** 2).cpu())
+                )
+                variance_t, covariance_t = _variance_covariance_losses(z_t)
+                variance_future, covariance_future = (
+                    _variance_covariance_losses(z_future)
+                )
+                variance_rows.append(
+                    float((0.5 * (variance_t + variance_future)).cpu())
+                )
+                covariance_rows.append(
+                    float((0.5 * (covariance_t + covariance_future)).cpu())
+                )
+                if decoder is not None:
+                    reconstruction_t = decoder(z_t)
+                    reconstruction_future = decoder(z_future)
+                    total_t, dino_t, proprio_t = _reconstruction_loss(
+                        reconstruction_t, x_t, proprio_dim, proprio_weight
+                    )
+                    total_future, dino_future, proprio_future = (
+                        _reconstruction_loss(
+                            reconstruction_future,
+                            x_future,
+                            proprio_dim,
+                            proprio_weight,
+                        )
+                    )
+                    reconstruction_rows.append(
+                        float((0.5 * (total_t + total_future)).cpu())
+                    )
+                    dino_rows.append(float((0.5 * (dino_t + dino_future)).cpu()))
+                    proprio_rows.append(
+                        float((0.5 * (proprio_t + proprio_future)).cpu())
+                    )
+                latent_rows.append(z_t.cpu().numpy())
+                latent_rows.append(z_future.cpu().numpy())
+        latents = np.concatenate(latent_rows)
+        latent_std = latents.std(axis=0)
+        return {
+            "prediction_mse": float(np.mean(prediction_rows)),
+            "reconstruction_mse": (
+                float(np.mean(reconstruction_rows))
+                if reconstruction_rows
+                else 0.0
+            ),
+            "dino_reconstruction_mse": (
+                float(np.mean(dino_rows)) if dino_rows else 0.0
+            ),
+            "proprio_reconstruction_mse": (
+                float(np.mean(proprio_rows)) if proprio_rows else 0.0
+            ),
+            "variance_loss": float(np.mean(variance_rows)),
+            "covariance_loss": float(np.mean(covariance_rows)),
+            "kl_total": 0.0,
+            "kl_per_dimension": 0.0,
+            "active_dimensions_std_gt_0_1": int(np.sum(latent_std > 0.1)),
+            "posterior_variance_mean": 0.0,
+            "latent_norm_mean": float(np.linalg.norm(latents, axis=-1).mean()),
+            "latent_norm_std": float(np.linalg.norm(latents, axis=-1).std()),
+        }
+
+    for epoch in trange(1, epochs + 1, desc=f"train predictive {candidate}"):
+        encoder.train()
+        predictor.train()
+        target_encoder.eval()
+        if decoder is not None:
+            decoder.train()
+        sums = {
+            "loss": 0.0,
+            "prediction": 0.0,
+            "variance": 0.0,
+            "covariance": 0.0,
+            "reconstruction": 0.0,
+        }
+        count = 0
+        for batch in train_loader:
+            x_t = batch["x_t"].to(device, non_blocking=True).float()
+            x_future = batch["x_future"].to(device, non_blocking=True).float()
+            actions = batch["actions"].to(device, non_blocking=True).float()
+            horizon = batch["horizon"].to(device, non_blocking=True)
+            z_t = encoder(x_t)
+            z_future = encoder(x_future)
+            with torch.no_grad():
+                target = target_encoder(x_future)
+            prediction = predictor(z_t, actions, horizon)
+            prediction_loss = torch.mean((prediction - target) ** 2)
+            variance_t, covariance_t = _variance_covariance_losses(z_t)
+            variance_future, covariance_future = (
+                _variance_covariance_losses(z_future)
+            )
+            variance_loss = 0.5 * (variance_t + variance_future)
+            covariance_loss = 0.5 * (covariance_t + covariance_future)
+            reconstruction_loss = torch.zeros((), device=device)
+            if decoder is not None:
+                reconstruction_t = decoder(z_t)
+                reconstruction_future = decoder(z_future)
+                total_t, _dino_t, _proprio_t = _reconstruction_loss(
+                    reconstruction_t, x_t, proprio_dim, proprio_weight
+                )
+                total_future, _dino_future, _proprio_future = (
+                    _reconstruction_loss(
+                        reconstruction_future,
+                        x_future,
+                        proprio_dim,
+                        proprio_weight,
+                    )
+                )
+                reconstruction_loss = 0.5 * (total_t + total_future)
+            loss = (
+                lambda_pred * prediction_loss
+                + lambda_var * variance_loss
+                + lambda_cov * covariance_loss
+                + lambda_recon * reconstruction_loss
+            )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            update_target()
+            batch_count = len(x_t)
+            sums["loss"] += float(loss.detach().cpu()) * batch_count
+            sums["prediction"] += (
+                float(prediction_loss.detach().cpu()) * batch_count
+            )
+            sums["variance"] += (
+                float(variance_loss.detach().cpu()) * batch_count
+            )
+            sums["covariance"] += (
+                float(covariance_loss.detach().cpu()) * batch_count
+            )
+            sums["reconstruction"] += (
+                float(reconstruction_loss.detach().cpu()) * batch_count
+            )
+            count += batch_count
+        encoder.eval()
+        predictor.eval()
+        if decoder is not None:
+            decoder.eval()
+        metrics = validation_metrics()
+        selection = (
+            lambda_pred * metrics["prediction_mse"]
+            + lambda_var * metrics["variance_loss"]
+            + lambda_cov * metrics["covariance_loss"]
+            + lambda_recon * metrics["reconstruction_mse"]
+        )
+        history.append(
+            {
+                "epoch": epoch,
+                **{f"train_{key}": value / count for key, value in sums.items()},
+                **{f"validation_{key}": value for key, value in metrics.items()},
+            }
+        )
+        if selection < best_validation:
+            best_validation = selection
+            best_state = {
+                "encoder": copy.deepcopy(encoder.state_dict()),
+                "target_encoder": copy.deepcopy(target_encoder.state_dict()),
+                "predictor": copy.deepcopy(predictor.state_dict()),
+                "decoder": (
+                    copy.deepcopy(decoder.state_dict())
+                    if decoder is not None
+                    else None
+                ),
+                "epoch": epoch,
+            }
+    if best_state is None:
+        raise RuntimeError("Predictive representation produced no checkpoint")
+    encoder.load_state_dict(best_state["encoder"])
+    target_encoder.load_state_dict(best_state["target_encoder"])
+    predictor.load_state_dict(best_state["predictor"])
+    if decoder is not None and best_state["decoder"] is not None:
+        decoder.load_state_dict(best_state["decoder"])
+    encoder.eval()
+    target_encoder.eval()
+    predictor.eval()
+    if decoder is not None:
+        decoder.eval()
+    final_validation = validation_metrics()
+    payload = {
+        "candidate": candidate,
+        "family": spec["family"],
+        "spec": spec,
+        "encoder_type": "deterministic",
+        "input_dim": input_dim,
+        "latent_dim": latent_dim,
+        "hidden_dim": width,
+        "encoder": encoder.state_dict(),
+        "target_encoder": target_encoder.state_dict(),
+        "world_model": predictor.state_dict(),
+        "decoder": decoder.state_dict() if decoder is not None else None,
+        "frame_norm": frame_norm.state_dict(),
+        "action_norm": action_norm.state_dict(),
+        "best_epoch": best_state["epoch"],
+        "validation_metrics": final_validation,
+        "history": history,
+        "data": data_metadata,
+        "elapsed_s": timer.elapsed(),
+        "metadata": _runtime_metadata(config),
+    }
+    torch.save(payload, checkpoint_path)
+    _write_representation_metrics(
+        artifact_dir / "representation_metrics.json", payload
+    )
+    console.print(f"Wrote learned-interface representation: {checkpoint_path}")
+    return checkpoint_path
+
+
 def train_learned_interface_representation(
     config: Config,
     candidate: str,
@@ -144,6 +560,10 @@ def train_learned_interface_representation(
     if representation_candidate != candidate:
         return train_learned_interface_representation(
             config, representation_candidate, seed, force=force
+        )
+    if str(spec["family"]) == "predictive_jepa":
+        return _train_predictive_representation(
+            config, candidate, spec, seed, force
         )
     artifact_dir = _artifact_dir(config, candidate, seed)
     checkpoint_path = artifact_dir / "representation.pt"

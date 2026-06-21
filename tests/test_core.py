@@ -14,6 +14,8 @@ from hcl_poc.incremental import (
 from hcl_poc.learned_interface import (
     _GoalConditionedLowPolicy,
     _HeldGoalDataset,
+    _PredictiveRepresentationDataset,
+    _variance_covariance_losses,
     _vae_kl,
 )
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
@@ -104,6 +106,25 @@ def test_goal_conditioning_variants_have_consistent_policy_outputs() -> None:
             conditioning=conditioning,
         )
         assert policy(condition[None]).shape == (1, 3)
+
+
+def test_predictive_dataset_and_regularizers() -> None:
+    frames = np.arange(12 * 4, dtype=np.float32).reshape(12, 4)
+    actions = np.arange(11 * 3, dtype=np.float32).reshape(11, 3)
+    dataset = _PredictiveRepresentationDataset(
+        [{"frames": frames, "actions": actions}],
+        horizons=[1, 2, 5, 10],
+        length=1,
+    )
+    sample = dataset[0]
+    assert sample["x_t"].shape == (4,)
+    assert sample["x_future"].shape == (4,)
+    assert sample["actions"].shape == (10, 3)
+    variance, covariance = _variance_covariance_losses(torch.randn(32, 8))
+    assert variance.ndim == 0
+    assert covariance.ndim == 0
+    assert variance >= 0
+    assert covariance >= 0
 
 
 def test_flow_shapes_and_sample() -> None:
