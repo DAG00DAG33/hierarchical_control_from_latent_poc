@@ -562,3 +562,18 @@ learned_interface:
       lambda_cov: 0.01
       batches_per_epoch: 200
       epochs: 40
+vae_scaling:
+  budgets: [50, 100, 200, 500, 1000, 1800]
+  training_seeds: [0, 1, 2]
+  deployable_eval_episodes: 500
+  oracle_eval_episodes: 50
+  eval_seed_start: 2200000
+  eval_num_envs: 64
+  flow_steps: 24
+  policy:
+    hidden_dim: 512
+    batch_size: 512
+    batches_per_epoch: 200
+    epochs: 60
+    validation_samples: 5000
+    lr: 0.0003

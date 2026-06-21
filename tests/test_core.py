@@ -23,6 +23,11 @@ from hcl_poc.learned_interface import (
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
+from hcl_poc.vae_scaling import (
+    _FlatDataset,
+    _deterministic_noise,
+    vae_scaling_config,
+)
 
 
 def test_horizon_seconds_to_steps() -> None:
@@ -156,6 +161,57 @@ def test_effect_dataset_uses_one_fixed_pair_for_held_goal() -> None:
         [sample["x_start"], sample["x_future"], torch.ones(1)]
     )[None]
     assert encoder(pair).shape == (1, 8)
+
+
+def test_vae_scaling_budget_config_is_isolated() -> None:
+    config = Config(
+        raw={
+            "paths": {
+                "incremental_artifact_dir": "artifacts/incremental",
+                "incremental_results_dir": "results/incremental",
+            },
+            "incremental": {
+                "phase4": {"train_episodes": 1800},
+                "phase6": {"train_episodes": 1800},
+            },
+            "learned_interface": {"evaluation": {"seed_start": 1}},
+            "vae_scaling": {"eval_seed_start": 2200000},
+        },
+        path="dummy.yaml",  # type: ignore[arg-type]
+    )
+    point = vae_scaling_config(config, 100)
+    assert point.get("incremental.phase4.train_episodes") == 100
+    assert point.get("incremental.phase6.train_episodes") == 100
+    assert point.get("learned_interface.evaluation.seed_start") == 2200000
+    assert str(point.get("paths.incremental_artifact_dir")).endswith(
+        "vae512_scaling/n100"
+    )
+    assert config.get("incremental.phase4.train_episodes") == 1800
+
+
+def test_vae_scaling_flow_noise_is_reproducible_and_seed_specific() -> None:
+    first = _deterministic_noise(0, [11, 12], 3, 8)
+    repeated = _deterministic_noise(0, [11, 12], 3, 8)
+    different_policy = _deterministic_noise(1, [11, 12], 3, 8)
+    different_decision = _deterministic_noise(0, [11, 12], 4, 8)
+    np.testing.assert_array_equal(first, repeated)
+    assert not np.array_equal(first, different_policy)
+    assert not np.array_equal(first, different_decision)
+
+
+def test_vae_scaling_flat_dataset_uses_previous_executed_action() -> None:
+    frames = np.arange(2 * 4, dtype=np.float32).reshape(2, 4)
+    actions = np.asarray([[0.2, 0.3, 0.4], [0.5, 0.6, 0.7]], dtype=np.float32)
+    dataset = _FlatDataset(
+        [{"frames": frames, "latents": frames, "actions": actions}],
+        "frames",
+        Standardizer.fit(frames),
+        Standardizer.fit(actions),
+        length=1,
+    )
+    condition, target = dataset[0]
+    assert condition.shape == (7,)
+    assert target.shape == (3,)
 
 
 def test_flow_shapes_and_sample() -> None:

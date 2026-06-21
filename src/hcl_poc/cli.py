@@ -110,6 +110,11 @@ from hcl_poc.train import (
     train_representation,
     train_state_bc_policy,
 )
+from hcl_poc.vae_scaling import (
+    evaluate_vae_scaling_point,
+    train_vae_scaling_point,
+    validate_nested_vae_scaling_manifests,
+)
 
 console = Console()
 
@@ -979,6 +984,24 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             eval_seed_start=args.eval_seed_start,
             force=args.force,
         )
+    elif args.incremental_command == "vae-scaling-manifests":
+        console.print(validate_nested_vae_scaling_manifests(config))
+    elif args.incremental_command == "vae-scaling-train":
+        train_vae_scaling_point(
+            config,
+            n_trajectories=args.n_trajectories,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command in {"vae-scaling-eval", "vae-scaling-run"}:
+        evaluate_vae_scaling_point(
+            config,
+            n_trajectories=args.n_trajectories,
+            seed=args.seed,
+            deployable_episodes=args.episodes,
+            oracle_episodes=args.oracle_episodes,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -1617,6 +1640,26 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "learned-interface-record":
             learned_interface.add_argument("--eval-seed-start", type=int)
         learned_interface.set_defaults(func=incremental_cmd)
+
+    vae_scaling_manifests = incremental_sub.add_parser(
+        "vae-scaling-manifests"
+    )
+    add_config_arg(vae_scaling_manifests)
+    vae_scaling_manifests.set_defaults(func=incremental_cmd)
+    for command in [
+        "vae-scaling-train",
+        "vae-scaling-eval",
+        "vae-scaling-run",
+    ]:
+        vae_scaling = incremental_sub.add_parser(command)
+        add_config_arg(vae_scaling)
+        vae_scaling.add_argument("--n-trajectories", type=int, required=True)
+        vae_scaling.add_argument("--seed", type=int, required=True)
+        vae_scaling.add_argument("--force", action="store_true")
+        if command != "vae-scaling-train":
+            vae_scaling.add_argument("--episodes", type=int)
+            vae_scaling.add_argument("--oracle-episodes", type=int)
+        vae_scaling.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)
