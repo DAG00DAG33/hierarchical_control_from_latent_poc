@@ -112,6 +112,8 @@ def _write_representation_metrics(path: Path, payload: dict[str, Any]) -> None:
                 "target_encoder",
                 "world_model",
                 "decoder",
+                "action_head",
+                "auxiliary_head",
                 "frame_norm",
                 "action_norm",
             }
@@ -1077,9 +1079,15 @@ def _train_effect_representation(
             total.backward()
             optimizer.step()
             batch_count = len(batch["x_start"])
-            sums["loss"] = sums.get("loss", 0.0) + float(total.cpu()) * batch_count
+            sums["loss"] = (
+                sums.get("loss", 0.0)
+                + float(total.detach().cpu()) * batch_count
+            )
             for key, value in metrics.items():
-                sums[key] = sums.get(key, 0.0) + float(value.cpu()) * batch_count
+                sums[key] = (
+                    sums.get(key, 0.0)
+                    + float(value.detach().cpu()) * batch_count
+                )
             count += batch_count
         encoder.eval()
         action_head.eval()
