@@ -163,3 +163,100 @@ success was:
 Selection is based on closed-loop success, not reconstruction or probe rank.
 The AE remains the deterministic control; `vae512_w2048_b1e6` is the selected
 learned representation.
+
+## 2026-06-21 - LI-06: VAE-512 goal-conditioning ablation
+
+All variants reuse the exact `vae512_w2048_b1e6` representation, normalized
+latent goals, high-level predictor, data split, and evaluation seeds. Only
+the low-level conditioning architecture is retrained.
+
+| conditioning | learned success | oracle success | oracle/predicted action MAE | induced action L2 |
+| --- | ---: | ---: | ---: | ---: |
+| absolute concat | 0.90 | 0.70 | 0.0382 / 0.0389 | 0.0159 |
+| latent delta | 0.60 | 0.60 | 0.0372 / 0.0377 | 0.0171 |
+| relation MLP | 0.70 | 0.70 | **0.0323 / 0.0325** | **0.0111** |
+| FiLM | 0.55 | 0.45 | 0.0403 / 0.0424 | 0.0537 |
+
+These are 20-episode screens; the absolute-concat row is its original screen
+for a matched comparison.
+
+- **Delta:** replaces the absolute future latent with normalized
+  `z_future-z_current`. It loses 30 points of learned success despite slightly
+  better offline action MAE.
+- **Relation MLP:** encodes `(z_current,z_future,time-to-go)` into a learned
+  512D relation before the action MLP. It gives the best offline action
+  diagnostics but remains below absolute concatenation in closed loop.
+- **FiLM:** modulates four hidden layers from the future latent, initialized
+  as identity modulation. It has the largest sensitivity to high-level
+  prediction error and the worst oracle result.
+- **Decision:** Retain absolute concatenation as the selected VAE interface.
+  Keep relation MLP as a secondary candidate because it matches `0.70` on
+  both goal sources and has materially better action diagnostics, but do not
+  promote delta or FiLM.
+
+## 2026-06-21 - LI-07: AE-256 goal-conditioning ablation
+
+As in LI-06, all variants reuse the exact AE representation and high-level
+predictor. Only the low-level conditioning architecture changes.
+
+| conditioning | learned success | oracle success | oracle/predicted action MAE | induced action L2 |
+| --- | ---: | ---: | ---: | ---: |
+| absolute concat | 0.55 | 0.65 | 0.0383 / 0.0390 | 0.0119 |
+| latent delta | 0.65 | 0.60 | 0.0370 / 0.0375 | 0.0130 |
+| relation MLP | 0.65 | 0.75 | **0.0321 / 0.0324** | **0.0084** |
+| FiLM | 0.70 | 0.75 | 0.0378 / 0.0400 | 0.0354 |
+
+The table uses 20-episode screens. FiLM was promoted because it had the
+highest learned success:
+
+- **FiLM 100-episode development:** learned `0.55` (Wilson
+  `[0.452,0.644]`), oracle `0.67` (`[0.573,0.754]`).
+- **Interpretation:** Relation and FiLM improve the AE's oracle interface on
+  the small screen, but the apparent learned FiLM gain disappears at adequate
+  sample size. Relation again has the best offline action metrics, which do
+  not translate directly into learned closed-loop ranking.
+- **Decision:** Do not replace the selected VAE absolute-concat controller.
+  AE-FiLM remains a useful negative control: a better oracle low-level
+  interface cannot compensate for its weaker learned deployment.
+
+## 2026-06-21 - LI-08: Denoising AE-256 sweep
+
+The encoder receives normalized DINO and proprioception corrupted by
+independent Gaussian noise and reconstructs the clean observation. All other
+representation, hierarchy, and evaluation settings match the AE control.
+
+| candidate | noise std | recon | inverse action MAE | screen learned | screen oracle |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dae256_n005` | 0.005 | 0.05151 | 0.01902 | 0.60 | 0.65 |
+| `dae256_n010` | 0.010 | 0.05072 | 0.01923 | 0.80 | 0.50 |
+
+The `noise=0.01` inversion triggered 100-episode development evaluation:
+
+- learned success `0.59` (Wilson `[0.492,0.681]`);
+- oracle success `0.52` (`[0.423,0.615]`);
+- final rewards `0.700` and `0.659`.
+
+**Decision:** Reject both 256D denoising candidates. Small input noise leaves
+the static probes and reconstruction essentially unchanged, and neither
+candidate improves on the selected VAE after adequate closed-loop sampling.
+
+## 2026-06-21 - LI-09: Denoising AE-512
+
+- **Candidate:** `dae512_w2048_n005`, 512D latent, width 2,048, normalized
+  input noise standard deviation `0.005`.
+- **Representation:** reconstruction `0.04468` (`0.04057` DINO, `0.00411`
+  proprio); all dimensions active. Object yaw probe is `0.0482 rad`, contact
+  AUROC `0.9917`, and inverse-action MAE `0.0227`.
+- **Offline control:** oracle/predicted action MAE `0.03821/0.03889`,
+  prediction-induced action L2 `0.01511`.
+- **20-episode closed loop:** learned success `0.60`; oracle success `0.75`.
+- **Decision:** Reject. The oracle low level is competitive, but learned
+  deployment is 12 points below the selected VAE and the oracle result does
+  not exceed the VAE's 100-episode `0.76`. Denoising alone does not provide a
+  better future-state interface.
+
+## 2026-06-21 - Batch 1C decision
+
+No denoising candidate is promoted. Across 256D and 512D models, modest input
+noise changes reconstruction and probes little, while closed-loop learned
+success remains unstable or inferior to `vae512_w2048_b1e6`.
