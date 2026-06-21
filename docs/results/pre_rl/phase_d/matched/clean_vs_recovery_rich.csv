@@ -1,0 +1,5 @@
+method,training_data,clean_success,disturbed_success,recovery_success,clean_final_reward,disturbed_final_reward
+flat,clean,0.48,0.44,0.31,0.46299435701221225,0.4107610166817903
+flat,mixed_25,0.45,0.44,0.36,0.4906328721903265,0.46777805116027593
+hierarchy,clean,0.45,0.43,0.41,0.600676694586873,0.5804773857071995
+hierarchy,mixed_25,0.35,0.36,0.34,0.5418547617457807,0.5395592360943556

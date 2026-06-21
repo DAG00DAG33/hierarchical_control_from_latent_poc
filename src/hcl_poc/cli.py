@@ -62,6 +62,9 @@ from hcl_poc.incremental import (
     evaluate_pre_rl_phase_f_privileged_tcp_hierarchy,
     train_pre_rl_phase_f_visual_tcp_hierarchy,
     evaluate_pre_rl_phase_f_visual_tcp_hierarchy,
+    create_pre_rl_phase_d_hierarchy_manifests,
+    train_pre_rl_phase_d_raw_tcp_hierarchy,
+    evaluate_pre_rl_phase_d_raw_tcp_hierarchy,
     train_phase1_bc,
     train_phase2_dagger_bc,
     train_phase3_flow,
@@ -836,6 +839,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             label_view=args.label_view,
             seed=args.seed,
             force=args.force,
+            matched_hierarchy_data=args.matched_hierarchy_data,
         )
     elif args.incremental_command == "pre-rl-d-eval-visual-bc":
         evaluate_pre_rl_phase_d_visual_bc(
@@ -845,6 +849,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             episodes=args.episodes,
             force=args.force,
+            matched_hierarchy_data=args.matched_hierarchy_data,
         )
     elif args.incremental_command == "pre-rl-e-geometry":
         analyze_pre_rl_phase_e_geometry(config)
@@ -876,6 +881,24 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             episodes=args.episodes,
             audit_branch=args.audit_branch,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-d-hierarchy-manifests":
+        create_pre_rl_phase_d_hierarchy_manifests(config, force=args.force)
+    elif args.incremental_command == "pre-rl-d-train-hierarchy":
+        train_pre_rl_phase_d_raw_tcp_hierarchy(
+            config,
+            variant=args.variant,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command == "pre-rl-d-eval-hierarchy":
+        evaluate_pre_rl_phase_d_raw_tcp_hierarchy(
+            config,
+            variant=args.variant,
+            disturbed=args.disturbed,
+            seed=args.seed,
+            episodes=args.episodes,
             force=args.force,
         )
     else:
@@ -1376,6 +1399,11 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_d_visual_bc.add_argument(
         "--label-view", choices=["query", "behavior"], default="query"
     )
+    pre_rl_d_visual_bc.add_argument(
+        "--matched-hierarchy-data",
+        action="store_true",
+        help="Use the exact 60k Phase D hierarchy manifest for a matched flat comparison.",
+    )
     pre_rl_d_visual_bc.add_argument("--seed", type=int, default=0)
     pre_rl_d_visual_bc.add_argument("--force", action="store_true")
     pre_rl_d_visual_bc.set_defaults(func=incremental_cmd)
@@ -1388,6 +1416,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pre_rl_d_eval_visual_bc.add_argument(
         "--label-view", choices=["query", "behavior"], default="query"
+    )
+    pre_rl_d_eval_visual_bc.add_argument(
+        "--matched-hierarchy-data",
+        action="store_true",
+        help="Use the exact 60k Phase D hierarchy manifest for a matched flat comparison.",
     )
     pre_rl_d_eval_visual_bc.add_argument("--seed", type=int, default=0)
     pre_rl_d_eval_visual_bc.add_argument("--episodes", type=int)
@@ -1428,6 +1461,34 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_f_visual_eval.add_argument("--episodes", type=int)
     pre_rl_f_visual_eval.add_argument("--force", action="store_true")
     pre_rl_f_visual_eval.set_defaults(func=incremental_cmd)
+    pre_rl_d_hierarchy_manifests = incremental_sub.add_parser(
+        "pre-rl-d-hierarchy-manifests"
+    )
+    add_config_arg(pre_rl_d_hierarchy_manifests)
+    pre_rl_d_hierarchy_manifests.add_argument("--force", action="store_true")
+    pre_rl_d_hierarchy_manifests.set_defaults(func=incremental_cmd)
+    pre_rl_d_train_hierarchy = incremental_sub.add_parser(
+        "pre-rl-d-train-hierarchy"
+    )
+    add_config_arg(pre_rl_d_train_hierarchy)
+    pre_rl_d_train_hierarchy.add_argument(
+        "--variant", choices=["clean", "mixed_25"], required=True
+    )
+    pre_rl_d_train_hierarchy.add_argument("--seed", type=int, default=0)
+    pre_rl_d_train_hierarchy.add_argument("--force", action="store_true")
+    pre_rl_d_train_hierarchy.set_defaults(func=incremental_cmd)
+    pre_rl_d_eval_hierarchy = incremental_sub.add_parser(
+        "pre-rl-d-eval-hierarchy"
+    )
+    add_config_arg(pre_rl_d_eval_hierarchy)
+    pre_rl_d_eval_hierarchy.add_argument(
+        "--variant", choices=["clean", "mixed_25"], required=True
+    )
+    pre_rl_d_eval_hierarchy.add_argument("--disturbed", action="store_true")
+    pre_rl_d_eval_hierarchy.add_argument("--seed", type=int, default=0)
+    pre_rl_d_eval_hierarchy.add_argument("--episodes", type=int)
+    pre_rl_d_eval_hierarchy.add_argument("--force", action="store_true")
+    pre_rl_d_eval_hierarchy.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)

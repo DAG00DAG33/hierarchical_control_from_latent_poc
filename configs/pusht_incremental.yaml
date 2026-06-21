@@ -301,6 +301,9 @@ pre_rl:
     transition_budget: 80000
     recovery_train_episodes: 800
     manifest_seed: 1810000
+    hierarchy_transition_budget: 60000
+    hierarchy_mixed_25_recovery_transitions: 15000
+    hierarchy_manifest_seed: 1815000
     visual_bc_epochs: 100
     visual_bc_batch_size: 512
     visual_bc_lr: 0.0003

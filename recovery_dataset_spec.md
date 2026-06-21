@@ -118,3 +118,47 @@ Report clean success, disturbed success, recovery success/time, nominal reward
 loss, and the flat-to-hierarchy and oracle-to-learned gaps. Development uses
 100 episodes or fewer; larger budgets are reserved for the final selected
 comparison.
+
+## Matched Hierarchy Manifests
+
+The factorized hierarchy requires uninterrupted future windows. A second
+manifest therefore applies the same causal semantics while requiring every
+recovery sample to remain inside `recovery_active` from the current step
+through the 10-step future TCP endpoint.
+
+- Path: `data/incremental/pre_rl_phase_d_hierarchy_manifests.h5`
+- SHA-256: `cbf65f61c7e7dd6d33d6cb7ca0a584108d8cb183e4a2259ade116d75036243d9`
+- Sampling seed: 1,815,000
+- Horizon: 10 control steps (0.50 s)
+- Training budget: 60,000 current-state queries per variant
+- Validation: 6,969 clean and 8,149 coherent recovery queries
+
+| Variant | Clean queries | Coherent recovery queries | Total |
+| --- | ---: | ---: | ---: |
+| `clean` | 60,000 | 0 | 60,000 |
+| `mixed_25` | 45,000 | 15,000 | 60,000 |
+
+Both the direct flat policy and factorized hierarchy use these exact
+`(episode_index, timestep)` references. On recovery samples, the previous
+action is the causally executed action, the supervised action is the
+deterministic teacher query at the same state, and the hierarchy's future TCP
+goal comes from the same uninterrupted teacher recovery trajectory.
+
+## Matched Development Result
+
+All entries below use one policy seed and 100 fixed evaluation episodes. The
+disturbed schedule is generated once for all episodes, independent of vector
+batch size.
+
+| Method | Training data | Clean success | Disturbed success | Recovery success |
+| --- | --- | ---: | ---: | ---: |
+| Flat visual BC | clean | 0.48 | 0.44 | 0.31 |
+| Flat visual BC | mixed-25 | 0.45 | 0.44 | 0.36 |
+| Factorized TCP hierarchy | clean | 0.45 | 0.43 | 0.41 |
+| Factorized TCP hierarchy | mixed-25 | 0.35 | 0.36 | 0.34 |
+
+Recovery data improves the flat policy's recovery rate by five percentage
+points without improving disturbed success, while it degrades the hierarchy
+on all three closed-loop metrics. Better mixed-hierarchy offline errors
+(`0.0341 m` endpoint L2 versus `0.0407 m`) therefore do not predict better
+closed-loop behavior. Clean data remains the selected training distribution.

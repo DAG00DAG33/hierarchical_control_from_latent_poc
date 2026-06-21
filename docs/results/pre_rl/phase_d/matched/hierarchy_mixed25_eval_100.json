@@ -1,0 +1,67 @@
+{
+  "checkpoint": "artifacts/incremental/pre_rl/phase_d/raw_tcp_hierarchy/mixed_25/seed0/hierarchy.pt",
+  "closed_loop": {
+    "action_saturation_rate": 0.058140955172834984,
+    "audit_branch": false,
+    "branch_generation_latency_per_active_env_s": null,
+    "disturbed": false,
+    "episodes": 100,
+    "final_reward": 0.5418547617457807,
+    "goal_source": "learned",
+    "high_level_decisions_per_episode": 8.37,
+    "hold_endpoint_error_m": 0.02623964811335814,
+    "max_reward": 0.550910512804985,
+    "mean_recovery_steps_when_recovered": null,
+    "on_policy_endpoint_prediction_error_m": null,
+    "policy_latency_per_active_env_s": 3.0505151703322268e-05,
+    "recovery_success": null,
+    "replay_current_state_error_max": null,
+    "seed_start": 1820000,
+    "success": 0.35,
+    "success_wilson_95": [
+      0.26364248243097527,
+      0.44745556703112027
+    ],
+    "teacher_action_mae": 0.08614076789655457
+  },
+  "data": {
+    "clean_source": "data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5",
+    "clean_transitions": 45000,
+    "encoder_checkpoint": null,
+    "frame_normalizer_checkpoint": "artifacts/incremental/phase6/ae_recon_z256/seed0/encoder.pt",
+    "manifest": "data/incremental/pre_rl_phase_d_hierarchy_manifests.h5",
+    "recovery_source": "data/incremental/pre_rl_phase_d_recovery_dino_1000.h5",
+    "recovery_transitions": 15000,
+    "representation": "raw",
+    "representation_dim": 6549,
+    "total_transitions": 60000,
+    "validation_clean_transitions": 6969,
+    "validation_recovery_transitions": 8149,
+    "variant": "mixed_25"
+  },
+  "evaluation_distribution": "clean",
+  "metadata": {
+    "config": "configs/pusht_incremental.yaml",
+    "control_freq": 20,
+    "controller": "pd_ee_delta_pos",
+    "cuda_available": true,
+    "device": "cuda",
+    "environment": "PushT-v1",
+    "git_commit": "57d6ef5340b8e862ecb5b8c1c00149134857bc2f",
+    "git_dirty": true,
+    "gymnasium_version": "1.3.0",
+    "mani_skill_version": "3.0.1",
+    "torch_version": "2.12.0+cu130"
+  },
+  "method": "recovery_dataset_factorized_raw_tcp_hierarchy",
+  "offline_validation": {
+    "high_tcp_endpoint_l2_m": 0.03411213681101799,
+    "high_tcp_endpoint_median_l2_m": 0.01643873006105423,
+    "low_oracle_action_mae": 0.06530909985303879,
+    "low_predicted_action_mae": 0.06570550054311752,
+    "prediction_induced_action_l2": 0.0037708175368607044,
+    "samples": 5000
+  },
+  "phase": "D6-D7-F-G",
+  "training_variant": "mixed_25"
+}

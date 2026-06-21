@@ -432,3 +432,42 @@ State-query data is always reported separately from causal transitions.
   prediction for this selected interface. The principal residual is the
   visual low-level policy relative to the privileged low-level ceiling and
   direct flat variability, not an oracle-to-learned high-level gap.
+
+## 2026-06-21 - D-D02: Exact matched flat/hierarchy recovery comparison
+
+- **Fairness correction:** The first direct BC recovery sweep used 80,000
+  one-step samples, while the hierarchy requires valid 10-step future windows.
+  A dedicated manifest now gives both methods the exact same 60,000 current
+  state queries. Clean uses 60,000 clean queries; mixed-25 uses 45,000 clean
+  and 15,000 coherent recovery queries. Validation uses 6,969 clean and 8,149
+  recovery queries.
+- **Causal semantics:** Recovery current state, previous executed action,
+  teacher-query target action, and future TCP endpoint all come from one
+  uninterrupted recovery trajectory. The disturbed evaluation schedule is
+  precomputed globally, so it does not depend on vector batch size.
+- **Training:** Flat policies are width-512 three-hidden-layer MLPs trained for
+  100 epochs. Hierarchies use separate width-512, depth-4 high/low MLPs,
+  `k=10`, `U=10`, `H=1`, 60 epochs, 200 batches/epoch, batch size 512, and
+  learning rate `3e-4`. All methods use raw spatial DINO plus proprioception.
+- **Closed loop:**
+
+| method | data | clean success | disturbed success | recovery success |
+| --- | --- | ---: | ---: | ---: |
+| flat | clean | `0.48` | `0.44` | `0.31` |
+| flat | mixed-25 | `0.45` | `0.44` | `0.36` |
+| hierarchy | clean | `0.45` | `0.43` | `0.41` |
+| hierarchy | mixed-25 | `0.35` | `0.36` | `0.34` |
+
+- **Offline/closed-loop mismatch:** Mixed hierarchy endpoint L2 improves from
+  `0.0407 m` to `0.0341 m`, and predicted-goal action MAE improves from
+  `0.0798` to `0.0657`, yet clean success falls 10 points and disturbed
+  success falls 7 points.
+- **Gate decision:** The clean hierarchy passes the matched-interface
+  tolerance: it is within 0.03 clean success and 0.01 disturbed success of
+  the clean flat policy. Recovery-rich data does not pass the improvement
+  gate. Select the clean 1,800-trajectory corpus for the final interface and
+  treat recovery-data expansion as an RL/on-policy collection question rather
+  than a supervised pretraining improvement.
+- **Artifacts:** `docs/results/pre_rl/phase_d/matched/` contains all six result
+  JSON files, `clean_vs_recovery_rich.csv`, and
+  `clean_vs_recovery_rich.png`.
