@@ -471,3 +471,58 @@ State-query data is always reported separately from causal transitions.
 - **Artifacts:** `docs/results/pre_rl/phase_d/matched/` contains all six result
   JSON files, `clean_vs_recovery_rich.csv`, and
   `clean_vs_recovery_rich.png`.
+
+## 2026-06-21 - G-G02: Predictor distribution and action-sensitivity audit
+
+- **Command:** `uv run hcl-poc incremental pre-rl-g-tcp-diagnostics --config
+  configs/pusht_incremental.yaml`
+- **Protocol:** The selected raw-DINO TCP predictor was evaluated on 5,000
+  held-out teacher queries, 5,000 coherent recovery queries, 126 high-level
+  decisions from 20 flat-policy rollouts, and 140 decisions from 20 hierarchy
+  rollouts. Online goals use exact replay teacher branches from the current
+  student state.
+- **Metrics:**
+
+| distribution | endpoint L2 | induced low action L2 | Spearman |
+| --- | ---: | ---: | ---: |
+| held-out teacher | `0.0175 m` | `0.0016` | `0.710` |
+| coherent recovery | `0.0611 m` | `0.0080` | `0.871` |
+| flat visited | `0.0348 m` | `0.0045` | `0.743` |
+| hierarchy visited | `0.0372 m` | `0.0047` | `0.795` |
+
+- **Diagnosis:** Prediction error increases off the teacher distribution and
+  is largest on recovery states. The action-sensitive error remains small on
+  hierarchy states, consistent with learned and branch-oracle success both
+  being `0.71`. The high-level predictor is not the current closed-loop
+  bottleneck.
+- **Artifacts:** `docs/results/pre_rl/phase_g/` contains the complete JSON,
+  summary CSV, and endpoint-error versus induced-action plot.
+
+## 2026-06-21 - H-I01: Multimodality and camera decision
+
+- **Phase H decision:** Skip generative high-level experiments. The
+  deterministic raw TCP predictor reaches exactly the same 100-episode success
+  as the reachable branch oracle (`0.71`), leaving no measured oracle gap for
+  multimodal candidate generation to close. The deterministic teacher corpus
+  also provides one continuation per state rather than evidence of distinct
+  valid modes.
+- **Phase I decision:** Skip base-plus-wrist-camera retraining. Base-camera
+  spatial DINO plus proprioception already passes the learned/oracle gate.
+  Hierarchy-state endpoint error is `0.0372 m`, and exact goals do not improve
+  success, so perception is not the demonstrated bottleneck.
+- **Next action:** Begin RL only as a frozen-policy residual recovery study,
+  as specified in `pre_rl_summary.md`.
+
+## 2026-06-21 - F-G03: Representative learned/oracle videos
+
+- **Learned videos:** Seeds 1,930,000-1,930,009 produced seven successes and
+  three failures. Files include success and final/max reward in their names.
+- **Paired oracle diagnostic:** Exact branch-oracle videos were recorded for
+  learned failures 1,930,006, 1,930,007, and 1,930,009. The oracle also fails
+  on the first two and succeeds on 1,930,009.
+- **Interpretation:** Some failures are endpoint-prediction dependent, but
+  others persist under exact reachable goals. This is consistent with equal
+  aggregate learned/oracle success and supports low-level residual recovery RL
+  rather than high-level-only RL.
+- **Path:**
+  `results/incremental/pre_rl/phase_f/raw_tcp/seed0/videos/`.

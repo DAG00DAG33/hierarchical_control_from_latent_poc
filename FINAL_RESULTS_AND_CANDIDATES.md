@@ -1,5 +1,10 @@
 # Final Push-T Results and Candidate Specifications
 
+> This document describes the earlier Phase 12 future-AE-latent comparison.
+> It is retained as a complete negative-result record. The later factorized
+> TCP-waypoint result and current RL recommendation are in
+> [`pre_rl_summary.md`](pre_rl_summary.md).
+
 ## 1. Scope
 
 This document specifies the five candidates in the final Phase 12

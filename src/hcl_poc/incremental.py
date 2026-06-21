@@ -11346,6 +11346,7 @@ def _pre_rl_factorized_validation_metrics(
     seed: int,
     max_samples: int,
     sample_references: np.ndarray | None = None,
+    include_samples: bool = False,
 ) -> dict[str, Any]:
     device = next(high_model.parameters()).device
     rng = np.random.default_rng(seed)
@@ -11428,22 +11429,40 @@ def _pre_rl_factorized_validation_metrics(
     target_actions = np.asarray(action_targets, dtype=np.float32)
     oracle_actions = low_actions(oracle_rows)
     predicted_actions = low_actions(predicted_rows)
-    return {
+    endpoint_errors = np.linalg.norm(
+        predicted_endpoints_np - high_targets_np, axis=-1
+    )
+    induced_action_errors = np.linalg.norm(
+        predicted_actions - oracle_actions, axis=-1
+    )
+    metrics = {
         "high_tcp_endpoint_l2_m": float(
-            np.mean(np.linalg.norm(predicted_endpoints_np - high_targets_np, axis=-1))
+            np.mean(endpoint_errors)
         ),
         "high_tcp_endpoint_median_l2_m": float(
-            np.median(np.linalg.norm(predicted_endpoints_np - high_targets_np, axis=-1))
+            np.median(endpoint_errors)
         ),
         "low_oracle_action_mae": float(np.mean(np.abs(oracle_actions - target_actions))),
         "low_predicted_action_mae": float(
             np.mean(np.abs(predicted_actions - target_actions))
         ),
         "prediction_induced_action_l2": float(
-            np.mean(np.linalg.norm(predicted_actions - oracle_actions, axis=-1))
+            np.mean(induced_action_errors)
+        ),
+        "endpoint_induced_action_pearson": float(
+            np.corrcoef(endpoint_errors, induced_action_errors)[0, 1]
+        ),
+        "endpoint_induced_action_spearman": _pre_rl_rank_correlation(
+            endpoint_errors, induced_action_errors
         ),
         "samples": max_samples,
     }
+    if include_samples:
+        metrics["endpoint_errors_m"] = endpoint_errors.astype(float).tolist()
+        metrics["induced_action_l2_values"] = (
+            induced_action_errors.astype(float).tolist()
+        )
+    return metrics
 
 
 def train_pre_rl_phase_f_visual_tcp_hierarchy(
@@ -11908,6 +11927,38 @@ def _pre_rl_make_raw_visual_env(config: Config, num_envs: int):
 
 
 @torch.inference_mode()
+def _pre_rl_tcp_low_actions(
+    low_model: nn.Module,
+    representation: np.ndarray,
+    previous_action: np.ndarray,
+    current_tcp: np.ndarray,
+    endpoint: np.ndarray,
+    remaining_steps: np.ndarray,
+    horizon_steps: int,
+    control_freq: int,
+    goal_norm: Standardizer,
+    action_norm: Standardizer,
+) -> np.ndarray:
+    device = next(low_model.parameters()).device
+    velocity = (endpoint - current_tcp) / (
+        remaining_steps[:, None] / float(control_freq)
+    )
+    goal = goal_norm.transform(np.concatenate([endpoint, velocity], axis=-1))
+    condition = np.concatenate(
+        [
+            representation,
+            goal,
+            previous_action,
+            (remaining_steps / horizon_steps)[:, None],
+        ],
+        axis=-1,
+    )
+    return action_norm.inverse(
+        low_model(torch.from_numpy(condition).to(device).float()).cpu().numpy()
+    )
+
+
+@torch.inference_mode()
 def _evaluate_pre_rl_phase_f_visual_tcp_mode(
     config: Config,
     checkpoint: dict[str, Any],
@@ -11947,6 +11998,7 @@ def _evaluate_pre_rl_phase_f_visual_tcp_mode(
     teacher_action_maes: list[float] = []
     action_saturation: list[float] = []
     endpoint_prediction_errors: list[float] = []
+    endpoint_induced_action_errors: list[float] = []
     hold_endpoint_errors: list[float] = []
     replay_errors: list[float] = []
     branch_latencies: list[float] = []
@@ -12095,6 +12147,41 @@ def _evaluate_pre_rl_phase_f_visual_tcp_mode(
                             np.linalg.norm(
                                 predicted_endpoint[replan]
                                 - oracle_endpoint[replan],
+                                axis=-1,
+                            ).tolist()
+                        )
+                        audit_remaining = np.full(
+                            num_envs, horizon_steps, dtype=np.float32
+                        )
+
+                        predicted_goal_action = _pre_rl_tcp_low_actions(
+                            low_model,
+                            representation,
+                            previous_action,
+                            state[:, 14:17],
+                            predicted_endpoint,
+                            audit_remaining,
+                            horizon_steps,
+                            int(config.get("control_freq", 20)),
+                            goal_norm,
+                            action_norm,
+                        )
+                        oracle_goal_action = _pre_rl_tcp_low_actions(
+                            low_model,
+                            representation,
+                            previous_action,
+                            state[:, 14:17],
+                            oracle_endpoint,
+                            audit_remaining,
+                            horizon_steps,
+                            int(config.get("control_freq", 20)),
+                            goal_norm,
+                            action_norm,
+                        )
+                        endpoint_induced_action_errors.extend(
+                            np.linalg.norm(
+                                predicted_goal_action[replan]
+                                - oracle_goal_action[replan],
                                 axis=-1,
                             ).tolist()
                         )
@@ -12257,7 +12344,7 @@ def _evaluate_pre_rl_phase_f_visual_tcp_mode(
                 branch_env.close()
     progress.close()
     success = float(np.mean(successes))
-    return {
+    metrics = {
         "episodes": episodes,
         "seed_start": seed_start,
         "goal_source": goal_source,
@@ -12276,6 +12363,29 @@ def _evaluate_pre_rl_phase_f_visual_tcp_mode(
             if endpoint_prediction_errors
             else None
         ),
+        "on_policy_prediction_induced_action_l2": (
+            float(np.mean(endpoint_induced_action_errors))
+            if endpoint_induced_action_errors
+            else None
+        ),
+        "endpoint_induced_action_pearson": (
+            float(
+                np.corrcoef(
+                    endpoint_prediction_errors,
+                    endpoint_induced_action_errors,
+                )[0, 1]
+            )
+            if endpoint_prediction_errors
+            else None
+        ),
+        "endpoint_induced_action_spearman": (
+            _pre_rl_rank_correlation(
+                np.asarray(endpoint_prediction_errors),
+                np.asarray(endpoint_induced_action_errors),
+            )
+            if endpoint_prediction_errors
+            else None
+        ),
         "replay_current_state_error_max": (
             float(np.max(replay_errors)) if replay_errors else None
         ),
@@ -12290,6 +12400,10 @@ def _evaluate_pre_rl_phase_f_visual_tcp_mode(
             float(np.mean(recovery_times)) if recovery_times else None
         ),
     }
+    if audit_branch:
+        metrics["endpoint_errors_m"] = endpoint_prediction_errors
+        metrics["induced_action_l2_values"] = endpoint_induced_action_errors
+    return metrics
 
 
 def evaluate_pre_rl_phase_f_visual_tcp_hierarchy(
@@ -12359,6 +12473,245 @@ def evaluate_pre_rl_phase_f_visual_tcp_hierarchy(
     return output_path
 
 
+@torch.inference_mode()
+def record_pre_rl_phase_f_visual_tcp_videos(
+    config: Config,
+    representation: str,
+    goal_source: str,
+    seed: int = 0,
+    episodes: int = 10,
+    eval_seed_start: int | None = None,
+    force: bool = False,
+) -> list[Path]:
+    import imageio.v2 as imageio
+
+    if goal_source not in {"learned", "oracle"}:
+        raise ValueError(f"Unknown visual TCP goal source: {goal_source}")
+    checkpoint_path = train_pre_rl_phase_f_visual_tcp_hierarchy(
+        config,
+        representation=representation,
+        seed=seed,
+        force=False,
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    device = default_device()
+    (
+        high_model,
+        low_model,
+        encoder,
+        frame_norm,
+        representation_norm,
+        action_norm,
+        endpoint_norm,
+        goal_norm,
+    ) = _pre_rl_phase_f_visual_models(checkpoint, device)
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    horizon_steps = int(checkpoint["horizon_steps"])
+    update_period = int(checkpoint["update_period"])
+    control_freq = int(config.get("control_freq", 20))
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    seed_start = int(
+        eval_seed_start
+        if eval_seed_start is not None
+        else config.get("pre_rl.phase_f.visual_eval_seed_start", 1_930_000)
+    )
+    output_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "pre_rl"
+        / "phase_f"
+        / f"{representation}_tcp"
+        / f"seed{seed}"
+        / "videos"
+        / goal_source
+    )
+    paths: list[Path] = []
+
+    def render_frame(env: gym.Env) -> np.ndarray:
+        frame = _numpy(env.render())
+        if frame.ndim == 4:
+            frame = frame[0]
+        return frame.astype(np.uint8)
+
+    for episode_index in trange(
+        episodes,
+        desc=f"record Phase F {representation} {goal_source}",
+    ):
+        rollout_seed = seed_start + episode_index
+        existing = sorted(output_dir.glob(f"seed{rollout_seed}_*.mp4"))
+        if existing and not force:
+            paths.append(existing[0])
+            continue
+        student_env = gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode="rgb_array",
+            sim_backend=_rl_backend(config),
+            num_envs=1,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+        branch_env = (
+            gym.make(
+                config.get("env_id"),
+                obs_mode="state",
+                control_mode=config.get("control_mode"),
+                reward_mode="normalized_dense",
+                render_mode=None,
+                sim_backend=_rl_backend(config),
+                num_envs=1,
+                reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+            )
+            if goal_source == "oracle"
+            else None
+        )
+        action_low_np = np.asarray(student_env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student_env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device)
+        action_high = torch.as_tensor(action_high_np, device=device)
+        previous_action = action_norm.transform(
+            np.zeros((1, 3), dtype=np.float32)
+        )
+        endpoint = np.zeros((1, 3), dtype=np.float32)
+        countdown = 0
+        history: list[torch.Tensor] = []
+        frames: list[np.ndarray] = []
+        success = False
+        final_reward = 0.0
+        max_reward = -float("inf")
+        try:
+            obs, _info = student_env.reset(seed=[rollout_seed])
+            frames.append(render_frame(student_env))
+            for _step in range(max_steps):
+                frame = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                if checkpoint["representation"] == "raw":
+                    representation_value = representation_norm.transform(frame)
+                else:
+                    if encoder is None:
+                        raise RuntimeError("AE representation is missing its encoder")
+                    latent = (
+                        encoder(
+                            torch.from_numpy(frame_norm.transform(frame))
+                            .to(device)
+                            .float()
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                    representation_value = representation_norm.transform(latent)
+                state = (
+                    _phase7_obs_state_tensor(obs, device)
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+                if countdown <= 0:
+                    predicted_endpoint = endpoint_norm.inverse(
+                        high_model(
+                            torch.from_numpy(
+                                np.concatenate(
+                                    [representation_value, previous_action],
+                                    axis=-1,
+                                )
+                            )
+                            .to(device)
+                            .float()
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                    if branch_env is not None:
+                        branch_obs, _branch_info = branch_env.reset(
+                            seed=[rollout_seed]
+                        )
+                        for action_history in history:
+                            branch_obs, _reward, _terminated, _truncated, _info = (
+                                branch_env.step(action_history)
+                            )
+                        for _ in range(horizon_steps):
+                            branch_state = _phase7_obs_state_tensor(
+                                branch_obs, device
+                            )
+                            branch_action = torch.clamp(
+                                teacher.actor_mean(branch_state),
+                                action_low,
+                                action_high,
+                            )
+                            branch_obs, _reward, _terminated, _truncated, _info = (
+                                branch_env.step(branch_action)
+                            )
+                        endpoint = (
+                            _phase7_obs_state_tensor(branch_obs, device)
+                            .cpu()
+                            .numpy()[:, 14:17]
+                            .astype(np.float32)
+                        )
+                    else:
+                        endpoint = predicted_endpoint
+                    countdown = update_period
+                remaining = np.asarray(
+                    [max(countdown, 1)], dtype=np.float32
+                )
+                raw_action = _pre_rl_tcp_low_actions(
+                    low_model,
+                    representation_value,
+                    previous_action,
+                    state[:, 14:17],
+                    endpoint,
+                    remaining,
+                    horizon_steps,
+                    control_freq,
+                    goal_norm,
+                    action_norm,
+                )
+                action = torch.clamp(
+                    torch.from_numpy(raw_action).to(device).float(),
+                    action_low,
+                    action_high,
+                )
+                obs, reward, terminated, truncated, info = student_env.step(action)
+                history.append(action.detach().clone())
+                previous_action = action_norm.transform(
+                    action.cpu().numpy().astype(np.float32)
+                )
+                countdown -= 1
+                frames.append(render_frame(student_env))
+                final_reward = float(_numpy(reward).reshape(-1)[0])
+                max_reward = max(max_reward, final_reward)
+                if "success" in info:
+                    success = success or bool(
+                        _numpy(info["success"]).reshape(-1)[0]
+                    )
+                if bool(
+                    _numpy(torch.logical_or(terminated, truncated)).reshape(-1)[0]
+                ):
+                    break
+        finally:
+            student_env.close()
+            if branch_env is not None:
+                branch_env.close()
+        path = output_dir / (
+            f"seed{rollout_seed}_success{int(success)}_"
+            f"final{final_reward:.3f}_max{max_reward:.3f}.mp4"
+        )
+        imageio.mimsave(
+            path,
+            frames,
+            fps=control_freq,
+            macro_block_size=1,
+        )
+        paths.append(path)
+    for path in paths:
+        console.print(f"Wrote {path}")
+    return paths
+
+
 def evaluate_pre_rl_phase_d_raw_tcp_hierarchy(
     config: Config,
     variant: str,
@@ -12411,6 +12764,464 @@ def evaluate_pre_rl_phase_d_raw_tcp_hierarchy(
     }
     write_json(output_path, payload)
     console.print(payload)
+    return output_path
+
+
+def _pre_rl_phase_g_validation_episodes(
+    config: Config,
+    split: str,
+    horizon_steps: int,
+) -> tuple[list[dict[str, np.ndarray]], np.ndarray]:
+    if split not in {"teacher", "recovery"}:
+        raise ValueError(f"Unknown Phase G validation split: {split}")
+    episodes: list[dict[str, np.ndarray]] = []
+    references: list[tuple[int, int]] = []
+    if split == "teacher":
+        path = _phase4_prepared_path(config)
+        with h5py.File(path, "r") as h5:
+            keys = sorted(key for key in h5 if key.startswith("episode_"))
+            keys = keys[-int(config.get("incremental.phase4.validation_episodes", 200)) :]
+            for key in keys:
+                group = h5[key]
+                dino = np.asarray(group["dino"], dtype=np.float32)
+                proprio = np.asarray(group["proprio"], dtype=np.float32)
+                actions = np.asarray(group["actions"], dtype=np.float32)
+                local_index = len(episodes)
+                episodes.append(
+                    {
+                        "representations": np.concatenate([dino, proprio], axis=-1),
+                        "tcp_positions": proprio[:, -7:-4],
+                        "actions": actions,
+                        "previous_actions": actions,
+                    }
+                )
+                references.extend(
+                    (local_index, t)
+                    for t in range(max(0, len(actions) - horizon_steps))
+                )
+        return episodes, np.asarray(references, dtype=np.int32)
+
+    manifest_path = create_pre_rl_phase_d_hierarchy_manifests(config, force=False)
+    with h5py.File(manifest_path, "r") as manifest:
+        recovery_path = Path(str(manifest["meta"].attrs["recovery_source"]))
+        rows = np.asarray(
+            manifest["validation"]["recovery_episode_timestep"], dtype=np.int32
+        )
+    with h5py.File(recovery_path, "r") as h5:
+        for episode_index in np.unique(rows[:, 0]):
+            group = h5[f"episode_{int(episode_index):05d}"]
+            dino = np.asarray(group["dino"], dtype=np.float32)
+            proprio = np.asarray(group["proprioception"], dtype=np.float32)
+            local_index = len(episodes)
+            episodes.append(
+                {
+                    "representations": np.concatenate([dino, proprio], axis=-1),
+                    "tcp_positions": proprio[:, -7:-4],
+                    "actions": np.asarray(group["teacher_actions"], dtype=np.float32),
+                    "previous_actions": np.asarray(
+                        group["executed_actions"], dtype=np.float32
+                    ),
+                }
+            )
+            references.extend(
+                (local_index, int(t))
+                for t in rows[rows[:, 0] == episode_index, 1]
+            )
+    return episodes, np.asarray(references, dtype=np.int32)
+
+
+@torch.inference_mode()
+def _pre_rl_phase_g_flat_visited_audit(
+    config: Config,
+    hierarchy_checkpoint: dict[str, Any],
+    episodes: int,
+    seed_start: int,
+) -> dict[str, Any]:
+    device = default_device()
+    (
+        high_model,
+        low_model,
+        _encoder,
+        _hierarchy_frame_norm,
+        representation_norm,
+        hierarchy_action_norm,
+        endpoint_norm,
+        goal_norm,
+    ) = _pre_rl_phase_f_visual_models(hierarchy_checkpoint, device)
+    phase_a_config = _pre_rl_phase_a_config(config)
+    flat_path = (
+        phase_a_config.path_value("paths.incremental_artifact_dir")
+        / "phase4"
+        / "concat_h1"
+        / "seed0"
+        / "visual_bc.pt"
+    )
+    flat_model, flat_checkpoint = _load_phase4_visual_bc(flat_path, device)
+    flat_frame_norm = Standardizer.from_state_dict(flat_checkpoint["frame_norm"])
+    flat_action_norm = Standardizer.from_state_dict(flat_checkpoint["action_norm"])
+    dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    horizon_steps = int(hierarchy_checkpoint["horizon_steps"])
+    update_period = int(hierarchy_checkpoint["update_period"])
+    control_freq = int(config.get("control_freq", 20))
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    max_num_envs = min(
+        int(config.get("pre_rl.phase_f.oracle_eval_num_envs", 16)), episodes
+    )
+    endpoint_errors: list[float] = []
+    induced_action_errors: list[float] = []
+    replay_errors: list[float] = []
+    successes: list[float] = []
+    progress = trange(episodes, desc="Phase G flat-policy predictor audit")
+    for batch_start in range(0, episodes, max_num_envs):
+        num_envs = min(max_num_envs, episodes - batch_start)
+        reset_seeds = [seed_start + batch_start + index for index in range(num_envs)]
+        student_env = _pre_rl_make_raw_visual_env(config, num_envs)
+        branch_env = gym.make(
+            config.get("env_id"),
+            obs_mode="state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode=None,
+            sim_backend=_rl_backend(config),
+            num_envs=num_envs,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+        action_low_np = np.asarray(student_env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(student_env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device)
+        action_high = torch.as_tensor(action_high_np, device=device)
+        previous_executed = np.zeros((num_envs, 3), dtype=np.float32)
+        hierarchy_previous = hierarchy_action_norm.transform(previous_executed)
+        active = np.ones(num_envs, dtype=bool)
+        success_once = np.zeros(num_envs, dtype=bool)
+        history: list[torch.Tensor] = []
+        try:
+            obs, _info = student_env.reset(seed=reset_seeds)
+            for step in range(max_steps):
+                if not np.any(active):
+                    break
+                frame = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                state = (
+                    _phase7_obs_state_tensor(obs, device)
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+                representation = representation_norm.transform(frame)
+                if step % update_period == 0:
+                    predicted_endpoint = endpoint_norm.inverse(
+                        high_model(
+                            torch.from_numpy(
+                                np.concatenate(
+                                    [representation, hierarchy_previous], axis=-1
+                                )
+                            )
+                            .to(device)
+                            .float()
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                    branch_obs, _branch_info = branch_env.reset(seed=reset_seeds)
+                    for action_history in history:
+                        branch_obs, _reward, _terminated, _truncated, _info = (
+                            branch_env.step(action_history)
+                        )
+                    state_error = torch.max(
+                        torch.abs(
+                            student_env.unwrapped.get_state()
+                            - branch_env.unwrapped.get_state()
+                        ),
+                        dim=1,
+                    ).values
+                    replay_errors.extend(
+                        state_error.cpu().numpy()[active].astype(float).tolist()
+                    )
+                    for _ in range(horizon_steps):
+                        branch_state = _phase7_obs_state_tensor(branch_obs, device)
+                        branch_action = torch.clamp(
+                            teacher.actor_mean(branch_state), action_low, action_high
+                        )
+                        branch_obs, _reward, _terminated, _truncated, _info = (
+                            branch_env.step(branch_action)
+                        )
+                    oracle_endpoint = (
+                        _phase7_obs_state_tensor(branch_obs, device)
+                        .cpu()
+                        .numpy()[:, 14:17]
+                        .astype(np.float32)
+                    )
+                    remaining = np.full(
+                        num_envs, horizon_steps, dtype=np.float32
+                    )
+                    predicted_action = _pre_rl_tcp_low_actions(
+                        low_model,
+                        representation,
+                        hierarchy_previous,
+                        state[:, 14:17],
+                        predicted_endpoint,
+                        remaining,
+                        horizon_steps,
+                        control_freq,
+                        goal_norm,
+                        hierarchy_action_norm,
+                    )
+                    oracle_action = _pre_rl_tcp_low_actions(
+                        low_model,
+                        representation,
+                        hierarchy_previous,
+                        state[:, 14:17],
+                        oracle_endpoint,
+                        remaining,
+                        horizon_steps,
+                        control_freq,
+                        goal_norm,
+                        hierarchy_action_norm,
+                    )
+                    endpoint_errors.extend(
+                        np.linalg.norm(
+                            predicted_endpoint[active] - oracle_endpoint[active],
+                            axis=-1,
+                        ).tolist()
+                    )
+                    induced_action_errors.extend(
+                        np.linalg.norm(
+                            predicted_action[active] - oracle_action[active],
+                            axis=-1,
+                        ).tolist()
+                    )
+
+                flat_condition = np.concatenate(
+                    [
+                        flat_frame_norm.transform(frame),
+                        flat_action_norm.transform(previous_executed),
+                    ],
+                    axis=-1,
+                )
+                flat_action = flat_action_norm.inverse(
+                    flat_model(
+                        torch.from_numpy(flat_condition[:, None, :])
+                        .to(device)
+                        .float()
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                action = torch.clamp(
+                    torch.from_numpy(flat_action).to(device).float(),
+                    action_low,
+                    action_high,
+                )
+                action[~torch.from_numpy(active).to(device)] = 0.0
+                obs, _reward, terminated, truncated, info = student_env.step(action)
+                history.append(action.detach().clone())
+                previous_executed = action.cpu().numpy().astype(np.float32)
+                hierarchy_previous = hierarchy_action_norm.transform(
+                    previous_executed
+                )
+                if "success" in info:
+                    success_once |= _numpy(info["success"]).reshape(-1).astype(bool)
+                done = _numpy(torch.logical_or(terminated, truncated)).reshape(-1).astype(
+                    bool
+                )
+                newly_done = active & done
+                if np.any(newly_done):
+                    progress.update(int(np.sum(newly_done)))
+                    active[newly_done] = False
+            if np.any(active):
+                progress.update(int(np.sum(active)))
+            successes.extend(success_once.astype(float).tolist())
+        finally:
+            student_env.close()
+            branch_env.close()
+    progress.close()
+    return {
+        "episodes": episodes,
+        "seed_start": seed_start,
+        "flat_checkpoint": str(flat_path),
+        "flat_success": float(np.mean(successes)),
+        "endpoint_error_l2_m": float(np.mean(endpoint_errors)),
+        "prediction_induced_action_l2": float(np.mean(induced_action_errors)),
+        "endpoint_induced_action_pearson": float(
+            np.corrcoef(endpoint_errors, induced_action_errors)[0, 1]
+        ),
+        "endpoint_induced_action_spearman": _pre_rl_rank_correlation(
+            np.asarray(endpoint_errors), np.asarray(induced_action_errors)
+        ),
+        "replay_current_state_error_max": float(np.max(replay_errors)),
+        "samples": len(endpoint_errors),
+        "endpoint_errors_m": endpoint_errors,
+        "induced_action_l2_values": induced_action_errors,
+    }
+
+
+@torch.inference_mode()
+def analyze_pre_rl_phase_g_tcp_predictor(
+    config: Config,
+    force: bool = False,
+) -> Path:
+    import csv
+    import matplotlib.pyplot as plt
+
+    root = ensure_dir(
+        config.path_value("paths.incremental_results_dir") / "pre_rl" / "phase_g"
+    )
+    output_path = root / "tcp_predictor_distribution_diagnostics.json"
+    if output_path.exists() and not force:
+        console.print(f"Pre-RL Phase G diagnostics exist: {output_path}")
+        return output_path
+    checkpoint_path = train_pre_rl_phase_f_visual_tcp_hierarchy(
+        config, representation="raw", seed=0, force=False
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    (
+        high_model,
+        low_model,
+        _encoder,
+        _frame_norm,
+        representation_norm,
+        action_norm,
+        endpoint_norm,
+        goal_norm,
+    ) = _pre_rl_phase_f_visual_models(checkpoint, default_device())
+    horizon_steps = int(checkpoint["horizon_steps"])
+    control_freq = int(config.get("control_freq", 20))
+    sample_count = int(config.get("pre_rl.phase_f.validation_samples", 5000))
+
+    distributions: dict[str, dict[str, Any]] = {}
+    for split in ("teacher", "recovery"):
+        split_episodes, split_references = _pre_rl_phase_g_validation_episodes(
+            config, split, horizon_steps
+        )
+        distributions[split] = _pre_rl_factorized_validation_metrics(
+            high_model,
+            low_model,
+            split_episodes,
+            representation_norm,
+            action_norm,
+            endpoint_norm,
+            goal_norm,
+            horizon_steps,
+            control_freq,
+            1_950_000 if split == "teacher" else 1_950_001,
+            min(sample_count, len(split_references)),
+            sample_references=split_references,
+            include_samples=True,
+        )
+
+    audit_episodes = int(config.get("pre_rl.phase_g.audit_episodes", 20))
+    audit_seed = int(config.get("pre_rl.phase_g.audit_seed_start", 1_950_100))
+    distributions["flat_visited"] = _pre_rl_phase_g_flat_visited_audit(
+        config,
+        checkpoint,
+        episodes=audit_episodes,
+        seed_start=audit_seed,
+    )
+    distributions["hierarchy_visited"] = _evaluate_pre_rl_phase_f_visual_tcp_mode(
+        config,
+        checkpoint,
+        audit_episodes,
+        audit_seed,
+        goal_source="learned",
+        audit_branch=True,
+    )
+
+    summary_rows = []
+    for name, metrics in distributions.items():
+        endpoint_key = (
+            "endpoint_error_l2_m"
+            if name == "flat_visited"
+            else "on_policy_endpoint_prediction_error_m"
+            if name == "hierarchy_visited"
+            else "high_tcp_endpoint_l2_m"
+        )
+        action_key = (
+            "prediction_induced_action_l2"
+            if name != "hierarchy_visited"
+            else "on_policy_prediction_induced_action_l2"
+        )
+        summary_rows.append(
+            {
+                "distribution": name,
+                "samples": int(metrics["samples"])
+                if "samples" in metrics
+                else len(metrics["endpoint_errors_m"]),
+                "endpoint_error_l2_m": float(metrics[endpoint_key]),
+                "prediction_induced_action_l2": float(metrics[action_key]),
+                "endpoint_induced_action_pearson": float(
+                    metrics["endpoint_induced_action_pearson"]
+                ),
+                "endpoint_induced_action_spearman": float(
+                    metrics["endpoint_induced_action_spearman"]
+                ),
+            }
+        )
+    csv_path = root / "tcp_predictor_distribution_summary.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(summary_rows[0]))
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    plot_path = root / "endpoint_error_vs_action_sensitive_error.png"
+    figure, axis = plt.subplots(figsize=(8.5, 6))
+    colors = {
+        "teacher": "#2563eb",
+        "recovery": "#d97706",
+        "flat_visited": "#7c3aed",
+        "hierarchy_visited": "#059669",
+    }
+    rng = np.random.default_rng(1_950_200)
+    for name, metrics in distributions.items():
+        endpoint_values = np.asarray(metrics["endpoint_errors_m"], dtype=np.float32)
+        action_values = np.asarray(
+            metrics["induced_action_l2_values"], dtype=np.float32
+        )
+        if len(endpoint_values) > 1200:
+            selected = rng.choice(len(endpoint_values), 1200, replace=False)
+            endpoint_values = endpoint_values[selected]
+            action_values = action_values[selected]
+        axis.scatter(
+            endpoint_values,
+            action_values,
+            s=12,
+            alpha=0.3,
+            color=colors[name],
+            label=name.replace("_", " "),
+        )
+    axis.set_xlabel("TCP endpoint prediction error (m)")
+    axis.set_ylabel("Induced low-level action L2")
+    axis.set_title("High-level physical error versus control-sensitive error")
+    axis.grid(alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(plot_path, dpi=180)
+    plt.close(figure)
+    payload = {
+        "phase": "G2-G3-G5",
+        "method": "raw_visual_tcp_endpoint_predictor",
+        "checkpoint": str(checkpoint_path),
+        "horizon_steps": horizon_steps,
+        "distributions": distributions,
+        "summary_rows": summary_rows,
+        "csv": str(csv_path),
+        "plot": str(plot_path),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(output_path, payload)
+    console.print(
+        {
+            "phase": payload["phase"],
+            "summary_rows": summary_rows,
+            "csv": str(csv_path),
+            "plot": str(plot_path),
+        }
+    )
     return output_path
 
 

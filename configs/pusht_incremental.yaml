@@ -333,4 +333,7 @@ pre_rl:
     visual_batches_per_epoch: 200
     visual_epochs: 60
     visual_lr: 0.0003
+  phase_g:
+    audit_episodes: 20
+    audit_seed_start: 1950100
     validation_samples: 5000
