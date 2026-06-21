@@ -143,6 +143,7 @@ def test_effect_dataset_uses_one_fixed_pair_for_held_goal() -> None:
             }
         ],
         horizon_steps=10,
+        effect_input_dim=4,
         length=1,
     )
     sample = dataset[0]

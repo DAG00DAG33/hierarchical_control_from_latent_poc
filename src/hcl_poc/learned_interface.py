@@ -206,6 +206,7 @@ class _EffectRepresentationDataset(torch.utils.data.Dataset):
         self,
         episodes: list[dict[str, np.ndarray]],
         horizon_steps: int,
+        effect_input_dim: int,
         length: int,
     ) -> None:
         self.episodes = [
@@ -214,6 +215,7 @@ class _EffectRepresentationDataset(torch.utils.data.Dataset):
             if len(episode["actions"]) > horizon_steps
         ]
         self.horizon_steps = horizon_steps
+        self.effect_input_dim = effect_input_dim
         self.length = length
         if not self.episodes:
             raise ValueError("No action-aware effect-code episodes")
@@ -236,9 +238,13 @@ class _EffectRepresentationDataset(torch.utils.data.Dataset):
             else episode["zero_action"]
         )
         return {
-            "x_start": torch.from_numpy(episode["frames"][base]),
+            "x_start": torch.from_numpy(
+                episode["frames"][base, : self.effect_input_dim]
+            ),
             "x_future": torch.from_numpy(
-                episode["frames"][base + self.horizon_steps]
+                episode[
+                    "frames"
+                ][base + self.horizon_steps, : self.effect_input_dim]
             ),
             "x_current": torch.from_numpy(episode["frames"][current]),
             "previous": torch.from_numpy(previous),
@@ -885,6 +891,12 @@ def _train_effect_representation(
     )
     frame_norm, action_norm = _phase4_fit_standardizers(train_episodes)
     input_dim = int(data_metadata["frame_dim"])
+    proprio_dim = int(config.get("incremental.phase6.proprio_dim", 21))
+    effect_input_dim = (
+        input_dim - proprio_dim
+        if bool(spec.get("scene_only", False))
+        else input_dim
+    )
     effect_dim = int(spec["latent_dim"])
     width = int(spec["width"])
     horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
@@ -918,7 +930,7 @@ def _train_effect_representation(
 
     train = normalized(train_episodes)
     validation = normalized(validation_episodes)
-    encoder = _EffectEncoder(input_dim, effect_dim, width).to(device)
+    encoder = _EffectEncoder(effect_input_dim, effect_dim, width).to(device)
     action_head = MLP(
         input_dim + effect_dim + 4, 3, width, depth=4
     ).to(device)
@@ -942,6 +954,7 @@ def _train_effect_representation(
         _EffectRepresentationDataset(
             train,
             horizon_steps,
+            effect_input_dim,
             batch_size * batches_per_epoch,
         ),
         batch_size=batch_size,
@@ -953,6 +966,7 @@ def _train_effect_representation(
         _EffectRepresentationDataset(
             validation,
             horizon_steps,
+            effect_input_dim,
             int(
                 config.get(
                     "learned_interface.representation.validation_samples",
@@ -1140,6 +1154,7 @@ def _train_effect_representation(
         "spec": spec,
         "encoder_type": "effect",
         "input_dim": input_dim,
+        "effect_input_dim": effect_input_dim,
         "latent_dim": effect_dim,
         "hidden_dim": width,
         "encoder": encoder.state_dict(),
@@ -1464,7 +1479,7 @@ def _load_representation(
     )
     if checkpoint["encoder_type"] == "effect":
         encoder: nn.Module = _EffectEncoder(
-            int(checkpoint["input_dim"]),
+            int(checkpoint.get("effect_input_dim", checkpoint["input_dim"])),
             int(checkpoint["latent_dim"]),
             int(checkpoint["hidden_dim"]),
         ).to(device)
@@ -1515,8 +1530,9 @@ def _encode_effect_array(
     horizon_fraction: np.ndarray,
     device: torch.device,
 ) -> np.ndarray:
-    start = frame_norm.transform(start_frames)
-    future = frame_norm.transform(future_frames)
+    effect_input_dim = next(encoder.parameters()).shape[1] // 2
+    start = frame_norm.transform(start_frames)[:, :effect_input_dim]
+    future = frame_norm.transform(future_frames)[:, :effect_input_dim]
     pair = np.concatenate(
         [start, future, horizon_fraction.reshape(-1, 1)], axis=-1
     ).astype(np.float32)

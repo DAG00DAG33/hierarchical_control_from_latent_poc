@@ -549,3 +549,16 @@ learned_interface:
       representation_candidate: effect32
       high_level_candidate: effect32
       conditioning: film
+    effect32_scene_film:
+      family: effect_code
+      encoder_type: effect
+      latent_dim: 32
+      width: 512
+      scene_only: true
+      conditioning: film
+      lambda_action: 1.0
+      lambda_auxiliary: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.01
+      batches_per_epoch: 200
+      epochs: 40
