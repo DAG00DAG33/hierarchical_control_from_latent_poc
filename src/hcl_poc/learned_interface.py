@@ -72,6 +72,7 @@ def learned_interface_candidate_spec(config: Config, candidate: str) -> dict[str
     spec.setdefault("lambda_cov", 0.01)
     spec.setdefault("lambda_recon", 0.1)
     spec.setdefault("horizon_offsets", [1, 2, 5, 10])
+    spec.setdefault("early_stopping_patience", 10)
     spec["horizon_offsets"] = [
         int(value) for value in spec["horizon_offsets"]
     ]
@@ -316,6 +317,8 @@ def _train_predictive_representation(
     history: list[dict[str, Any]] = []
     best_state: dict[str, Any] | None = None
     best_validation = float("inf")
+    epochs_without_improvement = 0
+    early_stopping_patience = int(spec["early_stopping_patience"])
     timer = Timer()
 
     @torch.no_grad()
@@ -496,6 +499,7 @@ def _train_predictive_representation(
         )
         if selection < best_validation:
             best_validation = selection
+            epochs_without_improvement = 0
             best_state = {
                 "encoder": copy.deepcopy(encoder.state_dict()),
                 "target_encoder": copy.deepcopy(target_encoder.state_dict()),
@@ -507,6 +511,10 @@ def _train_predictive_representation(
                 ),
                 "epoch": epoch,
             }
+        else:
+            epochs_without_improvement += 1
+        if epochs_without_improvement >= early_stopping_patience:
+            break
     if best_state is None:
         raise RuntimeError("Predictive representation produced no checkpoint")
     encoder.load_state_dict(best_state["encoder"])
@@ -535,6 +543,7 @@ def _train_predictive_representation(
         "frame_norm": frame_norm.state_dict(),
         "action_norm": action_norm.state_dict(),
         "best_epoch": best_state["epoch"],
+        "trained_epochs": len(history),
         "validation_metrics": final_validation,
         "history": history,
         "data": data_metadata,
