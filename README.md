@@ -5,10 +5,13 @@ The original future-AE-latent hierarchy failed when its high level had to
 predict deployable goals. A gated follow-up identified a compact future TCP
 waypoint as a substantially better interface.
 
-The final pre-RL result is:
+The final pre-RL and learned-interface results are:
 
 - learned raw-visual TCP hierarchy: `0.71` success over 100 episodes;
 - exact reachable branch-oracle TCP hierarchy: `0.71`;
+- learned VAE-512 future-state hierarchy: `0.72` learned, `0.76` oracle;
+- compact 32D action-aware effect hierarchy with FiLM: `0.69` learned,
+  `0.72` oracle;
 - selected interface: 10-step (0.50 s) TCP endpoint, held for 10 primitive
   controls, with one-step low-level feedback.
 
@@ -17,6 +20,11 @@ recommendation are in [pre_rl_summary.md](pre_rl_summary.md). The experiment
 plan and chronological record are
 [pusht_pre_rl_next_experiments_plan.md](pusht_pre_rl_next_experiments_plan.md)
 and [next_experiments_log.md](next_experiments_log.md).
+
+The subsequent learned-interface architecture, data, training details,
+ablations, videos, and conclusions are in
+[LEARNED_INTERFACE_FINAL_RESULTS.md](LEARNED_INTERFACE_FINAL_RESULTS.md) and
+[learned_interface_experiment_log.md](learned_interface_experiment_log.md).
 
 The earlier future-latent candidates remain documented in
 [FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md) as the
@@ -104,6 +112,28 @@ uv run hcl-poc incremental pre-rl-f-eval-visual-tcp \
 uv run hcl-poc incremental pre-rl-g-tcp-diagnostics \
   --config "$CONFIG"
 ```
+
+## Learned Interfaces
+
+```bash
+CONFIG=configs/pusht_incremental.yaml
+
+# Best measured learned state interface
+uv run hcl-poc incremental learned-interface-run \
+  --config "$CONFIG" --candidate vae512_w2048_b1e6 --episodes 100
+
+# Best compact learned effect interface
+uv run hcl-poc incremental learned-interface-run \
+  --config "$CONFIG" --candidate effect32_film --episodes 100
+
+uv run hcl-poc incremental learned-interface-record \
+  --config "$CONFIG" --candidate effect32_film \
+  --goal-source learned --episodes 10 --eval-seed-start 2120000
+
+uv run python scripts/plot_learned_interface_results.py
+```
+
+![Learned state and effect interfaces](docs/results/learned_interface/closed_loop_comparison.png)
 
 ## Legacy Future-Latent Sweep
 

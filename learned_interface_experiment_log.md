@@ -351,3 +351,48 @@ optional because the current observation alone predicts the action well.
 continue low-level goal-conditioning/goal-use work before claiming the oracle
 gate. The deployable 32D result is useful (`0.62`) but remains below the
 selected TCP interface (`0.71`).
+
+## 2026-06-21 - LI-12: Effect-32 FiLM conditioning
+
+The `effect32` representation and high-level predictor were frozen. Only the
+low policy was retrained with four zero-initialized FiLM modulators, one per
+hidden layer.
+
+- **20 episodes:** learned `0.75`, oracle `0.75`.
+- **100 episodes:** learned `0.69` (Wilson `[0.594,0.772]`), oracle `0.72`
+  (`[0.625,0.799]`).
+- **Final reward:** learned `0.767`, oracle `0.796`.
+- **Prediction-induced action L2:** `0.01031`, versus `0.00510` for
+  concatenation.
+
+**Decision:** Promote as the selected compact learned effect interface. It is
+within two points of the TCP reference and has only a three-point oracle gap.
+Sensitivity-weighted prediction and candidate sampling are not justified.
+
+## 2026-06-21 - LI-13: Scene-only Effect-32 FiLM
+
+The effect encoder receives only the two 6,528D DINO image features. Current
+proprioception remains available to the low and high policies, but future
+proprioception is excluded from the learned goal.
+
+- representation selected epoch 20 and stopped after 30 epochs;
+- validation action MSE `0.02905`;
+- 20-episode learned success `0.55`;
+- 20-episode branch-oracle success `0.60`.
+
+**Decision:** The scene-only effect passes its dedicated conceptual gate but is
+not promoted. The full observation-pair effect is stronger, indicating that
+future robot/TCP endpoint information remains useful at `k=10`.
+
+## 2026-06-21 - Final learned-interface decision
+
+- Best measured learned future-state interface: VAE-512, `0.72/0.76`
+  learned/oracle success.
+- Best compact learned effect interface: Effect-32 FiLM, `0.69/0.72`.
+- Explicit TCP reference: `0.71/0.71`.
+- Final 500-episode and multi-seed evaluation skipped under the runtime
+  reduction.
+
+The learned-interface hypothesis is supported. The VAE matches the TCP
+reference, and the compact effect code approaches it while using a generic
+32D learned goal rather than an explicit TCP coordinate.
