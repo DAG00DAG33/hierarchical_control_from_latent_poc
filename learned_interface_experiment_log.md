@@ -297,3 +297,57 @@ still-improving run.
 reconstruction is useful but remains 11 points below the selected VAE in
 learned success. Predictive loss alone is insufficient; some reconstruction
 is necessary, but increasing it does not produce a monotonic control gain.
+
+## 2026-06-21 - LI-11: Compact action-aware effect codes
+
+The effect encoder receives the normalized current and horizon-end observation
+plus the normalized horizon, and produces a pairwise code:
+
+```text
+effect = E([h_t, h_t+10, 1.0])
+```
+
+The representation objective combines normalized one-step action prediction,
+VICReg variance/covariance regularization, and auxiliary future object,
+TCP, and contact prediction. The 2,000-trajectory DINO file does not retain
+privileged object state. A frozen observation probe was therefore trained on
+the separate 12,000-sample causal Phase 6 probe dataset and used to generate
+observation-derived pseudo-labels for the trajectory file. Its validation
+quality is:
+
+- object position RMSE: `0.00597 m`;
+- object yaw MAE: `0.0702 rad`;
+- TCP position RMSE: `0.01033 m`;
+- contact accuracy/AUROC: `0.9621 / 0.9931`.
+
+The probe is used only while training the representation auxiliary heads.
+Neither privileged state nor probe output is supplied to the deployed high or
+low policy.
+
+All candidates use width 512, `lambda_action=1`,
+`lambda_auxiliary=1`, `lambda_var=1`, `lambda_cov=0.01`, 200 batches
+per epoch, a 40-epoch ceiling, and validation early stopping with patience 10.
+The high/low hierarchy remains `k=10`, `U=10`, `H=1`.
+
+| effect dim | action MSE | auxiliary MSE | active dims | screen learned | screen oracle |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 0.0266 | 0.00529 | 16 | 0.65 | 0.60 |
+| 32 | **0.0229** | 0.00605 | 32 | **0.65** | **0.80** |
+| 64 | 0.0283 | 0.00701 | 64 | 0.45 | 0.50 |
+
+`effect32` was promoted to 100 episodes:
+
+- learned success `0.62` (Wilson `[0.522,0.709]`);
+- oracle success `0.56` (`[0.462,0.653]`);
+- learned/oracle final reward `0.725 / 0.690`;
+- learned/oracle teacher action MAE `0.0906 / 0.0772`.
+
+The 20-episode oracle result was not stable. The low policy is trained on
+nominal teacher states, while online oracle effects are generated from
+learner-visited states. One-step teacher imitation also makes the future effect
+optional because the current observation alone predicts the action well.
+
+**Decision:** Select 32D as the effect-code capacity, reject 16D and 64D, and
+continue low-level goal-conditioning/goal-use work before claiming the oracle
+gate. The deployable 32D result is useful (`0.62`) but remains below the
+selected TCP interface (`0.71`).

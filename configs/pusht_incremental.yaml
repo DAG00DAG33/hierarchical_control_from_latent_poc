@@ -544,3 +544,8 @@ learned_interface:
       lambda_cov: 0.01
       batches_per_epoch: 200
       epochs: 40
+    effect32_film:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32
+      conditioning: film
