@@ -683,6 +683,14 @@ def _train_effect_auxiliary_teacher(
         ).to(device)
         model.load_state_dict(checkpoint["model"])
         model.eval()
+        write_json(
+            path.with_suffix(".json"),
+            {
+                key: value
+                for key, value in checkpoint.items()
+                if key not in {"model", "frame_norm", "label_norm"}
+            },
+        )
         return model, checkpoint
 
     set_seed(seed + 17)
@@ -817,7 +825,11 @@ def _train_effect_auxiliary_teacher(
     torch.save(checkpoint, path)
     write_json(
         path.with_suffix(".json"),
-        {key: value for key, value in checkpoint.items() if key != "model"},
+        {
+            key: value
+            for key, value in checkpoint.items()
+            if key not in {"model", "frame_norm", "label_norm"}
+        },
     )
     return model, checkpoint
 
