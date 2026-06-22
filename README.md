@@ -9,7 +9,8 @@ The final pre-RL and learned-interface results are:
 
 - learned raw-visual TCP hierarchy: `0.71` success over 100 episodes;
 - exact reachable branch-oracle TCP hierarchy: `0.71`;
-- learned VAE-512 future-state hierarchy: `0.72` learned, `0.76` oracle;
+- learned VAE-512 future-state hierarchy development result: `0.72` learned,
+  `0.76` oracle;
 - compact 32D action-aware effect hierarchy with FiLM: `0.69` learned,
   `0.72` oracle;
 - selected interface: 10-step (0.50 s) TCP endpoint, held for 10 primitive
@@ -25,6 +26,20 @@ The subsequent learned-interface architecture, data, training details,
 ablations, videos, and conclusions are in
 [LEARNED_INTERFACE_FINAL_RESULTS.md](LEARNED_INTERFACE_FINAL_RESULTS.md) and
 [learned_interface_experiment_log.md](learned_interface_experiment_log.md).
+
+The final VAE-512 sample-efficiency study uses three independently trained
+policy seeds, 500 unseen evaluation episodes per deployable point, and nested
+data budgets. Its authoritative report is
+[VAE512_SAMPLE_EFFICIENCY_FINAL_RESULTS.md](VAE512_SAMPLE_EFFICIENCY_FINAL_RESULTS.md).
+
+At 1,800 trajectories, deterministic hierarchy, flow hierarchy, and flat
+full-observation deterministic control reach `0.565 +/- 0.025`,
+`0.556 +/- 0.005`, and `0.571 +/- 0.048` success respectively. The hierarchy
+does not show a robust sample-efficiency advantage over direct deterministic
+control from the full observation. The prior `0.72` VAE number was a
+candidate-selected development result on a reused 100-seed bank.
+
+![Final VAE-512 sample-efficiency curves](docs/results/vae512_scaling/success_deployable.png)
 
 The earlier future-latent candidates remain documented in
 [FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md) as the

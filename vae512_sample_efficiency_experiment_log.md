@@ -163,3 +163,41 @@ Keep the unseen 2,200,000 bank for the final comparison and use 500 episodes
 plus three training seeds as planned. Retain the prior selected checkpoint as
 a labeled diagnostic reference; do not mix it into the independent-seed
 average.
+
+## 2026-06-22 - SE-05: Final evaluation and decision
+
+- **Evaluation:** all 18 `(budget, policy seed)` points completed.
+- **Per point:** six deployable methods x 500 fixed unseen episodes; one local
+  branch oracle x 50 episodes.
+- **Seed bank:** 2,200,000 through 2,200,499 for deployable methods; first 50
+  of the same bank for the oracle.
+- **Completeness:** the aggregator validated all seven methods, expected
+  episode counts, and retained episode-level outcome arrays before plotting.
+- **Aggregate output:** `results/incremental/vae512_scaling/aggregate/`.
+- **Tracked report:** `VAE512_SAMPLE_EFFICIENCY_FINAL_RESULTS.md`.
+- **Tracked plots:** `docs/results/vae512_scaling/`.
+- **Videos:** full-data seed-2 learned and branch-oracle successes/failures
+  under the point's `videos/` directory.
+
+Full-data mean success +/- sample SD across policy seeds:
+
+| method | success |
+| --- | ---: |
+| deterministic hierarchy | `0.565 +/- 0.025` |
+| flow hierarchy | `0.556 +/- 0.005` |
+| flat latent deterministic | `0.457 +/- 0.017` |
+| flat latent flow | `0.357 +/- 0.008` |
+| flat observation deterministic | `0.571 +/- 0.048` |
+| flat observation flow | `0.401 +/- 0.049` |
+| branch oracle (50 episodes/seed) | `0.520 +/- 0.035` |
+
+The flow hierarchy has the highest normalized log-data AULC (`0.259`), versus
+`0.255` for flat observation deterministic and `0.251` for deterministic
+hierarchy. The differences are too small relative to three-seed uncertainty
+to claim improved sample efficiency. No method reaches 70% mean success.
+
+**Final decision:** the learned VAE future-state interface is viable and
+recovers the performance lost by flat control from the current VAE latent,
+but it does not robustly outperform deterministic flat control from the full
+observation. The experiment therefore does not support the main
+sample-efficiency thesis.
