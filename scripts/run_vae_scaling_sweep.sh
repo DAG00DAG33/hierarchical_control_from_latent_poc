@@ -3,8 +3,10 @@ set -euo pipefail
 
 stage="${1:-all}"
 config="${CONFIG:-configs/pusht_incremental.yaml}"
-budgets=(50 100 200 500 1000 1800)
-seeds=(0 1 2)
+read -r -a budgets <<< "${BUDGETS:-50 100 200 500 1000 1800}"
+read -r -a seeds <<< "${SEEDS:-0 1 2}"
+episodes="${EPISODES:-500}"
+oracle_episodes="${ORACLE_EPISODES:-50}"
 
 if [[ "$stage" != "train" && "$stage" != "eval" && "$stage" != "all" ]]; then
   printf 'Usage: %s [train|eval|all]\n' "$0" >&2
@@ -24,8 +26,8 @@ for budget in "${budgets[@]}"; do
         --config "$config" \
         --n-trajectories "$budget" \
         --seed "$seed" \
-        --episodes 500 \
-        --oracle-episodes 50
+        --episodes "$episodes" \
+        --oracle-episodes "$oracle_episodes"
     fi
   done
 done

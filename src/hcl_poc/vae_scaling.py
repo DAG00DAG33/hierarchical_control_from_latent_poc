@@ -1316,6 +1316,9 @@ def _save_scaling_plot(
     output_path: Path,
     title: str,
     oracle: bool = False,
+    seed_count: int = 3,
+    deployable_episodes: int = 500,
+    oracle_episodes: int = 50,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1333,7 +1336,7 @@ def _save_scaling_plot(
         axis.errorbar(
             selected["n_trajectories"],
             selected[f"{metric}_mean"],
-            yerr=selected[f"{metric}_sd"],
+            yerr=selected[f"{metric}_sd"].fillna(0.0),
             label=_METHOD_LABELS[method],
             color=colors[method],
             marker="o",
@@ -1349,11 +1352,14 @@ def _save_scaling_plot(
         axis.set_ylim(0.0, 1.0)
     axis.grid(alpha=0.25)
     axis.legend(fontsize=9, ncol=2)
-    subtitle = "mean +/- sample SD over 3 training seeds"
+    subtitle = f"mean +/- sample SD over {seed_count} training seed(s)"
     if oracle:
-        subtitle += "; oracle: 50 episodes/seed, learned: 500"
+        subtitle += (
+            f"; oracle: {oracle_episodes} episodes/seed, "
+            f"learned: {deployable_episodes}"
+        )
     else:
-        subtitle += "; 500 evaluation episodes/seed"
+        subtitle += f"; {deployable_episodes} evaluation episodes/seed"
     axis.set_title(f"{title}\n{subtitle}")
     figure.tight_layout()
     figure.savefig(output_path, dpi=180)
@@ -1364,19 +1370,21 @@ def aggregate_vae_scaling_results(
     config: Config,
     deployable_episodes: int = 500,
     oracle_episodes: int = 50,
+    training_seeds: tuple[int, ...] = VAE_SCALING_SEEDS,
+    output_name: str = "aggregate",
 ) -> Path:
     """Validate and aggregate the complete fixed-budget scaling experiment."""
     import matplotlib.pyplot as plt
     import pandas as pd
 
     aggregate_dir = ensure_dir(
-        config.path_value("paths.incremental_results_dir") / "vae512_scaling" / "aggregate"
+        config.path_value("paths.incremental_results_dir") / "vae512_scaling" / output_name
     )
     run_rows: list[dict[str, Any]] = []
     source_payloads: dict[tuple[int, int, str], dict[str, Any]] = {}
     for budget in VAE_SCALING_BUDGETS:
         point_config = vae_scaling_config(config, budget)
-        for seed in VAE_SCALING_SEEDS:
+        for seed in training_seeds:
             summary_path = (
                 _point_result_dir(point_config, seed)
                 / f"summary_deploy{deployable_episodes}_oracle{oracle_episodes}.json"
@@ -1439,6 +1447,13 @@ def aggregate_vae_scaling_results(
         "_".join(part for part in column if part) if isinstance(column, tuple) else column
         for column in summary.columns
     ]
+    summary = summary.rename(
+        columns={
+            column: column.removesuffix("_std") + "_sd"
+            for column in summary.columns
+            if column.endswith("_std")
+        }
+    )
     seed_values = grouped["success"].apply(list).reset_index(name="success_by_seed")
     summary = summary.merge(seed_values, on=["n_trajectories", "method"])
     summary.to_csv(aggregate_dir / "method_budget_summary.csv", index=False)
@@ -1459,7 +1474,7 @@ def aggregate_vae_scaling_results(
             "flat_observation_deterministic": [],
             "flat_observation_flow": [],
         }
-        for seed in VAE_SCALING_SEEDS:
+        for seed in training_seeds:
             point_config = vae_scaling_config(config, budget)
             learned_dir = (
                 point_config.path_value("paths.incremental_artifact_dir")
@@ -1691,6 +1706,9 @@ def aggregate_vae_scaling_results(
         "success",
         aggregate_dir / "success_deployable.png",
         "VAE-512 sample efficiency",
+        seed_count=len(training_seeds),
+        deployable_episodes=deployable_episodes,
+        oracle_episodes=oracle_episodes,
     )
     _save_scaling_plot(
         summary,
@@ -1699,6 +1717,9 @@ def aggregate_vae_scaling_results(
         aggregate_dir / "success_hierarchy_oracle.png",
         "Learned and oracle hierarchical interfaces",
         oracle=True,
+        seed_count=len(training_seeds),
+        deployable_episodes=deployable_episodes,
+        oracle_episodes=oracle_episodes,
     )
     _save_scaling_plot(
         summary,
@@ -1711,6 +1732,9 @@ def aggregate_vae_scaling_results(
         "success",
         aggregate_dir / "success_flat_ablation.png",
         "Flat policy representation and objective ablation",
+        seed_count=len(training_seeds),
+        deployable_episodes=deployable_episodes,
+        oracle_episodes=oracle_episodes,
     )
     for metric in ("final_reward", "max_reward"):
         _save_scaling_plot(
@@ -1719,6 +1743,9 @@ def aggregate_vae_scaling_results(
             metric,
             aggregate_dir / f"{metric}_deployable.png",
             f"VAE-512 {metric.replace('_', ' ')}",
+            seed_count=len(training_seeds),
+            deployable_episodes=deployable_episodes,
+            oracle_episodes=oracle_episodes,
         )
 
     figure, axes = plt.subplots(1, 3, figsize=(16, 5.2))
@@ -1748,7 +1775,7 @@ def aggregate_vae_scaling_results(
         for budget in VAE_SCALING_BUDGETS:
             values_goal = []
             values_action = []
-            for seed in VAE_SCALING_SEEDS:
+            for seed in training_seeds:
                 point_config = vae_scaling_config(config, budget)
                 checkpoint_path = (
                     _point_artifact_dir(point_config, seed) / "flow_hierarchy" / "high_flow.pt"
@@ -1808,7 +1835,7 @@ def aggregate_vae_scaling_results(
         {
             "experiment": "vae512_sample_efficiency",
             "budgets": list(VAE_SCALING_BUDGETS),
-            "training_seeds": list(VAE_SCALING_SEEDS),
+            "training_seeds": list(training_seeds),
             "deployable_episodes_per_seed": deployable_episodes,
             "oracle_episodes_per_seed": oracle_episodes,
             "methods": list(ALL_METHODS),

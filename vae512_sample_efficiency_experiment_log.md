@@ -85,3 +85,28 @@ space is sufficient.
 
 The fixed-seed rollout sweep starts only after this completeness audit. Final
 deployable runs use 500 episodes per point; local branch-oracle runs use 50.
+
+## 2026-06-22 - SE-03: Preliminary seed-0 rollout sweep
+
+- **Reason:** inspect the complete learning-curve shape before spending the
+  full three-seed, 500-episode evaluation budget.
+- **Command:** `SEEDS=0 EPISODES=100 ORACLE_EPISODES=10
+  scripts/run_vae_scaling_sweep.sh eval`.
+- **Evaluation seeds:** fixed bank beginning at 2,200,000 for every point.
+- **Budget:** 100 episodes per deployable method and 10 per local branch
+  oracle. Oracle values in this pass are explicitly not used for conclusions.
+- **Output:** `results/incremental/vae512_scaling/preliminary_seed0_100/`.
+
+| trajectories | det hierarchy | flow hierarchy | flat latent det | flat latent flow | flat obs det | flat obs flow | oracle (10) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 0.03 | 0.03 | 0.02 | 0.03 | 0.01 | 0.00 | 0.00 |
+| 100 | 0.04 | 0.07 | 0.05 | 0.00 | 0.06 | 0.01 | 0.00 |
+| 200 | 0.09 | 0.14 | 0.02 | 0.06 | 0.10 | 0.07 | 0.10 |
+| 500 | 0.28 | 0.31 | 0.14 | 0.08 | 0.29 | 0.22 | 0.10 |
+| 1000 | 0.51 | 0.48 | 0.24 | 0.18 | 0.48 | 0.26 | 0.40 |
+| 1800 | 0.46 | 0.56 | 0.44 | 0.32 | 0.54 | 0.34 | 0.40 |
+
+The preliminary curve justifies continuing the complete evaluation. Learned
+hierarchies are competitive with the strongest flat observation baseline at
+1,000-1,800 trajectories, while the three-seed variance and reliable oracle
+gap remain unresolved.

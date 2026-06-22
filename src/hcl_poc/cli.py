@@ -993,6 +993,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
                 config,
                 deployable_episodes=args.episodes,
                 oracle_episodes=args.oracle_episodes,
+                training_seeds=tuple(args.seeds),
+                output_name=args.output_name,
             )
         )
     elif args.incremental_command == "vae-scaling-train":
@@ -1635,6 +1637,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(vae_scaling_aggregate)
     vae_scaling_aggregate.add_argument("--episodes", type=int, default=500)
     vae_scaling_aggregate.add_argument("--oracle-episodes", type=int, default=50)
+    vae_scaling_aggregate.add_argument(
+        "--seeds", type=int, nargs="+", default=[0, 1, 2]
+    )
+    vae_scaling_aggregate.add_argument("--output-name", default="aggregate")
     vae_scaling_aggregate.set_defaults(func=incremental_cmd)
     for command in [
         "vae-scaling-train",
