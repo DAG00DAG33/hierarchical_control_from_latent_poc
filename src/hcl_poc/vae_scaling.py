@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -65,9 +66,7 @@ ALL_METHODS = (*DEPLOYABLE_METHODS, "oracle_hierarchy")
 
 def vae_scaling_config(config: Config, n_trajectories: int) -> Config:
     if n_trajectories not in VAE_SCALING_BUDGETS:
-        raise ValueError(
-            f"VAE scaling budget must be one of {VAE_SCALING_BUDGETS}"
-        )
+        raise ValueError(f"VAE scaling budget must be one of {VAE_SCALING_BUDGETS}")
     raw = copy.deepcopy(config.raw)
     raw["paths"]["incremental_artifact_dir"] = str(
         config.path_value("paths.incremental_artifact_dir")
@@ -75,9 +74,7 @@ def vae_scaling_config(config: Config, n_trajectories: int) -> Config:
         / f"n{n_trajectories}"
     )
     raw["paths"]["incremental_results_dir"] = str(
-        config.path_value("paths.incremental_results_dir")
-        / "vae512_scaling"
-        / f"n{n_trajectories}"
+        config.path_value("paths.incremental_results_dir") / "vae512_scaling" / f"n{n_trajectories}"
     )
     raw["incremental"]["phase4"]["train_episodes"] = n_trajectories
     raw["incremental"]["phase6"]["train_episodes"] = n_trajectories
@@ -88,15 +85,11 @@ def vae_scaling_config(config: Config, n_trajectories: int) -> Config:
 
 
 def _point_artifact_dir(config: Config, seed: int) -> Path:
-    return ensure_dir(
-        config.path_value("paths.incremental_artifact_dir") / f"seed{seed}"
-    )
+    return ensure_dir(config.path_value("paths.incremental_artifact_dir") / f"seed{seed}")
 
 
 def _point_result_dir(config: Config, seed: int) -> Path:
-    return ensure_dir(
-        config.path_value("paths.incremental_results_dir") / f"seed{seed}"
-    )
+    return ensure_dir(config.path_value("paths.incremental_results_dir") / f"seed{seed}")
 
 
 def write_vae_scaling_manifest(
@@ -105,32 +98,26 @@ def write_vae_scaling_manifest(
     force: bool = False,
 ) -> Path:
     point_config = vae_scaling_config(config, n_trajectories)
-    path = ensure_dir(
-        point_config.path_value("paths.incremental_artifact_dir")
-    ) / "data_manifest.json"
+    path = (
+        ensure_dir(point_config.path_value("paths.incremental_artifact_dir")) / "data_manifest.json"
+    )
     if path.exists() and not force:
         return path
     dataset_path = Path(config.get("incremental.phase4.prepared_path"))
-    validation_count = int(
-        config.get("incremental.phase4.validation_episodes", 200)
-    )
+    validation_count = int(config.get("incremental.phase4.validation_episodes", 200))
     with h5py.File(dataset_path, "r") as h5:
         keys = sorted(key for key in h5 if key.startswith("episode_"))
         train_keys = keys[:n_trajectories]
         validation_keys = keys[-validation_count:]
         train_lengths = [int(len(h5[key]["actions"])) for key in train_keys]
-        validation_lengths = [
-            int(len(h5[key]["actions"])) for key in validation_keys
-        ]
+        validation_lengths = [int(len(h5[key]["actions"])) for key in validation_keys]
     if set(train_keys) & set(validation_keys):
         raise ValueError("VAE scaling train/validation trajectory overlap")
     fingerprint_source = json.dumps(
         {
             "dataset": str(dataset_path.resolve()),
             "train": list(zip(train_keys, train_lengths, strict=True)),
-            "validation": list(
-                zip(validation_keys, validation_lengths, strict=True)
-            ),
+            "validation": list(zip(validation_keys, validation_lengths, strict=True)),
         },
         sort_keys=True,
     ).encode()
@@ -143,8 +130,7 @@ def write_vae_scaling_manifest(
         "validation_keys": validation_keys,
         "train_transitions": int(sum(train_lengths)),
         "validation_transitions": int(sum(validation_lengths)),
-        "equivalent_behavior_seconds": sum(train_lengths)
-        / float(config.get("control_freq", 20)),
+        "equivalent_behavior_seconds": sum(train_lengths) / float(config.get("control_freq", 20)),
         "sha256": hashlib.sha256(fingerprint_source).hexdigest(),
         "metadata": _runtime_metadata(config),
     }
@@ -184,13 +170,9 @@ def _load_point_episodes(
     dict[str, Any],
     dict[str, Any],
 ]:
-    encoded_path = prepare_learned_interface_episodes(
-        config, VAE_CANDIDATE, seed, force=False
-    )
+    encoded_path = prepare_learned_interface_episodes(config, VAE_CANDIDATE, seed, force=False)
     encoded = torch.load(encoded_path, map_location="cpu", weights_only=False)
-    train_frames, validation_frames, metadata = _load_phase6_train_episodes(
-        config
-    )
+    train_frames, validation_frames, metadata = _load_phase6_train_episodes(config)
 
     def combine(
         frame_episodes: list[dict[str, np.ndarray]],
@@ -204,9 +186,7 @@ def _load_point_episodes(
                 "latents": latent,
                 "actions": frame_episode["actions"],
             }
-            for frame_episode, latent in zip(
-                frame_episodes, goals, strict=True
-            )
+            for frame_episode, latent in zip(frame_episodes, goals, strict=True)
         ]
 
     return (
@@ -231,9 +211,7 @@ class _FlatDataset(torch.utils.data.Dataset):
         self.input_norm = input_norm
         self.action_norm = action_norm
         self.length = length
-        self.zero_action = action_norm.transform(
-            np.zeros((1, 3), dtype=np.float32)
-        )[0]
+        self.zero_action = action_norm.transform(np.zeros((1, 3), dtype=np.float32))[0]
 
     def __len__(self) -> int:
         return self.length
@@ -246,16 +224,10 @@ class _FlatDataset(torch.utils.data.Dataset):
             if t > 0
             else self.zero_action
         )
-        current = self.input_norm.transform(
-            episode[self.input_key][t : t + 1]
-        )[0]
-        target = self.action_norm.transform(
-            episode["actions"][t : t + 1]
-        )[0]
+        current = self.input_norm.transform(episode[self.input_key][t : t + 1])[0]
+        target = self.action_norm.transform(episode["actions"][t : t + 1])[0]
         return (
-            torch.from_numpy(
-                np.concatenate([current, previous]).astype(np.float32)
-            ),
+            torch.from_numpy(np.concatenate([current, previous]).astype(np.float32)),
             torch.from_numpy(target.astype(np.float32)),
         )
 
@@ -269,19 +241,13 @@ def _flat_validation_arrays(
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    zero_action = action_norm.transform(
-        np.zeros((1, 3), dtype=np.float32)
-    )[0]
+    zero_action = action_norm.transform(np.zeros((1, 3), dtype=np.float32))[0]
     conditions = []
     actions = []
     for _ in range(samples):
         episode = episodes[int(rng.integers(0, len(episodes)))]
         t = int(rng.integers(0, len(episode["actions"])))
-        previous = (
-            action_norm.transform(episode["actions"][t - 1 : t])[0]
-            if t > 0
-            else zero_action
-        )
+        previous = action_norm.transform(episode["actions"][t - 1 : t])[0] if t > 0 else zero_action
         current = input_norm.transform(episode[input_key][t : t + 1])[0]
         conditions.append(np.concatenate([current, previous]))
         actions.append(episode["actions"][t])
@@ -305,38 +271,27 @@ def train_vae_scaling_flat_policy(
         raise ValueError(f"Unknown flat policy type: {policy_type}")
     point_config = vae_scaling_config(config, n_trajectories)
     artifact_dir = ensure_dir(
-        _point_artifact_dir(point_config, seed)
-        / f"flat_{representation}_{policy_type}"
+        _point_artifact_dir(point_config, seed) / f"flat_{representation}_{policy_type}"
     )
     checkpoint_path = artifact_dir / "policy.pt"
     if checkpoint_path.exists() and not force:
         return checkpoint_path
     set_seed(seed)
-    train, validation, metadata, encoded = _load_point_episodes(
-        point_config, seed
-    )
+    train, validation, metadata, encoded = _load_point_episodes(point_config, seed)
     representation_checkpoint = torch.load(
         encoded["representation_checkpoint"],
         map_location="cpu",
         weights_only=False,
     )
-    frame_norm = Standardizer.from_state_dict(
-        representation_checkpoint["frame_norm"]
-    )
-    latent_norm = Standardizer.fit(
-        np.concatenate([episode["latents"] for episode in train])
-    )
-    action_norm = Standardizer.fit(
-        np.concatenate([episode["actions"] for episode in train])
-    )
+    frame_norm = Standardizer.from_state_dict(representation_checkpoint["frame_norm"])
+    latent_norm = Standardizer.fit(np.concatenate([episode["latents"] for episode in train]))
+    action_norm = Standardizer.fit(np.concatenate([episode["actions"] for episode in train]))
     input_key = "latents" if representation == "latent" else "frames"
     input_norm = latent_norm if representation == "latent" else frame_norm
     input_dim = train[0][input_key].shape[-1]
     hidden_dim = int(config.get("vae_scaling.policy.hidden_dim", 512))
     batch_size = int(config.get("vae_scaling.policy.batch_size", 512))
-    batches_per_epoch = int(
-        config.get("vae_scaling.policy.batches_per_epoch", 200)
-    )
+    batches_per_epoch = int(config.get("vae_scaling.policy.batches_per_epoch", 200))
     epochs = int(config.get("vae_scaling.policy.epochs", 60))
     learning_rate = float(config.get("vae_scaling.policy.lr", 3e-4))
     device = default_device()
@@ -367,9 +322,11 @@ def train_vae_scaling_flat_policy(
         int(config.get("vae_scaling.policy.validation_samples", 5000)),
         seed + 4100,
     )
-    validation_noise = np.random.default_rng(seed + 4200).standard_normal(
-        (len(validation_conditions), 3)
-    ).astype(np.float32)
+    validation_noise = (
+        np.random.default_rng(seed + 4200)
+        .standard_normal((len(validation_conditions), 3))
+        .astype(np.float32)
+    )
     best_state: dict[str, torch.Tensor] | None = None
     best_mae = float("inf")
     best_epoch = 0
@@ -408,9 +365,7 @@ def train_vae_scaling_flat_policy(
                     initial_noise=torch.from_numpy(validation_noise).to(device),
                 )
             )
-            prediction = action_norm.inverse(
-                normalized_prediction.cpu().numpy()
-            )
+            prediction = action_norm.inverse(normalized_prediction.cpu().numpy())
         action_mae = float(np.mean(np.abs(prediction - validation_actions)))
         history.append(
             {
@@ -477,9 +432,7 @@ def _high_flow_validation_samples(
     seed: int,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(seed)
-    zero_action = action_norm.transform(
-        np.zeros((1, 3), dtype=np.float32)
-    )[0]
+    zero_action = action_norm.transform(np.zeros((1, 3), dtype=np.float32))[0]
     conditions = []
     goals = []
     current_frames = []
@@ -497,9 +450,7 @@ def _high_flow_validation_samples(
             else zero_action
         )
         previous = (
-            action_norm.transform(
-                episode["actions"][current - 1 : current]
-            )[0]
+            action_norm.transform(episode["actions"][current - 1 : current])[0]
             if current > 0
             else zero_action
         )
@@ -513,16 +464,10 @@ def _high_flow_validation_samples(
         )
         goals.append(
             goal_norm.transform(
-                episode["latents"][
-                    base + horizon_steps : base + horizon_steps + 1
-                ]
+                episode["latents"][base + horizon_steps : base + horizon_steps + 1]
             )[0]
         )
-        current_frames.append(
-            frame_norm.transform(
-                episode["frames"][current : current + 1]
-            )[0]
-        )
+        current_frames.append(frame_norm.transform(episode["frames"][current : current + 1])[0])
         previous_actions.append(previous)
         target_actions.append(episode["actions"][current])
         remaining_values.append((horizon_steps - offset) / horizon_steps)
@@ -543,9 +488,7 @@ def train_vae_scaling_flow_high_level(
     force: bool = False,
 ) -> Path:
     point_config = vae_scaling_config(config, n_trajectories)
-    artifact_dir = ensure_dir(
-        _point_artifact_dir(point_config, seed) / "flow_hierarchy"
-    )
+    artifact_dir = ensure_dir(_point_artifact_dir(point_config, seed) / "flow_hierarchy")
     checkpoint_path = artifact_dir / "high_flow.pt"
     if checkpoint_path.exists() and not force:
         return checkpoint_path
@@ -553,23 +496,17 @@ def train_vae_scaling_flow_high_level(
     hierarchy_path = train_learned_interface_hierarchy(
         point_config, VAE_CANDIDATE, seed, force=False
     )
-    hierarchy = torch.load(
-        hierarchy_path, map_location="cpu", weights_only=False
-    )
+    hierarchy = torch.load(hierarchy_path, map_location="cpu", weights_only=False)
     device = default_device()
     _unused_high, low_model = _load_hierarchy(hierarchy, device)
-    train, validation, metadata, encoded = _load_point_episodes(
-        point_config, seed
-    )
+    train, validation, metadata, encoded = _load_point_episodes(point_config, seed)
     frame_norm = Standardizer.from_state_dict(hierarchy["frame_norm"])
     goal_norm = Standardizer.from_state_dict(hierarchy["goal_norm"])
     action_norm = Standardizer.from_state_dict(hierarchy["action_norm"])
     horizon_steps = int(hierarchy["horizon_steps"])
     hidden_dim = int(config.get("vae_scaling.policy.hidden_dim", 512))
     batch_size = int(config.get("vae_scaling.policy.batch_size", 512))
-    batches_per_epoch = int(
-        config.get("vae_scaling.policy.batches_per_epoch", 200)
-    )
+    batches_per_epoch = int(config.get("vae_scaling.policy.batches_per_epoch", 200))
     epochs = int(config.get("vae_scaling.policy.epochs", 60))
     learning_rate = float(config.get("vae_scaling.policy.lr", 3e-4))
     model = FlowModel(
@@ -610,9 +547,11 @@ def train_vae_scaling_flow_high_level(
         int(config.get("vae_scaling.policy.validation_samples", 5000)),
         seed + 4300,
     )
-    validation_noise = np.random.default_rng(seed + 4400).standard_normal(
-        validation["goals"].shape
-    ).astype(np.float32)
+    validation_noise = (
+        np.random.default_rng(seed + 4400)
+        .standard_normal(validation["goals"].shape)
+        .astype(np.float32)
+    )
     best_state: dict[str, torch.Tensor] | None = None
     best_action_mae = float("inf")
     best_epoch = 0
@@ -631,20 +570,18 @@ def train_vae_scaling_flow_high_level(
             train_loss += float(loss.detach().cpu())
         model.eval()
         with torch.inference_mode():
-            prediction = sample_flow(
-                model,
-                torch.from_numpy(validation["conditions"]).to(device),
-                steps=int(config.get("vae_scaling.flow_steps", 24)),
-                sample_dim=int(hierarchy["goal_dim"]),
-                initial_noise=torch.from_numpy(validation_noise).to(device),
-            ).cpu().numpy()
-        goal_l2 = float(
-            np.mean(
-                np.linalg.norm(
-                    prediction - validation["goals"], axis=-1
+            prediction = (
+                sample_flow(
+                    model,
+                    torch.from_numpy(validation["conditions"]).to(device),
+                    steps=int(config.get("vae_scaling.flow_steps", 24)),
+                    sample_dim=int(hierarchy["goal_dim"]),
+                    initial_noise=torch.from_numpy(validation_noise).to(device),
                 )
+                .cpu()
+                .numpy()
             )
-        )
+        goal_l2 = float(np.mean(np.linalg.norm(prediction - validation["goals"], axis=-1)))
         predicted_condition = _low_condition_array(
             validation["current_frames"],
             np.empty_like(prediction),
@@ -663,28 +600,16 @@ def train_vae_scaling_flow_high_level(
         )
         with torch.inference_mode():
             predicted_action = action_norm.inverse(
-                low_model(
-                    torch.from_numpy(predicted_condition).to(device)
-                )
-                .cpu()
-                .numpy()
+                low_model(torch.from_numpy(predicted_condition).to(device)).cpu().numpy()
             )
             oracle_action = action_norm.inverse(
-                low_model(torch.from_numpy(oracle_condition).to(device))
-                .cpu()
-                .numpy()
+                low_model(torch.from_numpy(oracle_condition).to(device)).cpu().numpy()
             )
         predicted_action_mae = float(
-            np.mean(
-                np.abs(predicted_action - validation["target_actions"])
-            )
+            np.mean(np.abs(predicted_action - validation["target_actions"]))
         )
         induced_action_l2 = float(
-            np.mean(
-                np.linalg.norm(
-                    predicted_action - oracle_action, axis=-1
-                )
-            )
+            np.mean(np.linalg.norm(predicted_action - oracle_action, axis=-1))
         )
         history.append(
             {
@@ -746,9 +671,7 @@ def _deterministic_noise(
         sequence = np.random.SeedSequence(
             [training_seed, environment_seed, decision_index, dimension]
         )
-        rows.append(
-            np.random.default_rng(sequence).standard_normal(dimension)
-        )
+        rows.append(np.random.default_rng(sequence).standard_normal(dimension))
     return np.asarray(rows, dtype=np.float32)
 
 
@@ -765,12 +688,8 @@ def train_vae_scaling_point(
     representation = train_learned_interface_representation(
         point_config, VAE_CANDIDATE, seed, force=force
     )
-    encoded = prepare_learned_interface_episodes(
-        point_config, VAE_CANDIDATE, seed, force=force
-    )
-    hierarchy = train_learned_interface_hierarchy(
-        point_config, VAE_CANDIDATE, seed, force=force
-    )
+    encoded = prepare_learned_interface_episodes(point_config, VAE_CANDIDATE, seed, force=force)
+    hierarchy = train_learned_interface_hierarchy(point_config, VAE_CANDIDATE, seed, force=force)
     paths = {
         "manifest": manifest,
         "representation": representation,
@@ -782,15 +701,13 @@ def train_vae_scaling_point(
     }
     for representation_name in ("latent", "observation"):
         for policy_type in ("deterministic", "flow"):
-            paths[f"flat_{representation_name}_{policy_type}"] = (
-                train_vae_scaling_flat_policy(
-                    config,
-                    n_trajectories,
-                    representation_name,
-                    policy_type,
-                    seed,
-                    force=force,
-                )
+            paths[f"flat_{representation_name}_{policy_type}"] = train_vae_scaling_flat_policy(
+                config,
+                n_trajectories,
+                representation_name,
+                policy_type,
+                seed,
+                force=force,
             )
     write_json(
         _point_artifact_dir(point_config, seed) / "training_manifest.json",
@@ -805,9 +722,7 @@ def train_vae_scaling_point(
     return paths
 
 
-def _load_flat_policy(
-    checkpoint: dict[str, Any], device: torch.device
-) -> nn.Module:
+def _load_flat_policy(checkpoint: dict[str, Any], device: torch.device) -> nn.Module:
     model: nn.Module = (
         MLP(
             int(checkpoint["condition_dim"]),
@@ -877,13 +792,10 @@ def evaluate_vae_scaling_flat_policy(
     force: bool = False,
 ) -> Path:
     point_config = vae_scaling_config(config, n_trajectories)
-    eval_episodes = int(
-        episodes or config.get("vae_scaling.deployable_eval_episodes", 500)
-    )
+    eval_episodes = int(episodes or config.get("vae_scaling.deployable_eval_episodes", 500))
     method = f"flat_{representation}_{policy_type}"
     output_path = (
-        ensure_dir(_point_result_dir(point_config, seed) / method)
-        / f"eval_{eval_episodes}.json"
+        ensure_dir(_point_result_dir(point_config, seed) / method) / f"eval_{eval_episodes}.json"
     )
     if output_path.exists() and not force:
         return output_path
@@ -896,9 +808,7 @@ def evaluate_vae_scaling_flat_policy(
         force=False,
     )
     device = default_device()
-    checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=False
-    )
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model = _load_flat_policy(checkpoint, device)
     frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
     latent_norm = Standardizer.from_state_dict(checkpoint["latent_norm"])
@@ -911,9 +821,7 @@ def evaluate_vae_scaling_flat_policy(
     dino = _phase4_dino_from_config(config, device)
     teacher = load_ppo_agent(_rl_paths(config).best, device)
     max_steps = int(config.get("env_max_episode_steps", 100))
-    num_envs_max = min(
-        int(config.get("vae_scaling.eval_num_envs", 64)), eval_episodes
-    )
+    num_envs_max = min(int(config.get("vae_scaling.eval_num_envs", 64)), eval_episodes)
     eval_seed_start = int(config.get("vae_scaling.eval_seed_start", 2_200_000))
     successes: list[float] = []
     final_rewards: list[float] = []
@@ -925,9 +833,7 @@ def evaluate_vae_scaling_flat_policy(
     progress = trange(eval_episodes, desc=f"eval {method} n={n_trajectories}")
     for batch_start in range(0, eval_episodes, num_envs_max):
         num_envs = min(num_envs_max, eval_episodes - batch_start)
-        reset_seeds = [
-            eval_seed_start + batch_start + index for index in range(num_envs)
-        ]
+        reset_seeds = [eval_seed_start + batch_start + index for index in range(num_envs)]
         env = gym.make(
             config.get("env_id"),
             obs_mode="rgb+state",
@@ -959,27 +865,19 @@ def evaluate_vae_scaling_flat_policy(
             for step in range(max_steps):
                 if not np.any(active):
                     break
-                frames = _phase4_frame_inputs(
-                    obs, dino, int(config.get("dino.batch_size", 64))
-                )
+                frames = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
                 if representation == "observation":
                     current = frame_norm.transform(frames)
                 else:
                     if encoder is None:
                         raise RuntimeError("Missing VAE encoder for latent policy")
                     latent = (
-                        encoder(
-                            torch.from_numpy(frame_norm.transform(frames))
-                            .to(device)
-                            .float()
-                        )
+                        encoder(torch.from_numpy(frame_norm.transform(frames)).to(device).float())
                         .cpu()
                         .numpy()
                     )
                     current = latent_norm.transform(latent)
-                condition = np.concatenate(
-                    [current, previous_action], axis=-1
-                ).astype(np.float32)
+                condition = np.concatenate([current, previous_action], axis=-1).astype(np.float32)
                 condition_t = torch.from_numpy(condition).to(device)
                 normalized_action = (
                     model(condition_t)
@@ -994,9 +892,7 @@ def evaluate_vae_scaling_flat_policy(
                         ).to(device),
                     )
                 )
-                raw_action = action_norm.inverse(
-                    normalized_action.cpu().numpy()
-                )
+                raw_action = action_norm.inverse(normalized_action.cpu().numpy())
                 saturated_actions += int(
                     np.sum(
                         np.any(
@@ -1029,23 +925,12 @@ def evaluate_vae_scaling_flat_policy(
                 )
                 action[~torch.from_numpy(active).to(device)] = 0.0
                 obs, reward, terminated, truncated, info = env.step(action)
-                previous_action = action_norm.transform(
-                    action.cpu().numpy().astype(np.float32)
-                )
+                previous_action = action_norm.transform(action.cpu().numpy().astype(np.float32))
                 reward_np = reward.detach().cpu().numpy().reshape(-1)
                 batch_final[active] = reward_np[active]
-                batch_max[active] = np.maximum(
-                    batch_max[active], reward_np[active]
-                )
+                batch_max[active] = np.maximum(batch_max[active], reward_np[active])
                 if "success" in info:
-                    success_once |= (
-                        info["success"]
-                        .detach()
-                        .cpu()
-                        .numpy()
-                        .reshape(-1)
-                        .astype(bool)
-                    )
+                    success_once |= info["success"].detach().cpu().numpy().reshape(-1).astype(bool)
                 done = (
                     torch.logical_or(terminated, truncated)
                     .detach()
@@ -1084,8 +969,7 @@ def evaluate_vae_scaling_flat_policy(
             "representation": representation,
             "elapsed_s": timer.elapsed(),
             "flow_noise": (
-                "deterministic SeedSequence(training_seed, environment_seed, "
-                "step, action_dim)"
+                "deterministic SeedSequence(training_seed, environment_seed, step, action_dim)"
                 if policy_type == "flow"
                 else None
             ),
@@ -1104,22 +988,16 @@ def evaluate_vae_scaling_flow_hierarchy(
     force: bool = False,
 ) -> Path:
     point_config = vae_scaling_config(config, n_trajectories)
-    eval_episodes = int(
-        episodes or config.get("vae_scaling.deployable_eval_episodes", 500)
-    )
+    eval_episodes = int(episodes or config.get("vae_scaling.deployable_eval_episodes", 500))
     output_path = (
         ensure_dir(_point_result_dir(point_config, seed) / "flow_hierarchy")
         / f"eval_{eval_episodes}.json"
     )
     if output_path.exists() and not force:
         return output_path
-    checkpoint_path = train_vae_scaling_flow_high_level(
-        config, n_trajectories, seed, force=False
-    )
+    checkpoint_path = train_vae_scaling_flow_high_level(config, n_trajectories, seed, force=False)
     device = default_device()
-    checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=False
-    )
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     hierarchy = torch.load(
         checkpoint["hierarchy_checkpoint"],
         map_location=device,
@@ -1140,9 +1018,7 @@ def evaluate_vae_scaling_flow_hierarchy(
     horizon_steps = int(hierarchy["horizon_steps"])
     update_period = int(hierarchy["update_period"])
     max_steps = int(config.get("env_max_episode_steps", 100))
-    num_envs_max = min(
-        int(config.get("vae_scaling.eval_num_envs", 64)), eval_episodes
-    )
+    num_envs_max = min(int(config.get("vae_scaling.eval_num_envs", 64)), eval_episodes)
     eval_seed_start = int(config.get("vae_scaling.eval_seed_start", 2_200_000))
     successes: list[float] = []
     final_rewards: list[float] = []
@@ -1152,14 +1028,10 @@ def evaluate_vae_scaling_flow_hierarchy(
     active_actions = 0
     goal_norms: list[float] = []
     timer = Timer()
-    progress = trange(
-        eval_episodes, desc=f"eval flow hierarchy n={n_trajectories}"
-    )
+    progress = trange(eval_episodes, desc=f"eval flow hierarchy n={n_trajectories}")
     for batch_start in range(0, eval_episodes, num_envs_max):
         num_envs = min(num_envs_max, eval_episodes - batch_start)
-        reset_seeds = [
-            eval_seed_start + batch_start + index for index in range(num_envs)
-        ]
+        reset_seeds = [eval_seed_start + batch_start + index for index in range(num_envs)]
         env = gym.make(
             config.get("env_id"),
             obs_mode="rgb+state",
@@ -1182,9 +1054,7 @@ def evaluate_vae_scaling_flow_hierarchy(
             num_envs,
             axis=0,
         )
-        held_goal = np.zeros(
-            (num_envs, int(hierarchy["goal_dim"])), dtype=np.float32
-        )
+        held_goal = np.zeros((num_envs, int(hierarchy["goal_dim"])), dtype=np.float32)
         countdown = np.zeros(num_envs, dtype=np.int32)
         decision_count = np.zeros(num_envs, dtype=np.int32)
         active = np.ones(num_envs, dtype=bool)
@@ -1196,9 +1066,7 @@ def evaluate_vae_scaling_flow_hierarchy(
             for _step in range(max_steps):
                 if not np.any(active):
                     break
-                frames = _phase4_frame_inputs(
-                    obs, dino, int(config.get("dino.batch_size", 64))
-                )
+                frames = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
                 normalized_frames = frame_norm.transform(frames)
                 replan = active & (countdown <= 0)
                 if np.any(replan):
@@ -1213,17 +1081,19 @@ def evaluate_vae_scaling_flow_hierarchy(
                             int(decision_count[index]),
                             int(hierarchy["goal_dim"]),
                         )[0]
-                    predicted_goal = sample_flow(
-                        high_flow,
-                        torch.from_numpy(condition).to(device),
-                        steps=int(checkpoint["flow_steps"]),
-                        sample_dim=int(hierarchy["goal_dim"]),
-                        initial_noise=torch.from_numpy(noise).to(device),
-                    ).cpu().numpy()
-                    held_goal[replan] = predicted_goal[replan]
-                    goal_norms.extend(
-                        np.linalg.norm(predicted_goal[replan], axis=-1).tolist()
+                    predicted_goal = (
+                        sample_flow(
+                            high_flow,
+                            torch.from_numpy(condition).to(device),
+                            steps=int(checkpoint["flow_steps"]),
+                            sample_dim=int(hierarchy["goal_dim"]),
+                            initial_noise=torch.from_numpy(noise).to(device),
+                        )
+                        .cpu()
+                        .numpy()
                     )
+                    held_goal[replan] = predicted_goal[replan]
+                    goal_norms.extend(np.linalg.norm(predicted_goal[replan], axis=-1).tolist())
                     countdown[replan] = update_period
                     decision_count[replan] += 1
                 condition = _low_condition_array(
@@ -1231,18 +1101,11 @@ def evaluate_vae_scaling_flow_hierarchy(
                     np.empty_like(held_goal),
                     held_goal,
                     previous_action,
-                    (
-                        np.maximum(countdown, 1).astype(np.float32)
-                        / horizon_steps
-                    )[:, None],
+                    (np.maximum(countdown, 1).astype(np.float32) / horizon_steps)[:, None],
                     "concat",
                 )
                 raw_action = action_norm.inverse(
-                    low_model(
-                        torch.from_numpy(condition).to(device).float()
-                    )
-                    .cpu()
-                    .numpy()
+                    low_model(torch.from_numpy(condition).to(device).float()).cpu().numpy()
                 )
                 saturated_actions += int(
                     np.sum(
@@ -1276,24 +1139,13 @@ def evaluate_vae_scaling_flow_hierarchy(
                 )
                 action[~torch.from_numpy(active).to(device)] = 0.0
                 obs, reward, terminated, truncated, info = env.step(action)
-                previous_action = action_norm.transform(
-                    action.cpu().numpy().astype(np.float32)
-                )
+                previous_action = action_norm.transform(action.cpu().numpy().astype(np.float32))
                 countdown -= 1
                 reward_np = reward.detach().cpu().numpy().reshape(-1)
                 batch_final[active] = reward_np[active]
-                batch_max[active] = np.maximum(
-                    batch_max[active], reward_np[active]
-                )
+                batch_max[active] = np.maximum(batch_max[active], reward_np[active])
                 if "success" in info:
-                    success_once |= (
-                        info["success"]
-                        .detach()
-                        .cpu()
-                        .numpy()
-                        .reshape(-1)
-                        .astype(bool)
-                    )
+                    success_once |= info["success"].detach().cpu().numpy().reshape(-1).astype(bool)
                 done = (
                     torch.logical_or(terminated, truncated)
                     .detach()
@@ -1351,18 +1203,12 @@ def evaluate_vae_scaling_point(
 ) -> Path:
     point_config = vae_scaling_config(config, n_trajectories)
     deployable_count = int(
-        deployable_episodes
-        or config.get("vae_scaling.deployable_eval_episodes", 500)
+        deployable_episodes or config.get("vae_scaling.deployable_eval_episodes", 500)
     )
-    oracle_count = int(
-        oracle_episodes or config.get("vae_scaling.oracle_eval_episodes", 50)
-    )
+    oracle_count = int(oracle_episodes or config.get("vae_scaling.oracle_eval_episodes", 50))
     train_vae_scaling_point(config, n_trajectories, seed, force=False)
     result_dir = _point_result_dir(point_config, seed)
-    summary_path = (
-        result_dir
-        / f"summary_deploy{deployable_count}_oracle{oracle_count}.json"
-    )
+    summary_path = result_dir / f"summary_deploy{deployable_count}_oracle{oracle_count}.json"
     if summary_path.exists() and not force:
         return summary_path
     deterministic_path = evaluate_learned_interface_hierarchy(
@@ -1394,16 +1240,14 @@ def evaluate_vae_scaling_point(
     }
     for representation in ("latent", "observation"):
         for policy_type in ("deterministic", "flow"):
-            paths[f"flat_{representation}_{policy_type}"] = (
-                evaluate_vae_scaling_flat_policy(
-                    config,
-                    n_trajectories,
-                    representation,
-                    policy_type,
-                    seed,
-                    episodes=deployable_count,
-                    force=force,
-                )
+            paths[f"flat_{representation}_{policy_type}"] = evaluate_vae_scaling_flat_policy(
+                config,
+                n_trajectories,
+                representation,
+                policy_type,
+                seed,
+                episodes=deployable_count,
+                force=force,
             )
     rows = []
     for method in ALL_METHODS:
@@ -1429,15 +1273,548 @@ def evaluate_vae_scaling_point(
         "training_seed": seed,
         "deployable_evaluation_episodes": deployable_count,
         "oracle_evaluation_episodes": oracle_count,
-        "evaluation_seed_start": int(
-            config.get("vae_scaling.eval_seed_start", 2_200_000)
-        ),
-        "data_manifest": str(
-            write_vae_scaling_manifest(config, n_trajectories)
-        ),
+        "evaluation_seed_start": int(config.get("vae_scaling.eval_seed_start", 2_200_000)),
+        "data_manifest": str(write_vae_scaling_manifest(config, n_trajectories)),
         "data_manifest_sha256": manifest["sha256"],
         "rows": rows,
         "metadata": _runtime_metadata(config),
     }
     write_json(summary_path, payload)
     return summary_path
+
+
+_METHOD_LABELS = {
+    "deterministic_hierarchy": "hierarchy deterministic",
+    "flow_hierarchy": "hierarchy flow matching",
+    "oracle_hierarchy": "hierarchy branch oracle",
+    "flat_latent_deterministic": "flat VAE latent deterministic",
+    "flat_latent_flow": "flat VAE latent flow matching",
+    "flat_observation_deterministic": "flat observation deterministic",
+    "flat_observation_flow": "flat observation flow matching",
+}
+
+
+def _threshold_crossing(budgets: np.ndarray, values: np.ndarray, threshold: float) -> float | None:
+    for index, value in enumerate(values):
+        if value < threshold:
+            continue
+        if index == 0:
+            return float(budgets[0])
+        x0, x1 = np.log(budgets[index - 1 : index + 1])
+        y0, y1 = values[index - 1 : index + 1]
+        if y1 == y0:
+            return float(budgets[index])
+        fraction = (threshold - y0) / (y1 - y0)
+        return float(np.exp(x0 + fraction * (x1 - x0)))
+    return None
+
+
+def _save_scaling_plot(
+    frame: Any,
+    methods: tuple[str, ...],
+    metric: str,
+    output_path: Path,
+    title: str,
+    oracle: bool = False,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    colors = {
+        method: color
+        for method, color in zip(
+            ALL_METHODS,
+            ("#0072B2", "#D55E00", "#009E73", "#56B4E9", "#CC79A7", "#E69F00", "#000000"),
+            strict=True,
+        )
+    }
+    figure, axis = plt.subplots(figsize=(10.5, 6.2))
+    for method in methods:
+        selected = frame[frame["method"] == method].sort_values("n_trajectories")
+        axis.errorbar(
+            selected["n_trajectories"],
+            selected[f"{metric}_mean"],
+            yerr=selected[f"{metric}_sd"],
+            label=_METHOD_LABELS[method],
+            color=colors[method],
+            marker="o",
+            linewidth=2,
+            capsize=3,
+            linestyle="--" if method == "oracle_hierarchy" else "-",
+        )
+    axis.set_xscale("log")
+    axis.set_xticks(VAE_SCALING_BUDGETS, labels=VAE_SCALING_BUDGETS)
+    axis.set_xlabel("training trajectories (nested subsets)")
+    axis.set_ylabel(metric.replace("_", " "))
+    if metric == "success":
+        axis.set_ylim(0.0, 1.0)
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=9, ncol=2)
+    subtitle = "mean +/- sample SD over 3 training seeds"
+    if oracle:
+        subtitle += "; oracle: 50 episodes/seed, learned: 500"
+    else:
+        subtitle += "; 500 evaluation episodes/seed"
+    axis.set_title(f"{title}\n{subtitle}")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def aggregate_vae_scaling_results(
+    config: Config,
+    deployable_episodes: int = 500,
+    oracle_episodes: int = 50,
+) -> Path:
+    """Validate and aggregate the complete fixed-budget scaling experiment."""
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    aggregate_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir") / "vae512_scaling" / "aggregate"
+    )
+    run_rows: list[dict[str, Any]] = []
+    source_payloads: dict[tuple[int, int, str], dict[str, Any]] = {}
+    for budget in VAE_SCALING_BUDGETS:
+        point_config = vae_scaling_config(config, budget)
+        for seed in VAE_SCALING_SEEDS:
+            summary_path = (
+                _point_result_dir(point_config, seed)
+                / f"summary_deploy{deployable_episodes}_oracle{oracle_episodes}.json"
+            )
+            if not summary_path.exists():
+                raise FileNotFoundError(f"Missing final result: {summary_path}")
+            summary = json.loads(summary_path.read_text())
+            by_method = {row["method"]: row for row in summary["rows"]}
+            if set(by_method) != set(ALL_METHODS):
+                raise ValueError(f"Incomplete method set in {summary_path}")
+            for method in ALL_METHODS:
+                row = by_method[method]
+                expected_episodes = (
+                    oracle_episodes if method == "oracle_hierarchy" else deployable_episodes
+                )
+                if int(row["episodes"]) != expected_episodes:
+                    raise ValueError(
+                        f"{method} at N={budget}, seed={seed} has "
+                        f"{row['episodes']} episodes, expected {expected_episodes}"
+                    )
+                source = Path(row["source"])
+                payload = json.loads(source.read_text())
+                outcomes = payload.get("episode_success")
+                if outcomes is None or len(outcomes) != expected_episodes:
+                    raise ValueError(f"Missing episode outcomes in {source}")
+                source_payloads[(budget, seed, method)] = payload
+                run_rows.append(
+                    {
+                        "n_trajectories": budget,
+                        "training_seed": seed,
+                        "method": method,
+                        "episodes": expected_episodes,
+                        "success": float(row["success"]),
+                        "final_reward": float(row["final_reward"]),
+                        "max_reward": float(row["max_reward"]),
+                        "teacher_action_mae": float(row["teacher_action_mae"]),
+                        "action_saturation_rate": payload.get("action_saturation_rate", math.nan),
+                        "rollout_elapsed_s": payload.get("elapsed_s", math.nan),
+                        "decisions_per_episode": payload.get(
+                            "high_level_decisions_per_episode", math.nan
+                        ),
+                        "source": str(source),
+                        "episode_success": json.dumps(outcomes),
+                    }
+                )
+    runs = pd.DataFrame(run_rows)
+    runs.to_csv(aggregate_dir / "all_runs.csv", index=False)
+    metrics = [
+        "success",
+        "final_reward",
+        "max_reward",
+        "teacher_action_mae",
+        "action_saturation_rate",
+        "rollout_elapsed_s",
+        "decisions_per_episode",
+    ]
+    grouped = runs.groupby(["n_trajectories", "method"], sort=False)
+    summary = grouped[metrics].agg(["mean", "std"]).reset_index()
+    summary.columns = [
+        "_".join(part for part in column if part) if isinstance(column, tuple) else column
+        for column in summary.columns
+    ]
+    seed_values = grouped["success"].apply(list).reset_index(name="success_by_seed")
+    summary = summary.merge(seed_values, on=["n_trajectories", "method"])
+    summary.to_csv(aggregate_dir / "method_budget_summary.csv", index=False)
+    (aggregate_dir / "method_budget_summary.md").write_text(summary.to_markdown(index=False) + "\n")
+
+    manifests = []
+    for budget in VAE_SCALING_BUDGETS:
+        manifests.append(json.loads(write_vae_scaling_manifest(config, budget).read_text()))
+    compute_rows = []
+    for manifest in manifests:
+        budget = int(manifest["n_trajectories"])
+        component_times: dict[str, list[float]] = {
+            "representation": [],
+            "deterministic_hierarchy": [],
+            "flow_high": [],
+            "flat_latent_deterministic": [],
+            "flat_latent_flow": [],
+            "flat_observation_deterministic": [],
+            "flat_observation_flow": [],
+        }
+        for seed in VAE_SCALING_SEEDS:
+            point_config = vae_scaling_config(config, budget)
+            learned_dir = (
+                point_config.path_value("paths.incremental_artifact_dir")
+                / "learned_interface"
+                / VAE_CANDIDATE
+                / f"seed{seed}"
+            )
+            checkpoint_paths = {
+                "representation": learned_dir / "representation.pt",
+                "deterministic_hierarchy": learned_dir / "hierarchy.pt",
+                "flow_high": _point_artifact_dir(point_config, seed)
+                / "flow_hierarchy"
+                / "high_flow.pt",
+            }
+            checkpoint_paths.update(
+                {
+                    method: _point_artifact_dir(point_config, seed)
+                    / method
+                    / "policy.pt"
+                    for method in DEPLOYABLE_METHODS
+                    if method.startswith("flat_")
+                }
+            )
+            for component, checkpoint_path in checkpoint_paths.items():
+                checkpoint = torch.load(
+                    checkpoint_path, map_location="cpu", weights_only=False
+                )
+                component_times[component].append(float(checkpoint["elapsed_s"]))
+        row = {
+            "trajectories": budget,
+            "transitions": manifest["train_transitions"],
+            "behavior_seconds": manifest["equivalent_behavior_seconds"],
+            "mean_total_train_seconds": sum(
+                np.mean(times) for times in component_times.values()
+            ),
+            "mean_deployable_rollout_seconds": float(
+                runs[
+                    (runs["n_trajectories"] == budget)
+                    & (runs["method"].isin(DEPLOYABLE_METHODS))
+                ]["rollout_elapsed_s"].mean()
+            ),
+            "mean_oracle_rollout_seconds": float(
+                runs[
+                    (runs["n_trajectories"] == budget)
+                    & (runs["method"] == "oracle_hierarchy")
+                ]["rollout_elapsed_s"].mean()
+            ),
+        }
+        row.update(
+            {
+                f"mean_{component}_train_seconds": float(np.mean(times))
+                for component, times in component_times.items()
+            }
+        )
+        compute_rows.append(row)
+    data_table = pd.DataFrame(compute_rows)
+    data_table.to_csv(aggregate_dir / "data_budget.csv", index=False)
+    (aggregate_dir / "data_budget.md").write_text(
+        data_table.to_markdown(index=False) + "\n"
+    )
+
+    diagnostics = summary[
+        [
+            "n_trajectories",
+            "method",
+            "final_reward_mean",
+            "final_reward_sd",
+            "max_reward_mean",
+            "max_reward_sd",
+            "teacher_action_mae_mean",
+            "teacher_action_mae_sd",
+            "action_saturation_rate_mean",
+            "action_saturation_rate_sd",
+            "rollout_elapsed_s_mean",
+            "decisions_per_episode_mean",
+        ]
+    ]
+    diagnostics.to_csv(aggregate_dir / "control_diagnostics.csv", index=False)
+    (aggregate_dir / "control_diagnostics.md").write_text(
+        diagnostics.to_markdown(index=False) + "\n"
+    )
+
+    reference_config = vae_scaling_config(config, VAE_SCALING_BUDGETS[0])
+    reference_seed_dir = _point_artifact_dir(reference_config, VAE_SCALING_SEEDS[0])
+    reference_learned_dir = (
+        reference_config.path_value("paths.incremental_artifact_dir")
+        / "learned_interface"
+        / VAE_CANDIDATE
+        / f"seed{VAE_SCALING_SEEDS[0]}"
+    )
+
+    def parameter_count(state: dict[str, torch.Tensor]) -> int:
+        return int(sum(value.numel() for value in state.values()))
+
+    representation_checkpoint = torch.load(
+        reference_learned_dir / "representation.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    hierarchy_checkpoint = torch.load(
+        reference_learned_dir / "hierarchy.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    flow_high_checkpoint = torch.load(
+        reference_seed_dir / "flow_hierarchy" / "high_flow.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    architecture_rows = [
+        {
+            "component": "VAE-512 representation",
+            "input_dim": representation_checkpoint["input_dim"],
+            "output_dim": representation_checkpoint["latent_dim"],
+            "hidden_dim": representation_checkpoint["hidden_dim"],
+            "parameter_count": parameter_count(
+                representation_checkpoint["encoder"]
+            )
+            + parameter_count(representation_checkpoint["decoder"]),
+            "epochs": len(representation_checkpoint["history"]),
+            "optimizer_steps": "see representation checkpoint/config",
+            "learning_rate": representation_checkpoint["spec"].get("lr"),
+            "flow_steps": None,
+            "checkpoint_criterion": "minimum validation reconstruction loss",
+        },
+        {
+            "component": "deterministic hierarchy high + shared low",
+            "input_dim": hierarchy_checkpoint["frame_dim"],
+            "output_dim": hierarchy_checkpoint["goal_dim"],
+            "hidden_dim": hierarchy_checkpoint["hidden_dim"],
+            "parameter_count": parameter_count(
+                hierarchy_checkpoint["high_model"]
+            )
+            + parameter_count(hierarchy_checkpoint["low_model"]),
+            "epochs": len(hierarchy_checkpoint["history"]),
+            "optimizer_steps": "see hierarchy checkpoint/config",
+            "learning_rate": None,
+            "flow_steps": None,
+            "checkpoint_criterion": "minimum predicted low-level action MAE",
+        },
+        {
+            "component": "flow hierarchy high (shared deterministic low)",
+            "input_dim": flow_high_checkpoint["condition_dim"],
+            "output_dim": flow_high_checkpoint["goal_dim"],
+            "hidden_dim": flow_high_checkpoint["hidden_dim"],
+            "parameter_count": flow_high_checkpoint["parameter_count"],
+            "epochs": flow_high_checkpoint["epochs"],
+            "optimizer_steps": flow_high_checkpoint["epochs"]
+            * flow_high_checkpoint["batches_per_epoch"],
+            "learning_rate": flow_high_checkpoint["learning_rate"],
+            "flow_steps": flow_high_checkpoint["flow_steps"],
+            "checkpoint_criterion": "minimum predicted low-level action MAE",
+        },
+    ]
+    for method in DEPLOYABLE_METHODS:
+        if not method.startswith("flat_"):
+            continue
+        checkpoint = torch.load(
+            reference_seed_dir / method / "policy.pt",
+            map_location="cpu",
+            weights_only=False,
+        )
+        architecture_rows.append(
+            {
+                "component": method,
+                "input_dim": checkpoint["condition_dim"],
+                "output_dim": checkpoint["action_dim"],
+                "hidden_dim": checkpoint["hidden_dim"],
+                "parameter_count": checkpoint["parameter_count"],
+                "epochs": checkpoint["epochs"],
+                "optimizer_steps": checkpoint["epochs"]
+                * checkpoint["batches_per_epoch"],
+                "learning_rate": checkpoint["learning_rate"],
+                "flow_steps": (
+                    checkpoint["flow_steps"]
+                    if checkpoint["policy_type"] == "flow"
+                    else None
+                ),
+                "checkpoint_criterion": "minimum validation action MAE",
+            }
+        )
+    architecture = pd.DataFrame(architecture_rows)
+    architecture.to_csv(aggregate_dir / "architectures.csv", index=False)
+    (aggregate_dir / "architectures.md").write_text(
+        architecture.to_markdown(index=False) + "\n"
+    )
+
+    efficiency_rows = []
+    transition_lookup = {row.trajectories: row.transitions for row in data_table.itertuples()}
+    for method in ALL_METHODS:
+        selected = summary[summary["method"] == method].sort_values("n_trajectories")
+        budgets = selected["n_trajectories"].to_numpy(dtype=float)
+        values = selected["success_mean"].to_numpy(dtype=float)
+        n50 = _threshold_crossing(budgets, values, 0.50)
+        n70 = _threshold_crossing(budgets, values, 0.70)
+
+        def interpolated_transitions(n_value: float | None) -> float | None:
+            if n_value is None:
+                return None
+            return float(
+                np.interp(
+                    np.log(n_value),
+                    np.log(list(transition_lookup)),
+                    list(transition_lookup.values()),
+                )
+            )
+
+        efficiency_rows.append(
+            {
+                "method": method,
+                "n50_trajectories": n50,
+                "n50_transitions": interpolated_transitions(n50),
+                "n70_trajectories": n70,
+                "n70_transitions": interpolated_transitions(n70),
+                "aulc_log_n": float(np.trapezoid(values, np.log(budgets))),
+                "normalized_aulc_log_n": float(
+                    np.trapezoid(values, np.log(budgets))
+                    / (np.log(budgets[-1]) - np.log(budgets[0]))
+                ),
+            }
+        )
+    efficiency = pd.DataFrame(efficiency_rows)
+    efficiency.to_csv(aggregate_dir / "sample_efficiency.csv", index=False)
+    (aggregate_dir / "sample_efficiency.md").write_text(efficiency.to_markdown(index=False) + "\n")
+
+    _save_scaling_plot(
+        summary,
+        DEPLOYABLE_METHODS,
+        "success",
+        aggregate_dir / "success_deployable.png",
+        "VAE-512 sample efficiency",
+    )
+    _save_scaling_plot(
+        summary,
+        ("deterministic_hierarchy", "flow_hierarchy", "oracle_hierarchy"),
+        "success",
+        aggregate_dir / "success_hierarchy_oracle.png",
+        "Learned and oracle hierarchical interfaces",
+        oracle=True,
+    )
+    _save_scaling_plot(
+        summary,
+        (
+            "flat_latent_deterministic",
+            "flat_latent_flow",
+            "flat_observation_deterministic",
+            "flat_observation_flow",
+        ),
+        "success",
+        aggregate_dir / "success_flat_ablation.png",
+        "Flat policy representation and objective ablation",
+    )
+    for metric in ("final_reward", "max_reward"):
+        _save_scaling_plot(
+            summary,
+            DEPLOYABLE_METHODS,
+            metric,
+            aggregate_dir / f"{metric}_deployable.png",
+            f"VAE-512 {metric.replace('_', ' ')}",
+        )
+
+    figure, axes = plt.subplots(1, 3, figsize=(16, 5.2))
+    oracle_success = summary[summary["method"] == "oracle_hierarchy"].set_index("n_trajectories")[
+        "success_mean"
+    ]
+    for method, color in (
+        ("deterministic_hierarchy", "#0072B2"),
+        ("flow_hierarchy", "#D55E00"),
+    ):
+        selected = summary[summary["method"] == method].sort_values("n_trajectories")
+        gap = [
+            oracle_success.loc[budget] - value
+            for budget, value in zip(
+                selected["n_trajectories"], selected["success_mean"], strict=True
+            )
+        ]
+        axes[0].plot(
+            selected["n_trajectories"],
+            gap,
+            marker="o",
+            label=_METHOD_LABELS[method],
+            color=color,
+        )
+        goal_l2 = []
+        induced_l2 = []
+        for budget in VAE_SCALING_BUDGETS:
+            values_goal = []
+            values_action = []
+            for seed in VAE_SCALING_SEEDS:
+                point_config = vae_scaling_config(config, budget)
+                checkpoint_path = (
+                    _point_artifact_dir(point_config, seed) / "flow_hierarchy" / "high_flow.pt"
+                    if method == "flow_hierarchy"
+                    else point_config.path_value("paths.incremental_artifact_dir")
+                    / "learned_interface"
+                    / VAE_CANDIDATE
+                    / f"seed{seed}"
+                    / "hierarchy.pt"
+                )
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                validation = checkpoint["validation_metrics"]
+                values_goal.append(
+                    validation.get(
+                        "validation_normalized_goal_l2",
+                        validation.get("normalized_goal_l2"),
+                    )
+                )
+                values_action.append(
+                    validation.get(
+                        "validation_prediction_induced_action_l2",
+                        validation.get("prediction_induced_action_l2"),
+                    )
+                )
+            goal_l2.append(float(np.mean(values_goal)))
+            induced_l2.append(float(np.mean(values_action)))
+        axes[1].plot(
+            VAE_SCALING_BUDGETS,
+            goal_l2,
+            marker="o",
+            label=_METHOD_LABELS[method],
+            color=color,
+        )
+        axes[2].plot(
+            VAE_SCALING_BUDGETS,
+            induced_l2,
+            marker="o",
+            label=_METHOD_LABELS[method],
+            color=color,
+        )
+    for axis in axes:
+        axis.set_xscale("log")
+        axis.set_xticks(VAE_SCALING_BUDGETS, labels=VAE_SCALING_BUDGETS)
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8)
+        axis.set_xlabel("training trajectories")
+    axes[0].set_ylabel("oracle success - learned success")
+    axes[1].set_ylabel("normalized future-latent prediction L2")
+    axes[2].set_ylabel("prediction-induced low-level action L2")
+    figure.suptitle("Learned-to-oracle hierarchy gap")
+    figure.tight_layout()
+    figure.savefig(aggregate_dir / "learned_oracle_gap.png", dpi=180)
+    plt.close(figure)
+
+    write_json(
+        aggregate_dir / "aggregation_manifest.json",
+        {
+            "experiment": "vae512_sample_efficiency",
+            "budgets": list(VAE_SCALING_BUDGETS),
+            "training_seeds": list(VAE_SCALING_SEEDS),
+            "deployable_episodes_per_seed": deployable_episodes,
+            "oracle_episodes_per_seed": oracle_episodes,
+            "methods": list(ALL_METHODS),
+            "run_count": len(runs),
+            "episode_outcomes_validated": True,
+            "metadata": _runtime_metadata(config),
+        },
+    )
+    return aggregate_dir

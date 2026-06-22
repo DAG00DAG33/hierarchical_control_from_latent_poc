@@ -111,6 +111,7 @@ from hcl_poc.train import (
     train_state_bc_policy,
 )
 from hcl_poc.vae_scaling import (
+    aggregate_vae_scaling_results,
     evaluate_vae_scaling_point,
     train_vae_scaling_point,
     validate_nested_vae_scaling_manifests,
@@ -986,6 +987,14 @@ def incremental_cmd(args: argparse.Namespace) -> None:
         )
     elif args.incremental_command == "vae-scaling-manifests":
         console.print(validate_nested_vae_scaling_manifests(config))
+    elif args.incremental_command == "vae-scaling-aggregate":
+        console.print(
+            aggregate_vae_scaling_results(
+                config,
+                deployable_episodes=args.episodes,
+                oracle_episodes=args.oracle_episodes,
+            )
+        )
     elif args.incremental_command == "vae-scaling-train":
         train_vae_scaling_point(
             config,
@@ -1497,9 +1506,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=["clean", "mixed_25", "mixed_50", "recovery_heavy"],
     )
-    pre_rl_d_visual_bc.add_argument(
-        "--label-view", choices=["query", "behavior"], default="query"
-    )
+    pre_rl_d_visual_bc.add_argument("--label-view", choices=["query", "behavior"], default="query")
     pre_rl_d_visual_bc.add_argument(
         "--matched-hierarchy-data",
         action="store_true",
@@ -1543,17 +1550,13 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_f_eval.set_defaults(func=incremental_cmd)
     pre_rl_f_visual_train = incremental_sub.add_parser("pre-rl-f-train-visual-tcp")
     add_config_arg(pre_rl_f_visual_train)
-    pre_rl_f_visual_train.add_argument(
-        "--representation", choices=["raw", "ae256"], required=True
-    )
+    pre_rl_f_visual_train.add_argument("--representation", choices=["raw", "ae256"], required=True)
     pre_rl_f_visual_train.add_argument("--seed", type=int, default=0)
     pre_rl_f_visual_train.add_argument("--force", action="store_true")
     pre_rl_f_visual_train.set_defaults(func=incremental_cmd)
     pre_rl_f_visual_eval = incremental_sub.add_parser("pre-rl-f-eval-visual-tcp")
     add_config_arg(pre_rl_f_visual_eval)
-    pre_rl_f_visual_eval.add_argument(
-        "--representation", choices=["raw", "ae256"], required=True
-    )
+    pre_rl_f_visual_eval.add_argument("--representation", choices=["raw", "ae256"], required=True)
     pre_rl_f_visual_eval.add_argument(
         "--goal-source", choices=["learned", "oracle"], default="learned"
     )
@@ -1562,13 +1565,9 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_f_visual_eval.add_argument("--episodes", type=int)
     pre_rl_f_visual_eval.add_argument("--force", action="store_true")
     pre_rl_f_visual_eval.set_defaults(func=incremental_cmd)
-    pre_rl_f_visual_record = incremental_sub.add_parser(
-        "pre-rl-f-record-visual-tcp"
-    )
+    pre_rl_f_visual_record = incremental_sub.add_parser("pre-rl-f-record-visual-tcp")
     add_config_arg(pre_rl_f_visual_record)
-    pre_rl_f_visual_record.add_argument(
-        "--representation", choices=["raw", "ae256"], required=True
-    )
+    pre_rl_f_visual_record.add_argument("--representation", choices=["raw", "ae256"], required=True)
     pre_rl_f_visual_record.add_argument(
         "--goal-source", choices=["learned", "oracle"], default="learned"
     )
@@ -1577,37 +1576,25 @@ def build_parser() -> argparse.ArgumentParser:
     pre_rl_f_visual_record.add_argument("--eval-seed-start", type=int)
     pre_rl_f_visual_record.add_argument("--force", action="store_true")
     pre_rl_f_visual_record.set_defaults(func=incremental_cmd)
-    pre_rl_d_hierarchy_manifests = incremental_sub.add_parser(
-        "pre-rl-d-hierarchy-manifests"
-    )
+    pre_rl_d_hierarchy_manifests = incremental_sub.add_parser("pre-rl-d-hierarchy-manifests")
     add_config_arg(pre_rl_d_hierarchy_manifests)
     pre_rl_d_hierarchy_manifests.add_argument("--force", action="store_true")
     pre_rl_d_hierarchy_manifests.set_defaults(func=incremental_cmd)
-    pre_rl_d_train_hierarchy = incremental_sub.add_parser(
-        "pre-rl-d-train-hierarchy"
-    )
+    pre_rl_d_train_hierarchy = incremental_sub.add_parser("pre-rl-d-train-hierarchy")
     add_config_arg(pre_rl_d_train_hierarchy)
-    pre_rl_d_train_hierarchy.add_argument(
-        "--variant", choices=["clean", "mixed_25"], required=True
-    )
+    pre_rl_d_train_hierarchy.add_argument("--variant", choices=["clean", "mixed_25"], required=True)
     pre_rl_d_train_hierarchy.add_argument("--seed", type=int, default=0)
     pre_rl_d_train_hierarchy.add_argument("--force", action="store_true")
     pre_rl_d_train_hierarchy.set_defaults(func=incremental_cmd)
-    pre_rl_d_eval_hierarchy = incremental_sub.add_parser(
-        "pre-rl-d-eval-hierarchy"
-    )
+    pre_rl_d_eval_hierarchy = incremental_sub.add_parser("pre-rl-d-eval-hierarchy")
     add_config_arg(pre_rl_d_eval_hierarchy)
-    pre_rl_d_eval_hierarchy.add_argument(
-        "--variant", choices=["clean", "mixed_25"], required=True
-    )
+    pre_rl_d_eval_hierarchy.add_argument("--variant", choices=["clean", "mixed_25"], required=True)
     pre_rl_d_eval_hierarchy.add_argument("--disturbed", action="store_true")
     pre_rl_d_eval_hierarchy.add_argument("--seed", type=int, default=0)
     pre_rl_d_eval_hierarchy.add_argument("--episodes", type=int)
     pre_rl_d_eval_hierarchy.add_argument("--force", action="store_true")
     pre_rl_d_eval_hierarchy.set_defaults(func=incremental_cmd)
-    pre_rl_g_tcp_diagnostics = incremental_sub.add_parser(
-        "pre-rl-g-tcp-diagnostics"
-    )
+    pre_rl_g_tcp_diagnostics = incremental_sub.add_parser("pre-rl-g-tcp-diagnostics")
     add_config_arg(pre_rl_g_tcp_diagnostics)
     pre_rl_g_tcp_diagnostics.add_argument("--force", action="store_true")
     pre_rl_g_tcp_diagnostics.set_defaults(func=incremental_cmd)
@@ -1641,11 +1628,14 @@ def build_parser() -> argparse.ArgumentParser:
             learned_interface.add_argument("--eval-seed-start", type=int)
         learned_interface.set_defaults(func=incremental_cmd)
 
-    vae_scaling_manifests = incremental_sub.add_parser(
-        "vae-scaling-manifests"
-    )
+    vae_scaling_manifests = incremental_sub.add_parser("vae-scaling-manifests")
     add_config_arg(vae_scaling_manifests)
     vae_scaling_manifests.set_defaults(func=incremental_cmd)
+    vae_scaling_aggregate = incremental_sub.add_parser("vae-scaling-aggregate")
+    add_config_arg(vae_scaling_aggregate)
+    vae_scaling_aggregate.add_argument("--episodes", type=int, default=500)
+    vae_scaling_aggregate.add_argument("--oracle-episodes", type=int, default=50)
+    vae_scaling_aggregate.set_defaults(func=incremental_cmd)
     for command in [
         "vae-scaling-train",
         "vae-scaling-eval",

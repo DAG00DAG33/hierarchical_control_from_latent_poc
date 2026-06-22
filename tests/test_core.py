@@ -26,6 +26,7 @@ from hcl_poc.utils import Standardizer
 from hcl_poc.vae_scaling import (
     _FlatDataset,
     _deterministic_noise,
+    _threshold_crossing,
     vae_scaling_config,
 )
 
@@ -197,6 +198,13 @@ def test_vae_scaling_flow_noise_is_reproducible_and_seed_specific() -> None:
     np.testing.assert_array_equal(first, repeated)
     assert not np.array_equal(first, different_policy)
     assert not np.array_equal(first, different_decision)
+
+
+def test_vae_scaling_threshold_crossing_interpolates_in_log_budget() -> None:
+    budgets = np.asarray([50, 100, 200], dtype=float)
+    values = np.asarray([0.2, 0.4, 0.6], dtype=float)
+    assert np.isclose(_threshold_crossing(budgets, values, 0.5), np.sqrt(20_000))
+    assert _threshold_crossing(budgets, values, 0.7) is None
 
 
 def test_vae_scaling_flat_dataset_uses_previous_executed_action() -> None:
