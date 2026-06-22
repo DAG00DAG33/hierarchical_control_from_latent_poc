@@ -61,3 +61,27 @@ The oracle sample is only an implementation audit and is not interpreted.
 training points, 54,000 deployable episodes, and 900 oracle episodes. Projected
 artifact storage is about 5.5 GiB plus results. The existing 82 GiB free disk
 space is sufficient.
+
+## 2026-06-22 - SE-02: Complete training sweep
+
+- **Runner commit:** `7954d81`; aggregation implementation commit `0f14f3b`.
+- **Command:** `scripts/run_vae_scaling_sweep.sh train`.
+- **Completed points:** all 18 combinations of budgets
+  `{50,100,200,500,1000,1800}` and training seeds `{0,1,2}`.
+- **Artifacts per point:** VAE-512 representation, shared deterministic
+  high/low hierarchy, flow-matching high level, and deterministic/flow flat
+  policies for both latent and full-observation inputs.
+- **Manifest audit:** 18/18 point manifests exist. Nested train prefixes and
+  the fixed final-200 validation split pass `vae-scaling-manifests` validation.
+- **No effect interface:** no learned effect-interface model is trained or
+  loaded by this runner.
+- **Failures/reruns:** none. The `N=50, seed=0` smoke artifacts were reused;
+  all other points were trained exactly once.
+- **Summed component training time per point (minutes, seeds 0/1/2):**
+  `N=50`: 32.7/32.6/32.8; `N=100`: 32.3/32.9/33.0; `N=200`:
+  32.5/33.0/33.1; `N=500`: 32.9/33.1/33.5; `N=1000`:
+  33.0/33.4/33.6; `N=1800`: 33.4/35.0/36.0.
+- **Storage after training:** 6.7 GiB; 75 GiB remained free.
+
+The fixed-seed rollout sweep starts only after this completeness audit. Final
+deployable runs use 500 episodes per point; local branch-oracle runs use 50.
