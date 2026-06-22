@@ -110,3 +110,56 @@ The preliminary curve justifies continuing the complete evaluation. Learned
 hierarchies are competitive with the strongest flat observation baseline at
 1,000-1,800 trajectories, while the three-seed variance and reliable oracle
 gap remain unresolved.
+
+## 2026-06-22 - SE-04: Prior 0.72 result discrepancy audit
+
+The full evaluation was paused after the user flagged that preliminary
+full-data VAE success was below the previously reported `0.72`.
+
+### Artifact and configuration parity
+
+- The prior and newly trained `N=1800, seed=0` VAE encoder and decoder tensors
+  are bit-identical.
+- All cached train and validation latent arrays are exactly equal, element by
+  element: 1,800 train trajectories and 200 validation trajectories.
+- Both runs use 80,472 train transitions, `k=10`, `U=10`, `H=1`, concat goal
+  conditioning, posterior-mean deployment, and the same DINO/proprio/action
+  path.
+- The prior hierarchy selected epoch 57; the new hierarchy selected epoch 54.
+  Offline predicted-action MAE is effectively tied (`0.03889` prior versus
+  `0.03848` new), but the policy tensors differ.
+
+### Learned checkpoint x evaluation-bank cross-check
+
+| checkpoint | development bank 2,100,000 | unseen bank 2,200,000 |
+| --- | ---: | ---: |
+| prior selected VAE hierarchy | 0.72 | 0.56 |
+| new `N=1800, seed=0` hierarchy | 0.64 | 0.46 |
+
+Each cross-check uses 100 episodes. This attributes roughly 16-18 percentage
+points to the finite evaluation bank and 8-10 points to the hierarchy
+retraining realization.
+
+### Policy-seed and low-level oracle check
+
+The three newly trained full-data learned hierarchies score `0.46, 0.43,
+0.51` on the unseen 100-seed bank: mean `0.467`, sample SD `0.040`.
+
+On the unseen 50-seed oracle bank, their corresponding low levels score
+`0.50, 0.56, 0.50`: mean `0.520`, sample SD `0.035`. The prior selected low
+level scores `0.68` on that same unseen bank. On the old bank, the prior
+reported oracle score was `0.76` over 100 episodes while the new seed-0 low
+scores `0.62` over 50.
+
+### Decision
+
+No encoder, data-split, horizon, or deployment wiring error was found. The
+previous `0.72` is a development result selected after screening many
+candidates on the reused 2,100,000 seed bank and from a particularly strong
+low-level training realization. Offline action MAE does not expose the
+closed-loop difference.
+
+Keep the unseen 2,200,000 bank for the final comparison and use 500 episodes
+plus three training seeds as planned. Retain the prior selected checkpoint as
+a labeled diagnostic reference; do not mix it into the independent-seed
+average.
