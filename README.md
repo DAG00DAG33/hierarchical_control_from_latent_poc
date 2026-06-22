@@ -1,80 +1,102 @@
-# Push-T Hierarchical Control POC
+# VAE Future-State Hierarchical Control for Push-T
 
-This repository studies hierarchical visual control on ManiSkill `PushT-v1`.
-The original future-AE-latent hierarchy failed when its high level had to
-predict deployable goals. A gated follow-up identified a compact future TCP
-waypoint as a substantially better interface.
+This repository evaluates whether a learned future-state interface improves
+demonstration efficiency for visual control on ManiSkill `PushT-v1`.
 
-The final pre-RL and learned-interface results are:
+The final experiment compares a 512D VAE hierarchy against deterministic and
+flow-matching flat policies trained from either the VAE latent or the complete
+visual observation. It uses nested demonstration budgets, three independent
+policy seeds, and 500 unseen evaluation episodes per deployable point.
 
-- learned raw-visual TCP hierarchy: `0.71` success over 100 episodes;
-- exact reachable branch-oracle TCP hierarchy: `0.71`;
-- learned VAE-512 future-state hierarchy development result: `0.72` learned,
-  `0.76` oracle;
-- compact 32D action-aware effect hierarchy with FiLM: `0.69` learned,
-  `0.72` oracle;
-- selected interface: 10-step (0.50 s) TCP endpoint, held for 10 primitive
-  controls, with one-step low-level feedback.
-
-The authoritative result, architecture, data, gate decisions, and RL
-recommendation are in [pre_rl_summary.md](pre_rl_summary.md). The experiment
-plan and chronological record are
-[pusht_pre_rl_next_experiments_plan.md](pusht_pre_rl_next_experiments_plan.md)
-and [next_experiments_log.md](next_experiments_log.md).
-
-The subsequent learned-interface architecture, data, training details,
-ablations, videos, and conclusions are in
-[LEARNED_INTERFACE_FINAL_RESULTS.md](LEARNED_INTERFACE_FINAL_RESULTS.md) and
-[learned_interface_experiment_log.md](learned_interface_experiment_log.md).
-
-The final VAE-512 sample-efficiency study uses three independently trained
-policy seeds, 500 unseen evaluation episodes per deployable point, and nested
-data budgets. Its authoritative report is
+The authoritative technical report is
 [VAE512_SAMPLE_EFFICIENCY_FINAL_RESULTS.md](VAE512_SAMPLE_EFFICIENCY_FINAL_RESULTS.md).
+The experiment plan and chronological execution record are
+[vae512_sample_efficiency_experiment_plan.md](vae512_sample_efficiency_experiment_plan.md)
+and
+[vae512_sample_efficiency_experiment_log.md](vae512_sample_efficiency_experiment_log.md).
 
-At 1,800 trajectories, deterministic hierarchy, flow hierarchy, and flat
-full-observation deterministic control reach `0.565 +/- 0.025`,
-`0.556 +/- 0.005`, and `0.571 +/- 0.048` success respectively. The hierarchy
-does not show a robust sample-efficiency advantage over direct deterministic
-control from the full observation. The prior `0.72` VAE number was a
-candidate-selected development result on a reused 100-seed bank.
+## Result
 
-![Final VAE-512 sample-efficiency curves](docs/results/vae512_scaling/success_deployable.png)
+At 1,800 training trajectories:
 
-The earlier future-latent candidates remain documented in
-[FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md) as the
-negative predecessor.
+| Method | Success, mean +/- policy-seed SD |
+| --- | ---: |
+| Deterministic VAE hierarchy | `0.565 +/- 0.025` |
+| Flow-matching VAE hierarchy | `0.556 +/- 0.005` |
+| Flat VAE latent, deterministic | `0.457 +/- 0.017` |
+| Flat VAE latent, flow matching | `0.357 +/- 0.008` |
+| Flat full observation, deterministic | **`0.571 +/- 0.048`** |
+| Flat full observation, flow matching | `0.401 +/- 0.049` |
+| Reachable branch oracle, 50 episodes/seed | `0.520 +/- 0.035` |
+
+![VAE-512 sample-efficiency curves](docs/results/vae512_scaling/success_deployable.png)
+
+The flow hierarchy has the best normalized area under the learning curve
+(`0.259`), narrowly ahead of flat full-observation deterministic control
+(`0.255`) and the deterministic hierarchy (`0.251`). With only three policy
+seeds, this difference is too small to support a sample-efficiency claim.
+
+The main conclusion is:
+
+> A future VAE latent restores the performance lost when controlling directly
+> from the current VAE latent, but it does not robustly outperform a
+> deterministic policy using the complete observation.
+
+No method reaches 70% mean success under the final protocol. The previously
+reported `0.72` VAE result was a candidate-selected development result on a
+reused 100-episode seed bank. The final report includes the checkpoint and
+evaluation-bank cross-audit that explains this discrepancy.
 
 ## Method
 
-The environment uses `pd_ee_delta_pos` control at 20 Hz. Observations contain
-frozen `facebook/dinov2-small` spatial RGB features and non-privileged robot
-proprioception. The selected current representation is the uncompressed
-6,549D DINO-plus-proprioception vector.
+The controller runs at 20 Hz with `pd_ee_delta_pos` actions. One observation
+contains frozen `facebook/dinov2-small` spatial RGB features and 21D
+proprioception:
 
 ```text
-h_t = [DINO_spatial(rgb_t), proprio_t]
+o_t = [DINO_spatial(rgb_t), proprio_t]  # 6,549 dimensions
+z_t = VAE_mean(o_t)                    # 512 dimensions
 ```
 
-Every 10 actions, the high level predicts the TCP position 10 steps ahead.
-The low level receives the current representation, endpoint, time-to-go
-velocity, previous executed action, and remaining time:
+The deterministic hierarchy is:
 
 ```text
-a_t = pi_low(h_t, p_tcp_goal, v_tcp_goal, a_{t-1}, time_to_go)
+high: [o_t, a_(t-1)] -> z_(t+10)
+low:  [o_t, z_goal, a_(t-1), remaining_time] -> a_t
 ```
 
-The learned endpoint is compared with an exact local branch oracle generated
-by copying the current student state and rolling the privileged teacher for 10
-steps. Both use the same frozen low level.
+The future horizon and high-level update period are both 10 steps, or 0.50 s.
+The low level remains closed loop and executes one primitive action before
+observing again. The flow hierarchy replaces only the deterministic high
+level; both hierarchies share the same deterministic low-level architecture
+within each training point.
 
-AE-256, VAE-256, raw DINO, future robot/object decompositions, multiple
-horizons, goal update periods, and causal recovery datasets were tested before
-selecting this configuration.
+The reachable oracle copies the current simulator state, rolls the privileged
+teacher forward for 10 steps, and supplies the resulting VAE latent. It is a
+diagnostic and is not deployable.
+
+## Data
+
+The downloaded demonstrations did not replay reliably with the installed
+simulator/controller combination. A privileged PPO teacher was therefore
+trained in the same downstream action space and used to collect 2,000 causal
+trajectories.
+
+- Training uses nested prefixes of 50, 100, 200, 500, 1,000, and 1,800
+  trajectories.
+- The final 200 trajectories form one fixed validation set.
+- The largest training set contains 80,472 transitions.
+- Every representation and policy is retrained independently for each budget
+  and policy seed; there are no warm starts across budgets.
+- The learned effect interface is intentionally excluded from this study.
+
+Large datasets and checkpoints are local under `data/` and `artifacts/`.
+Raw evaluations, episode outcomes, generated tables, logs, and videos are
+local under `results/incremental/vae512_scaling/`.
 
 ## Setup
 
-Dependencies are managed with `uv`; training and simulator evaluation require
+Dependencies are managed with `uv`. Training and simulator evaluation require
 CUDA.
 
 ```bash
@@ -82,151 +104,62 @@ uv sync --python 3.11
 uv run hcl-poc doctor
 ```
 
-The final incremental configuration is
+The experiment configuration is
 [`configs/pusht_incremental.yaml`](configs/pusht_incremental.yaml).
 
-## Data
+## Reproduction
 
-The original downloaded demonstrations did not replay successfully under the
-installed simulator/controller combination. A privileged PPO teacher was
-therefore trained using the same downstream action space. The prepared HDF5
-dataset contains 2,000 successful causal trajectories with frozen DINO
-features, proprioception, simulator state for diagnostics, and teacher
-actions. The final 200 trajectories are a fixed validation set; training uses
-nested prefixes of the first 1,800.
-
-To rebuild the incremental teacher dataset and its basic checks:
+Validate the nested data manifests:
 
 ```bash
-CONFIG=configs/pusht_incremental.yaml
-
-uv run hcl-poc incremental phase0 --config "$CONFIG"
-uv run hcl-poc incremental phase1-collect --config "$CONFIG"
-uv run hcl-poc incremental phase1-train --config "$CONFIG"
-uv run hcl-poc incremental phase1-eval --config "$CONFIG"
+uv run hcl-poc incremental vae-scaling-manifests \
+  --config configs/pusht_incremental.yaml
 ```
 
-Subsequent phase commands are listed by `uv run hcl-poc incremental --help`.
-They are intentionally gated; follow the plan and log when reproducing the
-representation and oracle diagnostics from scratch.
-
-## Selected Hierarchy
+Run the resumable training and final evaluation sweeps:
 
 ```bash
-CONFIG=configs/pusht_incremental.yaml
-
-uv run hcl-poc incremental pre-rl-f-train-visual-tcp \
-  --config "$CONFIG" --representation raw
-
-uv run hcl-poc incremental pre-rl-f-eval-visual-tcp \
-  --config "$CONFIG" --representation raw --goal-source learned --episodes 100
-
-uv run hcl-poc incremental pre-rl-f-eval-visual-tcp \
-  --config "$CONFIG" --representation raw --goal-source oracle --episodes 100
-
-uv run hcl-poc incremental pre-rl-g-tcp-diagnostics \
-  --config "$CONFIG"
+scripts/run_vae_scaling_sweep.sh train
+scripts/run_vae_scaling_sweep.sh eval
 ```
 
-## Learned Interfaces
+The driver writes detailed progress to
+`results/incremental/vae512_scaling/run_logs/` and prints only point
+boundaries. Existing complete point files are reused.
+
+Generate the final tables and plots after all 18 `(budget, seed)` points are
+complete:
 
 ```bash
-CONFIG=configs/pusht_incremental.yaml
-
-# Best measured learned state interface
-uv run hcl-poc incremental learned-interface-run \
-  --config "$CONFIG" --candidate vae512_w2048_b1e6 --episodes 100
-
-# Best compact learned effect interface
-uv run hcl-poc incremental learned-interface-run \
-  --config "$CONFIG" --candidate effect32_film --episodes 100
-
-uv run hcl-poc incremental learned-interface-record \
-  --config "$CONFIG" --candidate effect32_film \
-  --goal-source learned --episodes 10 --eval-seed-start 2120000
-
-uv run python scripts/plot_learned_interface_results.py
+uv run hcl-poc incremental vae-scaling-aggregate \
+  --config configs/pusht_incremental.yaml \
+  --episodes 500 \
+  --oracle-episodes 50 \
+  --seeds 0 1 2 \
+  --output-name aggregate
 ```
 
-![Learned state and effect interfaces](docs/results/learned_interface/closed_loop_comparison.png)
+The tracked final plots are in `docs/results/vae512_scaling/`. Representative
+full-data learned and oracle successes/failures are in:
 
-## Legacy Future-Latent Sweep
-
-Each Phase 12 budget retrains visual BC, visual action flow, AE-256, the oracle
-low level, deterministic high level, and generative high level in an isolated
-artifact directory. No checkpoint is transferred between data budgets.
-
-```bash
-CONFIG=configs/pusht_incremental.yaml
-
-for N in 50 100 200 500 1000 1800; do
-  uv run hcl-poc incremental phase12-run \
-    --config "$CONFIG" \
-    --n-trajectories "$N" \
-    --episodes 100 \
-    --eval-seed-start 1200000
-done
-
-uv run hcl-poc incremental phase12-plot --config "$CONFIG"
+```text
+results/incremental/vae512_scaling/n1800/learned_interface/
+  vae512_w2048_b1e6/seed2/videos/
 ```
 
-All deployable methods use one policy seed and the same 100 evaluation seeds.
-Exact branch replay is much slower and uses 10 of those seeds per budget. The
-plot reports binomial standard errors. This reduced protocol does not measure
-training-seed robustness.
+## Archived Experiments
 
-## Current Results
+Earlier gated experiments remain available as research history, but they are
+not the final result of this repository:
 
-| Method | Success | Final reward |
-| --- | ---: | ---: |
-| Learned raw TCP hierarchy | **0.71** | 0.781 |
-| Exact branch-oracle TCP hierarchy | **0.71** | 0.794 |
-| Learned AE-256 TCP hierarchy | 0.53 | 0.639 |
+- [LEARNED_INTERFACE_FINAL_RESULTS.md](LEARNED_INTERFACE_FINAL_RESULTS.md):
+  candidate-selection development results for VAE and effect interfaces.
+- [pre_rl_summary.md](pre_rl_summary.md): explicit TCP endpoint interface.
+- [FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md): earlier
+  AE hierarchy and flat-policy studies.
+- [INCREMENTAL_EXPERIMENT_LOG.md](INCREMENTAL_EXPERIMENT_LOG.md): complete
+  chronological record of the earlier gated pipeline.
 
-![Learned versus oracle TCP goals](docs/results/pre_rl/final/oracle_vs_learned_goal.png)
-
-The learned/oracle ratio is 1.00. Endpoint error rises from `0.0175 m` on
-held-out teacher states to `0.0372 m` on hierarchy states and `0.0611 m` on
-recovery states, but the exact endpoint does not improve closed-loop success.
-The first RL experiment should therefore freeze the high level and train a
-small low-level residual adapter for recovery.
-
-Representative learned and paired oracle videos are generated under
-`results/incremental/pre_rl/phase_f/raw_tcp/seed0/videos/`.
-
-## Legacy Results
-
-| Trajectories | Transitions | Visual BC | Flat flow | Oracle hierarchy | Deterministic hierarchy | Generative hierarchy |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 50 | 2,311 | 0.00 | 0.03 | 0.00 | 0.01 | 0.03 |
-| 100 | 4,507 | 0.05 | 0.07 | 0.10 | 0.02 | 0.05 |
-| 200 | 8,834 | 0.10 | 0.20 | 0.40 | 0.08 | 0.03 |
-| 500 | 22,367 | 0.29 | 0.28 | 0.80 | 0.14 | 0.23 |
-| 1000 | 44,605 | 0.44 | 0.49 | 0.80 | 0.22 | 0.25 |
-| 1800 | 80,472 | 0.60 | 0.62 | 0.70 | 0.37 | 0.42 |
-
-![Success versus causal training transitions](docs/results/incremental_sample_efficiency.png)
-
-The plotted values and protocol metadata are available as
-[`docs/results/incremental_sample_efficiency.json`](docs/results/incremental_sample_efficiency.json).
-
-The exact oracle first reaches 50% measured success at 22,367 transitions;
-both direct visual policies first reach it at 80,472. This supports the
-future-state interface as a useful temporal abstraction, but the oracle uses a
-privileged teacher online and is not deployable. Its 10-episode points also
-have substantially wider uncertainty.
-
-The learned hierarchy does not inherit the oracle's data-efficiency advantage.
-At 1,800 trajectories, deterministic and generative hierarchies reach 0.37 and
-0.42 success, below visual BC at 0.60 and flat flow at 0.62. Detailed Phase
-8-10 diagnostics show that future-latent prediction remains the dominant
-bottleneck: the predicted goals have moderate offline error but induce
-compounding closed-loop action error. Robust low-level training on measured
-high-level errors did not recover performance.
-
-The legacy deployable future-AE-latent hypothesis is negative. The factorized
-TCP waypoint experiments resolve that earlier bottleneck without claiming
-that arbitrary learned latent goals are suitable control interfaces.
-
-Large datasets, checkpoints, detailed raw result JSON, and videos remain local
-and are ignored by Git.
+These reports explain how the final experiment was reached; their smaller or
+reused evaluation protocols should not be compared directly with the final
+three-seed, 500-episode results above.

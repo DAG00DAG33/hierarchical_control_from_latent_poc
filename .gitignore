@@ -10,6 +10,8 @@ results/**/*.png
 results/**/*.csv
 results/**/*.json
 results/**/*.mp4
+results/**/*.md
+results/**/*.zip
 results/videos/
 run_logs/
 !results/.gitkeep
