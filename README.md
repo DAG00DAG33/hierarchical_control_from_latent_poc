@@ -47,6 +47,81 @@ reported `0.72` VAE result was a candidate-selected development result on a
 reused 100-episode seed bank. The final report includes the checkpoint and
 evaluation-bank cross-audit that explains this discrepancy.
 
+## How We Reached This Experiment
+
+The final comparison was the last stage of a gated investigation rather than
+a single architecture choice.
+
+1. **Establish a trustworthy teacher and dataset.** The downloaded Push-T
+   trajectories did not replay successfully with the installed simulator and
+   controller. We trained a privileged PPO teacher using the exact downstream
+   action space, verified its rollouts, and collected a causal corpus from it.
+2. **Debug flat imitation before hierarchy.** Direct visual policies were
+   evaluated before relying on a learned state. This exposed that the learned
+   current latent could discard control-relevant information even when simple
+   pose probes looked reasonable.
+3. **Study representation families independently.** Deterministic AEs, VAEs,
+   denoising AEs, predictive world models, JEPA-style objectives, and learned
+   action-aware effect codes were compared using reconstruction, state probes,
+   inverse-action probes, future prediction, and closed-loop control.
+4. **Correct the oracle definition.** A future goal from a nominal teacher
+   trajectory stops being a true oracle after the student deviates. The
+   corrected oracle copies the student's exact simulator state and rolls a
+   deterministic teacher branch locally, making the supplied goal reachable
+   by construction.
+5. **Validate the interface with physical state.** Explicit future TCP
+   endpoints showed that a future-state interface can work. Multi-offset,
+   time-conditioned low-level training was necessary because holding a goal
+   changes the remaining horizon after every action.
+6. **Select temporal abstraction.** The physical-interface sweep selected
+   `k=10`, `U=10`, and `H=1`: a 0.50 s goal held for 10 steps while the low
+   level remains closed loop at every primitive action.
+7. **Return to learned interfaces.** The best learned state and compact effect
+   candidates were promoted through closed-loop development screens, leading
+   to the VAE-512 interface used in the final sample-efficiency experiment.
+
+### Best development candidates
+
+These values use the earlier 100-episode candidate-selection protocol and are
+useful for understanding model selection, not for replacing the final table.
+
+| Interface | Dimensions | Learned | Oracle | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| Explicit TCP endpoint | 3 | 0.71 | 0.71 | strongest interpretable physical reference |
+| VAE future state | 512 | **0.72** | **0.76** | best measured learned state interface |
+| Effect code + FiLM | 32 | 0.69 | 0.72 | best compact action-aware learned interface |
+| Balanced-reconstruction JEPA | 256 | 0.65 | 0.58 | predictive objectives remained competitive |
+| Denoising AE | 256 | 0.59 | 0.52 | input denoising did not improve control |
+| AE + FiLM | 256 | 0.55 | 0.67 | oracle low level improved more than prediction |
+
+The learned effect interface was deliberately excluded from the final sweep:
+the next question was specifically whether the strongest learned **state**
+interface improved data efficiency.
+
+### Durable insights
+
+- **Closed-loop evaluation is essential.** Reconstruction loss, pose probes,
+  future-latent error, and one-step action MAE did not reliably rank policies
+  under compounding rollout error.
+- **A probe is diagnostic, not an objective.** Position and orientation probes
+  helped detect information loss, but adding pose supervision to the encoder
+  would have changed the representation-learning question.
+- **Reconstruction remained useful.** Pure predictive/world-model objectives
+  tended to lose observation detail; balanced reconstruction produced more
+  usable state interfaces.
+- **Goal holding needs time conditioning.** A low level trained only at one
+  fixed future offset becomes out of distribution after executing the first
+  held-goal action.
+- **Current-state compression and future-state conditioning are different.**
+  Flat control from the 512D VAE latent is clearly worse than flat control from
+  the full observation, while a future VAE goal recovers most of that gap.
+- **Flow matching is not automatically better.** It did not improve either
+  flat policy family and only tied the deterministic high level in the final
+  hierarchy.
+- **Development results can be optimistic.** Screening many interfaces on one
+  seed bank selected an unusually strong VAE checkpoint. The final unseen-bank
+  and multi-policy-seed protocol was needed to obtain a defensible estimate.
+
 ## Method
 
 The controller runs at 20 Hz with `pd_ee_delta_pos` actions. One observation
