@@ -157,6 +157,19 @@ simulator/controller combination. A privileged PPO teacher was therefore
 trained in the same downstream action space and used to collect 2,000 causal
 trajectories.
 
+The privileged PPO expert reached **86.3% deterministic success over 256
+episodes** in its original vectorized CUDA evaluation. A separate downstream
+scalar CUDA audit, using the wrappers and action handling used by the
+imitation pipeline, measured **83/100 success**; an independently copied actor
+also scored 83/100 with zero action mismatch. This confirmed that teacher
+loading, clipping, and simulator transitions were aligned. These teacher
+numbers use their own evaluation seeds and are reference values rather than a
+paired comparison with the final 500-seed policy results.
+
+The collector retained only successful teacher episodes. Consequently, the
+2,000 trajectories below form a successful-only imitation corpus; this
+filtering does not mean the unfiltered expert had 100% success.
+
 - Training uses nested prefixes of 50, 100, 200, 500, 1,000, and 1,800
   trajectories.
 - The final 200 trajectories form one fixed validation set.
