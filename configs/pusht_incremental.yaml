@@ -50,6 +50,7 @@ low_level_rl:
   development_seed_start: 3200000
   final_seed_start: 3400000
   eval_num_envs: 32
+  segment_terminates_gae: true
 
 incremental:
   phase0:

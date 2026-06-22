@@ -217,7 +217,9 @@ class HierarchyRollout:
         self.countdown = np.zeros(self.num_envs, dtype=np.int32)
 
     @torch.inference_mode()
-    def condition(self) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
+    def condition(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
         replan = self.countdown <= 0
         if np.any(replan):
             high_condition = np.concatenate([self.normalized_frames, self.previous_action], axis=-1)
@@ -245,7 +247,7 @@ class HierarchyRollout:
         distance = np.mean(np.square(self.current_latent - self.held_goal), axis=-1).astype(
             np.float32
         )
-        return condition, base_action, distance
+        return condition, base_action, distance, replan
 
     @torch.inference_mode()
     def step(
@@ -423,7 +425,7 @@ def evaluate_residual_rl(
         return output
     device = default_device()
     frozen = _load_frozen(config, n_demo, seed, device)
-    checkpoint_path = checkpoint_path or artifact / "best.pt"
+    checkpoint_path = checkpoint_path or artifact / "latest.pt"
     agent = None
     alpha = 0.0
     global_step = 0
@@ -447,9 +449,11 @@ def evaluate_residual_rl(
     current_final = np.zeros(num_envs, dtype=np.float32)
     current_max = np.full(num_envs, -np.inf, dtype=np.float32)
     while len(successes) < episodes:
-        condition, base_action, distance = rollout.condition()
+        condition, base_action, distance, replan = rollout.condition()
         if current_segment_initial is None:
             current_segment_initial = distance.copy()
+        else:
+            current_segment_initial[replan] = distance[replan]
         raw_residual = (
             agent.get_action_and_value(condition, deterministic=True)[0]
             if agent is not None
@@ -533,10 +537,10 @@ def train_residual_rl(
         raise ValueError("Low-level RL currently supports N_demo in {500, 1000}")
     artifact, result = _paths(config, n_demo, seed, run_name)
     latest = artifact / "latest.pt"
-    best = artifact / "best.pt"
+    best_train_latent = artifact / "best_train_latent.pt"
     if force:
         latest.unlink(missing_ok=True)
-        best.unlink(missing_ok=True)
+        best_train_latent.unlink(missing_ok=True)
     device = default_device()
     set_seed(seed + 50_000)
     frozen = _load_frozen(config, n_demo, seed, device)
@@ -566,6 +570,7 @@ def train_residual_rl(
         "terminal_weight": terminal_weight,
         "task_reward_weight": task_reward_weight,
         "residual_penalty_weight": float(config.get("low_level_rl.residual_penalty_weight", 0.01)),
+        "segment_terminates_gae": bool(config.get("low_level_rl.segment_terminates_gae", True)),
         "rollout_mode": "full_hierarchy_segment_reward",
         "frozen_hierarchy": str(frozen.checkpoint_path),
     }
@@ -581,7 +586,7 @@ def train_residual_rl(
         global_step = int(checkpoint["global_step"])
         history = list(checkpoint["history"])
     if global_step >= total_steps:
-        return best if best.exists() else latest
+        return latest
     num_envs = int(config.get("low_level_rl.num_envs", 32))
     rollout_steps = int(config.get("low_level_rl.rollout_steps", 32))
     batch_size = num_envs * rollout_steps
@@ -625,7 +630,7 @@ def train_residual_rl(
             residual_values: list[float] = []
             saturation_count = 0
             for step in range(rollout_steps):
-                condition, base_action, distance = rollout.condition()
+                condition, base_action, distance, _replan = rollout.condition()
                 condition_buf[step] = condition
                 done_buf[step] = next_done
                 with torch.no_grad():
@@ -643,7 +648,12 @@ def train_residual_rl(
                     action, distance, terminal_weight, task_reward_weight, penalty
                 )
                 reward_buf[step] = torch.from_numpy(reward).to(device)
-                next_done = torch.from_numpy(done).to(device)
+                # Each held goal defines a local 10-step MDP. Do not carry
+                # advantage estimates into the next, unrelated goal segment.
+                local_done = done.astype(bool)
+                if bool(config.get("low_level_rl.segment_terminates_gae", True)):
+                    local_done = np.logical_or(local_done, metrics["segment_end"])
+                next_done = torch.from_numpy(local_done.astype(np.float32)).to(device)
                 distance_values.extend(distance.tolist())
                 terminal_distances.extend(metrics["next_distance"][metrics["segment_end"]].tolist())
                 residual_values.extend(torch.linalg.vector_norm(residual, dim=-1).cpu().tolist())
@@ -651,7 +661,7 @@ def train_residual_rl(
                 global_step += num_envs
                 progress.update(min(num_envs, total_steps - progress.n))
             with torch.no_grad():
-                next_condition, _base, _distance = rollout.condition()
+                next_condition, _base, _distance, _replan = rollout.condition()
                 next_value = agent.critic(next_condition).flatten()
                 advantages = torch.zeros_like(reward_buf)
                 last_gae = torch.zeros(num_envs, device=device)
@@ -731,9 +741,24 @@ def train_residual_rl(
             score = -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
             if score > best_score:
                 best_score = score
-                _save_checkpoint(best, agent, optimizer, global_step, recipe, history)
+                _save_checkpoint(
+                    best_train_latent,
+                    agent,
+                    optimizer,
+                    global_step,
+                    recipe,
+                    history,
+                )
             if global_step >= next_checkpoint or global_step >= total_steps:
                 _save_checkpoint(latest, agent, optimizer, global_step, recipe, history)
+                _save_checkpoint(
+                    artifact / f"step_{global_step:09d}.pt",
+                    agent,
+                    optimizer,
+                    global_step,
+                    recipe,
+                    history,
+                )
                 write_json(
                     result / "train_metrics.json",
                     {"recipe": recipe, "latest": row, "history": history},
@@ -742,4 +767,4 @@ def train_residual_rl(
     finally:
         progress.close()
         rollout.close()
-    return best
+    return latest
