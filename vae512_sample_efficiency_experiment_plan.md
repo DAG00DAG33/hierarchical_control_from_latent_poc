@@ -86,17 +86,19 @@ controls.
 
 ## 3. Data Budgets and Splits
 
-Use the existing 2,000 successful PPO trajectories:
+Use the successful PPO trajectories collected with the fixed expert and
+downstream action space:
 
 ```text
 data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5
 ```
 
-Keep the final 200 trajectories as one fixed validation set for every run.
-Use nested prefixes of the first 1,800 trajectories:
+Keep the original final 200 trajectories as one fixed validation set for every
+run. Preserve the original first 1,800 trajectories exactly and append new
+successful expert rollouts. Use nested training prefixes:
 
 $$
-N\in\{50,100,200,500,1000,1800\}
+N\in\{50,100,200,500,1000,1800,4000,8000\}
 $$
 
 The subset for budget `N` must be identical across methods and training seeds.
@@ -570,7 +572,7 @@ A scientifically useful negative result is:
 
 The experiment is complete when:
 
-- all six budgets and three training seeds exist for all six deployable
+- all eight budgets and three training seeds exist for all six deployable
   methods;
 - every deployable point has 500 fixed-seed episodes;
 - every oracle point has at least 50 fixed-seed episodes;

@@ -201,3 +201,32 @@ recovers the performance lost by flat control from the current VAE latent,
 but it does not robustly outperform deterministic flat control from the full
 observation. The experiment therefore does not support the main
 sample-efficiency thesis.
+
+## 2026-06-22 - SE-06: Extend the data curve to 4,000 and 8,000
+
+- Added 6,200 successful trajectories from the same privileged PPO expert,
+  controller, observation pipeline, and deterministic teacher policy.
+- Collection required 7,796 attempts (`79.5%` retained success rate) and took
+  15.5 minutes with 64 vectorized CUDA environments.
+- Preserved the original first 1,800 training episodes and copied the original
+  final-200 validation split unchanged.
+- Extended dataset: 8,000 train plus 200 validation episodes, 8.4 GiB.
+- New transition counts: 177,972 at `N=4000`; 354,589 at `N=8000`.
+- Trained all six new `(budget, seed)` points from scratch with no warm starts.
+- Ran a seed-0 preliminary screen on 100 deployable and 10 oracle episodes,
+  then the final 500/50 evaluation for all three policy seeds.
+- Recorded six learned-goal and six branch-oracle videos from the full-data
+  seed-0 hierarchy, including successful and failed episodes.
+
+Final success mean +/- sample SD:
+
+| trajectories | det hierarchy | flow hierarchy | oracle | flat latent det | flat latent flow | flat obs det | flat obs flow |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4,000 | 0.654 +/- 0.046 | 0.621 +/- 0.040 | 0.640 +/- 0.072 | 0.570 +/- 0.025 | 0.413 +/- 0.038 | **0.679 +/- 0.037** | 0.483 +/- 0.035 |
+| 8,000 | **0.692 +/- 0.026** | 0.659 +/- 0.017 | 0.693 +/- 0.070 | 0.639 +/- 0.020 | 0.464 +/- 0.014 | 0.649 +/- 0.034 | 0.455 +/- 0.032 |
+
+The extension changes the full-data conclusion: deterministic hierarchy is
+the strongest deployable method at 8,000 trajectories. It still does not win
+the normalized complete-curve AULC (`0.365` versus `0.369` for deterministic
+flat observation), so the evidence supports a learned-interface benefit at
+scale but not a robust data-efficiency advantage over the entire range.

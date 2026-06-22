@@ -18,16 +18,19 @@ and diagnostics are under `results/incremental/vae512_scaling/aggregate/`.
 
 ### Data
 
-The source is the fixed 2,000-trajectory corpus
-`data/prepared/pusht_ppo_dino_spatial_proprio_tcp.h5`, collected from the
-privileged PPO teacher using the downstream `pd_ee_delta_pos` action space.
+The source is a successful-only corpus collected from the privileged PPO
+teacher using the downstream `pd_ee_delta_pos` action space. The original
+2,000-trajectory file supplies the first 1,800 training trajectories and the
+fixed validation set. A resumable vectorized expert collection adds 6,200
+successful trajectories in
+`data/prepared/pusht_ppo_dino_spatial_proprio_tcp_8200.h5`.
 
-- Train sets are nested prefixes of 50, 100, 200, 500, 1,000, and 1,800
-  trajectories.
+- Train sets are nested prefixes of 50, 100, 200, 500, 1,000, 1,800, 4,000,
+  and 8,000 trajectories.
 - The final 200 trajectories are a fixed validation set and never overlap
   training.
-- Train transition counts are 2,311, 4,507, 8,834, 22,367, 44,605, and
-  80,472.
+- Train transition counts are 2,311, 4,507, 8,834, 22,367, 44,605, 80,472,
+  177,972, and 354,589.
 - Each budget is trained independently for policy seeds 0, 1, and 2.
 - No checkpoint is warm-started from another budget.
 
@@ -129,43 +132,44 @@ Hierarchy checkpoints minimize predicted-goal low-level action MAE.
 | 500 | 0.301 +/- 0.020 | 0.304 +/- 0.024 | 0.240 +/- 0.040 | 0.174 +/- 0.021 | 0.116 +/- 0.009 | 0.315 +/- 0.021 | 0.231 +/- 0.022 |
 | 1,000 | 0.507 +/- 0.020 | **0.525 +/- 0.022** | 0.533 +/- 0.061 | 0.307 +/- 0.020 | 0.216 +/- 0.028 | 0.501 +/- 0.022 | 0.330 +/- 0.058 |
 | 1,800 | 0.565 +/- 0.025 | 0.556 +/- 0.005 | 0.520 +/- 0.035 | 0.457 +/- 0.017 | 0.357 +/- 0.008 | **0.571 +/- 0.048** | 0.401 +/- 0.049 |
+| 4,000 | 0.654 +/- 0.046 | 0.621 +/- 0.040 | 0.640 +/- 0.072 | 0.570 +/- 0.025 | 0.413 +/- 0.038 | **0.679 +/- 0.037** | 0.483 +/- 0.035 |
+| 8,000 | **0.692 +/- 0.026** | 0.659 +/- 0.017 | 0.693 +/- 0.070 | 0.639 +/- 0.020 | 0.464 +/- 0.014 | 0.649 +/- 0.034 | 0.455 +/- 0.032 |
 
 ![Deployable success curves](docs/results/vae512_scaling/success_deployable.png)
 
-No method reaches 70% mean success. Interpolated `N50` and normalized area
-under the success curve over log trajectories are:
+No deployable method reaches 70% mean success. Interpolated `N50` and
+normalized area under the success curve over log trajectories are:
 
 | method | N50 trajectories | N50 transitions | normalized log-AULC |
 | --- | ---: | ---: | ---: |
-| deterministic hierarchy | 976 | 43,816 | 0.251 |
-| flow hierarchy | **924** | **42,060** | **0.259** |
-| flat observation deterministic | 998 | 44,525 | 0.255 |
-| oracle hierarchy | 924 | 42,078 | 0.223 |
-| flat latent deterministic | not reached | not reached | 0.157 |
-| flat observation flow | not reached | not reached | 0.174 |
-| flat latent flow | not reached | not reached | 0.118 |
+| deterministic hierarchy | 976 | 43,816 | 0.365 |
+| flow hierarchy | **924** | **42,060** | 0.363 |
+| flat observation deterministic | 998 | 44,525 | **0.369** |
+| oracle hierarchy | 924 | 42,078 | 0.340 |
+| flat latent deterministic | 2,443 | 117,751 | 0.274 |
+| flat observation flow | not reached | not reached | 0.256 |
+| flat latent flow | not reached | not reached | 0.204 |
 
-The flow hierarchy has the largest AULC, but its margin over flat observation
-deterministic is 0.004 with only three policy seeds. This is not strong
-evidence of a sample-efficiency improvement. The deterministic and flow
-hierarchies are clearly stronger than both flat latent policies, but they are
-approximately tied with direct deterministic control from the full
-observation.
+Flat observation deterministic has the largest AULC, ahead of deterministic
+hierarchy by 0.004 and flow hierarchy by 0.006. This does not support a
+sample-efficiency advantage for hierarchy over the complete range. However,
+the deterministic hierarchy is the strongest deployable method at 8,000
+trajectories and improves monotonically from 1,800 through 8,000.
 
 Flow matching does not help the flat policies. It is also not consistently
 better than the deterministic hierarchy: flow leads at 1,000 trajectories,
-while deterministic leads slightly at 1,800.
+while deterministic leads from 1,800 through 8,000.
 
 ## Oracle interpretation
 
 ![Learned and oracle hierarchy](docs/results/vae512_scaling/success_hierarchy_oracle.png)
 
 The oracle does not establish a positive upper gap in this experiment. At
-1,800 trajectories it scores `0.520 +/- 0.035`, below both learned high levels.
-This is compatible with two facts: the oracle has only 50 episodes per seed,
-and the low level was trained on nominal future goals rather than online
-branch goals. Therefore these results do not support the claim that high-level
-latent prediction is the dominant bottleneck.
+8,000 trajectories it scores `0.693 +/- 0.070`, effectively equal to the
+deterministic learned hierarchy. The oracle has only 50 episodes per seed and
+the low level was trained on nominal future goals rather than online branch
+goals. These results do not support the claim that high-level latent
+prediction is the dominant bottleneck.
 
 ## Why the previous VAE result was 0.72
 
@@ -192,11 +196,11 @@ estimate. No encoder, data, horizon, or deployment wiring error was found.
 
 ## Videos
 
-Full-data seed-2 learned and branch-oracle rollouts are under:
+Representative learned and branch-oracle rollouts are under:
 
 ```text
-results/incremental/vae512_scaling/n1800/learned_interface/
-  vae512_w2048_b1e6/seed2/videos/{learned,oracle}/
+results/incremental/vae512_scaling/n8000/learned_interface/
+  vae512_w2048_b1e6/seed0/videos/{learned,oracle}/
 ```
 
 The directories contain successes and failures. Video filenames record the
@@ -231,11 +235,13 @@ boundaries. Existing complete point files are reused.
 ## Conclusion
 
 The VAE-512 hierarchy is viable and substantially better than controlling
-from the VAE current state alone. It does not demonstrate a robust
-sample-efficiency advantage over a matched deterministic policy using the full
-observation directly. At full data, all learned hierarchies and the strongest
-flat baseline remain around 56-57% success on the unseen 500-seed protocol.
+from the VAE current state alone. At 8,000 trajectories, deterministic
+hierarchy reaches `69.2%` and is the strongest deployable method, versus
+`64.9%` for deterministic full-observation control. Across the complete
+learning curve, however, it does not demonstrate a robust sample-efficiency
+advantage over that flat baseline.
 
-The useful negative result is that compressing the observation to a VAE mean
-hurts flat control, while using a future VAE mean restores performance to the
-level of direct full-observation deterministic imitation, but not beyond it.
+The central result is that the learned future-state interface becomes useful
+at scale: it recovers the compression loss and eventually exceeds direct
+full-observation imitation, although the margin is not large enough to claim
+a robust overall data-efficiency improvement with three policy seeds.
