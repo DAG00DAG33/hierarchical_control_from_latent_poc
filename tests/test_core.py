@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import h5py
 import numpy as np
 import torch
 
@@ -25,6 +26,7 @@ from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
 from hcl_poc.vae_scaling import (
     _FlatDataset,
+    _dataset_content_sha256,
     _deterministic_noise,
     _threshold_crossing,
     vae_scaling_config,
@@ -176,7 +178,10 @@ def test_vae_scaling_budget_config_is_isolated() -> None:
                 "phase6": {"train_episodes": 1800},
             },
             "learned_interface": {"evaluation": {"seed_start": 1}},
-            "vae_scaling": {"eval_seed_start": 2200000},
+            "vae_scaling": {
+                "eval_seed_start": 2200000,
+                "extended_prepared_path": "data/extended.h5",
+            },
         },
         path="dummy.yaml",  # type: ignore[arg-type]
     )
@@ -188,6 +193,25 @@ def test_vae_scaling_budget_config_is_isolated() -> None:
         "vae512_scaling/n100"
     )
     assert config.get("incremental.phase4.train_episodes") == 1800
+    extended = vae_scaling_config(config, 4000)
+    assert extended.get("incremental.phase4.train_episodes") == 4000
+    assert extended.get("incremental.phase4.prepared_path") == "data/extended.h5"
+
+
+def test_dataset_content_hash_ignores_episode_group_names(tmp_path) -> None:
+    paths = [tmp_path / "first.h5", tmp_path / "second.h5"]
+    names = ["episode_1800", "episode_8000"]
+    for path, name in zip(paths, names, strict=True):
+        with h5py.File(path, "w") as h5:
+            group = h5.create_group(name)
+            group.create_dataset("dino", data=np.arange(12).reshape(3, 4))
+            group.create_dataset("proprio", data=np.arange(6).reshape(3, 2))
+            group.create_dataset("actions", data=np.arange(9).reshape(3, 3))
+    hashes = []
+    for path, name in zip(paths, names, strict=True):
+        with h5py.File(path, "r") as h5:
+            hashes.append(_dataset_content_sha256(h5, [name]))
+    assert hashes[0] == hashes[1]
 
 
 def test_vae_scaling_flow_noise_is_reproducible_and_seed_specific() -> None:

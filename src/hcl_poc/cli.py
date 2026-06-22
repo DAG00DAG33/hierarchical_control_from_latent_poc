@@ -113,6 +113,7 @@ from hcl_poc.train import (
 from hcl_poc.vae_scaling import (
     aggregate_vae_scaling_results,
     evaluate_vae_scaling_point,
+    extend_vae_scaling_dataset,
     train_vae_scaling_point,
     validate_nested_vae_scaling_manifests,
 )
@@ -987,6 +988,8 @@ def incremental_cmd(args: argparse.Namespace) -> None:
         )
     elif args.incremental_command == "vae-scaling-manifests":
         console.print(validate_nested_vae_scaling_manifests(config))
+    elif args.incremental_command == "vae-scaling-extend-data":
+        console.print(extend_vae_scaling_dataset(config, force=args.force))
     elif args.incremental_command == "vae-scaling-aggregate":
         console.print(
             aggregate_vae_scaling_results(
@@ -1633,6 +1636,12 @@ def build_parser() -> argparse.ArgumentParser:
     vae_scaling_manifests = incremental_sub.add_parser("vae-scaling-manifests")
     add_config_arg(vae_scaling_manifests)
     vae_scaling_manifests.set_defaults(func=incremental_cmd)
+    vae_scaling_extend = incremental_sub.add_parser(
+        "vae-scaling-extend-data"
+    )
+    add_config_arg(vae_scaling_extend)
+    vae_scaling_extend.add_argument("--force", action="store_true")
+    vae_scaling_extend.set_defaults(func=incremental_cmd)
     vae_scaling_aggregate = incremental_sub.add_parser("vae-scaling-aggregate")
     add_config_arg(vae_scaling_aggregate)
     vae_scaling_aggregate.add_argument("--episodes", type=int, default=500)

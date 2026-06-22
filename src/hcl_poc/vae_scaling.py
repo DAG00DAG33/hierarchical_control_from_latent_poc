@@ -17,11 +17,13 @@ from torch.utils.data import DataLoader
 from tqdm import trange
 
 from hcl_poc.config import Config
+from hcl_poc.features import batched
 from hcl_poc.flow import flow_matching_loss, sample_flow
 from hcl_poc.incremental import (
     _load_phase6_train_episodes,
     _phase4_dino_from_config,
     _phase4_frame_inputs,
+    _phase4_rgb_state,
     _phase7_obs_state_tensor,
     _rl_backend,
     _runtime_metadata,
@@ -50,7 +52,7 @@ from hcl_poc.utils import (
 
 console = Console()
 
-VAE_SCALING_BUDGETS = (50, 100, 200, 500, 1000, 1800)
+VAE_SCALING_BUDGETS = (50, 100, 200, 500, 1000, 1800, 4000, 8000)
 VAE_SCALING_SEEDS = (0, 1, 2)
 VAE_CANDIDATE = "vae512_w2048_b1e6"
 DEPLOYABLE_METHODS = (
@@ -78,10 +80,246 @@ def vae_scaling_config(config: Config, n_trajectories: int) -> Config:
     )
     raw["incremental"]["phase4"]["train_episodes"] = n_trajectories
     raw["incremental"]["phase6"]["train_episodes"] = n_trajectories
+    if n_trajectories > 1800:
+        raw["incremental"]["phase4"]["prepared_path"] = str(
+            config.get("vae_scaling.extended_prepared_path")
+        )
     raw["learned_interface"]["evaluation"]["seed_start"] = int(
         config.get("vae_scaling.eval_seed_start", 2_200_000)
     )
     return Config(raw=raw, path=config.path)
+
+
+def _dataset_content_sha256(
+    h5: h5py.File, keys: list[str]
+) -> str:
+    digest = hashlib.sha256()
+    for key in keys:
+        for dataset_name in ("dino", "proprio", "actions"):
+            values = np.asarray(h5[key][dataset_name])
+            digest.update(dataset_name.encode())
+            digest.update(str(values.shape).encode())
+            digest.update(values.tobytes())
+    return digest.hexdigest()
+
+
+@torch.inference_mode()
+def extend_vae_scaling_dataset(
+    config: Config,
+    force: bool = False,
+) -> Path:
+    """Append successful vectorized teacher rollouts without moving validation."""
+    from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
+
+    base_path = Path(config.get("incremental.phase4.prepared_path"))
+    output_path = Path(config.get("vae_scaling.extended_prepared_path"))
+    partial_path = output_path.with_suffix(output_path.suffix + ".partial")
+    base_train = int(config.get("incremental.phase4.train_episodes", 1800))
+    validation_count = int(
+        config.get("incremental.phase4.validation_episodes", 200)
+    )
+    target_train = int(config.get("vae_scaling.extended_train_episodes", 8000))
+    required_new = target_train - base_train
+    if required_new <= 0:
+        raise ValueError("Extended dataset must add training trajectories")
+    if output_path.exists() and not force:
+        with h5py.File(output_path, "r") as h5:
+            episode_count = len(
+                [key for key in h5 if key.startswith("episode_")]
+            )
+            if episode_count != target_train + validation_count:
+                raise ValueError(
+                    f"{output_path} has {episode_count} episodes, expected "
+                    f"{target_train + validation_count}"
+                )
+        console.print(f"Extended VAE dataset exists: {output_path}")
+        return output_path
+    if force:
+        output_path.unlink(missing_ok=True)
+        partial_path.unlink(missing_ok=True)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Missing base VAE dataset: {base_path}")
+    ensure_dir(output_path.parent)
+
+    if not partial_path.exists():
+        with h5py.File(base_path, "r") as source, h5py.File(
+            partial_path, "w"
+        ) as target:
+            keys = sorted(
+                key for key in source if key.startswith("episode_")
+            )
+            if len(keys) < base_train + validation_count:
+                raise ValueError("Base dataset is smaller than its fixed split")
+            meta = target.create_group("meta")
+            for key, value in source["meta"].attrs.items():
+                meta.attrs[key] = value
+            meta.attrs["extension_status"] = "collecting"
+            meta.attrs["base_dataset"] = str(base_path)
+            meta.attrs["base_attempts"] = int(
+                source["meta"].attrs.get("attempts", 0)
+            )
+            meta.attrs["base_train_episodes"] = base_train
+            meta.attrs["fixed_validation_episodes"] = validation_count
+            meta.attrs["target_train_episodes"] = target_train
+            meta.attrs["new_successes"] = 0
+            meta.attrs["new_attempts"] = 0
+            meta.attrs["extension_seed"] = int(
+                config.get("vae_scaling.extension_seed", 900000)
+            )
+            for index, source_key in enumerate(keys[:base_train]):
+                source.copy(
+                    source[source_key],
+                    target,
+                    name=f"episode_{index:04d}",
+                )
+            target.flush()
+
+    device = default_device()
+    teacher = load_ppo_agent(_rl_paths(config).best, device)
+    dino = _phase4_dino_from_config(config, device)
+    dino_batch_size = int(config.get("dino.batch_size", 64))
+    num_envs = int(config.get("vae_scaling.extension_num_envs", 64))
+    base_env = gym.make(
+        config.get("env_id"),
+        obs_mode="rgb+state",
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        sim_backend=_rl_backend(config),
+        num_envs=num_envs,
+        reconfiguration_freq=0,
+    )
+    env = ManiSkillVectorEnv(
+        base_env,
+        num_envs,
+        ignore_terminations=False,
+        record_metrics=True,
+    )
+    action_low = torch.as_tensor(
+        env.single_action_space.low, device=device, dtype=torch.float32
+    )
+    action_high = torch.as_tensor(
+        env.single_action_space.high, device=device, dtype=torch.float32
+    )
+    rgb_buffers: list[list[np.ndarray]] = [[] for _ in range(num_envs)]
+    proprio_buffers: list[list[np.ndarray]] = [
+        [] for _ in range(num_envs)
+    ]
+    action_buffers: list[list[np.ndarray]] = [
+        [] for _ in range(num_envs)
+    ]
+    try:
+        with h5py.File(partial_path, "r+") as target:
+            meta = target["meta"]
+            new_successes = int(meta.attrs["new_successes"])
+            attempts = int(meta.attrs["new_attempts"])
+            max_attempts = int(
+                config.get("vae_scaling.extension_max_attempts", 20000)
+            )
+            seed_start = int(meta.attrs["extension_seed"])
+            obs, _info = env.reset(seed=seed_start + attempts)
+            progress = trange(
+                required_new,
+                initial=new_successes,
+                desc="extend successful PPO demos",
+            )
+            while new_successes < required_new:
+                if attempts >= max_attempts:
+                    raise RuntimeError(
+                        f"Collected only {new_successes}/{required_new} new "
+                        f"successes in {attempts} finalized episodes"
+                    )
+                rgb, state = _phase4_rgb_state(obs)
+                raw_action = teacher.actor_mean(
+                    torch.as_tensor(state, device=device, dtype=torch.float32)
+                )
+                action = torch.clamp(raw_action, action_low, action_high)
+                action_np = action.cpu().numpy().astype(np.float32)
+                for env_index in range(num_envs):
+                    rgb_buffers[env_index].append(rgb[env_index].copy())
+                    proprio_buffers[env_index].append(
+                        state[env_index, :21].copy()
+                    )
+                    action_buffers[env_index].append(action_np[env_index])
+                obs, _reward, _terminated, _truncated, info = env.step(action)
+                if "final_info" not in info:
+                    continue
+                final_mask = (
+                    info["_final_info"]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(bool)
+                )
+                success_once = (
+                    info["final_info"]["episode"]["success_once"]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(bool)
+                )
+                for env_index in np.flatnonzero(final_mask):
+                    attempts += 1
+                    if success_once[env_index] and new_successes < required_new:
+                        rgb_episode = np.stack(rgb_buffers[env_index])
+                        features = [
+                            dino.encode_batch(chunk)
+                            for chunk in batched(rgb_episode, dino_batch_size)
+                        ]
+                        group_index = base_train + new_successes
+                        group = target.create_group(
+                            f"episode_{group_index:04d}"
+                        )
+                        group.attrs["source"] = "vectorized_privileged_ppo_extension"
+                        group.create_dataset(
+                            "dino",
+                            data=np.concatenate(features, axis=0),
+                            compression="gzip",
+                        )
+                        group.create_dataset(
+                            "proprio",
+                            data=np.stack(proprio_buffers[env_index]),
+                            compression="gzip",
+                        )
+                        group.create_dataset(
+                            "actions",
+                            data=np.stack(action_buffers[env_index]),
+                            compression="gzip",
+                        )
+                        new_successes += 1
+                        progress.update(1)
+                    rgb_buffers[env_index].clear()
+                    proprio_buffers[env_index].clear()
+                    action_buffers[env_index].clear()
+                meta.attrs["new_successes"] = new_successes
+                meta.attrs["new_attempts"] = attempts
+                if new_successes % 10 == 0:
+                    target.flush()
+            progress.close()
+            with h5py.File(base_path, "r") as source:
+                source_keys = sorted(
+                    key for key in source if key.startswith("episode_")
+                )
+                validation_keys = source_keys[-validation_count:]
+                validation_hash = _dataset_content_sha256(
+                    source, validation_keys
+                )
+                for index, source_key in enumerate(validation_keys):
+                    target_key = f"episode_{target_train + index:04d}"
+                    if target_key not in target:
+                        source.copy(
+                            source[source_key], target, name=target_key
+                        )
+            meta.attrs["extension_status"] = "complete"
+            meta.attrs["validation_content_sha256"] = validation_hash
+            meta.attrs["successes"] = target_train + validation_count
+            meta.attrs["attempts"] = int(meta.attrs["base_attempts"]) + attempts
+            target.flush()
+    finally:
+        env.close()
+    partial_path.replace(output_path)
+    console.print(f"Wrote extended VAE dataset: {output_path}")
+    return output_path
 
 
 def _point_artifact_dir(config: Config, seed: int) -> Path:
@@ -103,7 +341,9 @@ def write_vae_scaling_manifest(
     )
     if path.exists() and not force:
         return path
-    dataset_path = Path(config.get("incremental.phase4.prepared_path"))
+    dataset_path = Path(
+        point_config.get("incremental.phase4.prepared_path")
+    )
     validation_count = int(config.get("incremental.phase4.validation_episodes", 200))
     with h5py.File(dataset_path, "r") as h5:
         keys = sorted(key for key in h5 if key.startswith("episode_"))
@@ -111,6 +351,9 @@ def write_vae_scaling_manifest(
         validation_keys = keys[-validation_count:]
         train_lengths = [int(len(h5[key]["actions"])) for key in train_keys]
         validation_lengths = [int(len(h5[key]["actions"])) for key in validation_keys]
+        validation_content_sha256 = _dataset_content_sha256(
+            h5, validation_keys
+        )
     if set(train_keys) & set(validation_keys):
         raise ValueError("VAE scaling train/validation trajectory overlap")
     fingerprint_source = json.dumps(
@@ -130,6 +373,7 @@ def write_vae_scaling_manifest(
         "validation_keys": validation_keys,
         "train_transitions": int(sum(train_lengths)),
         "validation_transitions": int(sum(validation_lengths)),
+        "validation_content_sha256": validation_content_sha256,
         "equivalent_behavior_seconds": sum(train_lengths) / float(config.get("control_freq", 20)),
         "sha256": hashlib.sha256(fingerprint_source).hexdigest(),
         "metadata": _runtime_metadata(config),
@@ -144,13 +388,22 @@ def validate_nested_vae_scaling_manifests(config: Config) -> dict[str, Any]:
         path = write_vae_scaling_manifest(config, budget)
         with path.open() as stream:
             manifests.append(json.load(stream))
-    validation = manifests[0]["validation_keys"]
+    def validation_hash(manifest: dict[str, Any]) -> str:
+        existing = manifest.get("validation_content_sha256")
+        if existing is not None:
+            return str(existing)
+        with h5py.File(manifest["dataset"], "r") as h5:
+            return _dataset_content_sha256(
+                h5, list(manifest["validation_keys"])
+            )
+
+    validation = validation_hash(manifests[0])
     previous: list[str] = []
     for manifest in manifests:
         train = manifest["train_keys"]
         if train[: len(previous)] != previous:
             raise ValueError("VAE scaling trajectory budgets are not nested")
-        if manifest["validation_keys"] != validation:
+        if validation_hash(manifest) != validation:
             raise ValueError("VAE scaling validation split changed across budgets")
         previous = train
     return {

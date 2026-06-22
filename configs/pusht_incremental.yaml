@@ -563,12 +563,17 @@ learned_interface:
       batches_per_epoch: 200
       epochs: 40
 vae_scaling:
-  budgets: [50, 100, 200, 500, 1000, 1800]
+  budgets: [50, 100, 200, 500, 1000, 1800, 4000, 8000]
   training_seeds: [0, 1, 2]
   deployable_eval_episodes: 500
   oracle_eval_episodes: 50
   eval_seed_start: 2200000
   eval_num_envs: 64
+  extended_prepared_path: data/prepared/pusht_ppo_dino_spatial_proprio_tcp_8200.h5
+  extended_train_episodes: 8000
+  extension_num_envs: 64
+  extension_seed: 900000
+  extension_max_attempts: 20000
   flow_steps: 24
   policy:
     hidden_dim: 512
