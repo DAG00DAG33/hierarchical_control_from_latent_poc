@@ -21,6 +21,7 @@ from hcl_poc.learned_interface import (
     _variance_covariance_losses,
     _vae_kl,
 )
+from hcl_poc.low_level_rl import ResidualActorCritic
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
@@ -56,6 +57,24 @@ def test_world_model_requires_actions() -> None:
     horizons = torch.tensor([1, 5, 8])
     out = wm(z, action_seq, horizons)
     assert out.shape == (3, 4)
+
+
+def test_residual_actor_starts_near_zero() -> None:
+    agent = ResidualActorCritic(condition_dim=17, width=16, depth=2)
+    condition = torch.randn(32, 17)
+    with torch.no_grad():
+        residual = torch.tanh(agent.actor_mean(condition))
+    assert float(residual.abs().max()) < 0.001
+
+
+def test_residual_policy_logprob_matches_stored_raw_action() -> None:
+    agent = ResidualActorCritic(condition_dim=7, width=8, depth=2)
+    condition = torch.randn(4, 7)
+    raw_action, logprob, _entropy, _value = agent.get_action_and_value(condition)
+    _same, repeated_logprob, _entropy, _value = agent.get_action_and_value(
+        condition, raw_action=raw_action
+    )
+    assert torch.allclose(logprob, repeated_logprob)
 
 
 def test_vae_free_bits_apply_per_dimension() -> None:
@@ -160,9 +179,7 @@ def test_effect_dataset_uses_one_fixed_pair_for_held_goal() -> None:
     np.testing.assert_array_equal(sample["auxiliary"], auxiliary[10])
     assert 0.1 <= float(sample["remaining"]) <= 1.0
     encoder = _EffectEncoder(input_dim=4, effect_dim=8, hidden_dim=16)
-    pair = torch.cat(
-        [sample["x_start"], sample["x_future"], torch.ones(1)]
-    )[None]
+    pair = torch.cat([sample["x_start"], sample["x_future"], torch.ones(1)])[None]
     assert encoder(pair).shape == (1, 8)
 
 
@@ -189,9 +206,7 @@ def test_vae_scaling_budget_config_is_isolated() -> None:
     assert point.get("incremental.phase4.train_episodes") == 100
     assert point.get("incremental.phase6.train_episodes") == 100
     assert point.get("learned_interface.evaluation.seed_start") == 2200000
-    assert str(point.get("paths.incremental_artifact_dir")).endswith(
-        "vae512_scaling/n100"
-    )
+    assert str(point.get("paths.incremental_artifact_dir")).endswith("vae512_scaling/n100")
     assert config.get("incremental.phase4.train_episodes") == 1800
     extended = vae_scaling_config(config, 4000)
     assert extended.get("incremental.phase4.train_episodes") == 4000

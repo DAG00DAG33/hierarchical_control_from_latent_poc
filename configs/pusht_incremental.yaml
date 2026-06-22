@@ -29,6 +29,28 @@ rl:
   eval_reconfiguration_freq: 1
   eval_partial_reset: false
 
+low_level_rl:
+  num_envs: 32
+  rollout_steps: 32
+  num_minibatches: 8
+  update_epochs: 4
+  residual_width: 256
+  residual_depth: 2
+  initial_logstd: -2.3
+  learning_rate: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  entropy_coef: 0.0
+  value_coef: 0.5
+  max_grad_norm: 0.5
+  residual_penalty_weight: 0.01
+  checkpoint_every_steps: 25000
+  train_seed_start: 3000000
+  development_seed_start: 3200000
+  final_seed_start: 3400000
+  eval_num_envs: 32
+
 incremental:
   phase0:
     scalar_sim_backend: physx_cuda

@@ -98,6 +98,11 @@ from hcl_poc.learned_interface import (
     train_learned_interface_hierarchy,
     train_learned_interface_representation,
 )
+from hcl_poc.low_level_rl import (
+    audit_low_level_rl,
+    evaluate_residual_rl,
+    train_residual_rl,
+)
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.train import (
@@ -123,6 +128,41 @@ console = Console()
 
 def add_config_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default="configs/pusht.yaml")
+
+
+def low_level_rl_cmd(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    if args.low_level_rl_command == "audit":
+        console.print(audit_low_level_rl(config, args.n_demo, args.seed))
+    elif args.low_level_rl_command == "train-r1":
+        console.print(
+            train_residual_rl(
+                config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                run_name=args.run_name,
+                total_steps=args.steps,
+                alpha=args.alpha,
+                terminal_weight=args.terminal_weight,
+                task_reward_weight=args.task_reward_weight,
+                force=args.force,
+            )
+        )
+    elif args.low_level_rl_command == "eval":
+        console.print(
+            evaluate_residual_rl(
+                config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                run_name=args.run_name,
+                episodes=args.episodes,
+                seed_start=args.seed_start,
+                checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+                force=args.force,
+            )
+        )
+    else:
+        raise ValueError(args.low_level_rl_command)
 
 
 def doctor(args: argparse.Namespace) -> None:
@@ -1041,6 +1081,33 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--force", action="store_true")
     pp.set_defaults(func=data_cmd)
 
+    p = sub.add_parser("low-level-rl")
+    add_config_arg(p)
+    low_level_rl_sub = p.add_subparsers(dest="low_level_rl_command", required=True)
+    audit = low_level_rl_sub.add_parser("audit")
+    audit.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    audit.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    audit.set_defaults(func=low_level_rl_cmd)
+    train_r1 = low_level_rl_sub.add_parser("train-r1")
+    train_r1.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    train_r1.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
+    train_r1.add_argument("--run-name", required=True)
+    train_r1.add_argument("--steps", type=int, required=True)
+    train_r1.add_argument("--alpha", type=float, default=0.1)
+    train_r1.add_argument("--terminal-weight", type=float, default=1.0)
+    train_r1.add_argument("--task-reward-weight", type=float, default=0.0)
+    train_r1.add_argument("--force", action="store_true")
+    train_r1.set_defaults(func=low_level_rl_cmd)
+    low_eval = low_level_rl_sub.add_parser("eval")
+    low_eval.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    low_eval.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
+    low_eval.add_argument("--run-name", required=True)
+    low_eval.add_argument("--episodes", type=int, required=True)
+    low_eval.add_argument("--seed-start", type=int, required=True)
+    low_eval.add_argument("--checkpoint")
+    low_eval.add_argument("--force", action="store_true")
+    low_eval.set_defaults(func=low_level_rl_cmd)
+
     p = sub.add_parser("rl")
     add_config_arg(p)
     rl_sub = p.add_subparsers(dest="rl_command", required=True)
@@ -1636,9 +1703,7 @@ def build_parser() -> argparse.ArgumentParser:
     vae_scaling_manifests = incremental_sub.add_parser("vae-scaling-manifests")
     add_config_arg(vae_scaling_manifests)
     vae_scaling_manifests.set_defaults(func=incremental_cmd)
-    vae_scaling_extend = incremental_sub.add_parser(
-        "vae-scaling-extend-data"
-    )
+    vae_scaling_extend = incremental_sub.add_parser("vae-scaling-extend-data")
     add_config_arg(vae_scaling_extend)
     vae_scaling_extend.add_argument("--force", action="store_true")
     vae_scaling_extend.set_defaults(func=incremental_cmd)
@@ -1646,9 +1711,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(vae_scaling_aggregate)
     vae_scaling_aggregate.add_argument("--episodes", type=int, default=500)
     vae_scaling_aggregate.add_argument("--oracle-episodes", type=int, default=50)
-    vae_scaling_aggregate.add_argument(
-        "--seeds", type=int, nargs="+", default=[0, 1, 2]
-    )
+    vae_scaling_aggregate.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     vae_scaling_aggregate.add_argument("--output-name", default="aggregate")
     vae_scaling_aggregate.set_defaults(func=incremental_cmd)
     for command in [
