@@ -108,6 +108,10 @@ from hcl_poc.low_level_rl import (
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
+from hcl_poc.rl_rerun import (
+    audit_rl_rerun_state_dataset,
+    collect_rl_rerun_state_dataset,
+)
 from hcl_poc.train import (
     diagnose_hierarchy,
     train_bc_policy,
@@ -204,6 +208,37 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
             console.print(path)
     else:
         raise ValueError(args.low_level_rl_command)
+
+
+def rl_rerun_cmd(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    if args.rl_rerun_command == "collect-state-data":
+        console.print(
+            collect_rl_rerun_state_dataset(
+                config,
+                episodes=args.episodes,
+                output_path=Path(args.output) if args.output else None,
+                seed_start=args.seed_start,
+                max_attempts=args.max_attempts,
+                checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+                store_rgb=args.store_rgb,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "audit-state-data":
+        console.print(
+            audit_rl_rerun_state_dataset(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                samples=args.samples,
+                horizon=args.horizon,
+                seed=args.seed,
+                recompute_dino=args.recompute_dino,
+                warm_start_replay=args.warm_start_replay,
+            )
+        )
+    else:
+        raise ValueError(args.rl_rerun_command)
 
 
 def doctor(args: argparse.Namespace) -> None:
@@ -1171,6 +1206,27 @@ def build_parser() -> argparse.ArgumentParser:
     low_video.add_argument("--checkpoint")
     low_video.add_argument("--force", action="store_true")
     low_video.set_defaults(func=low_level_rl_cmd)
+
+    p = sub.add_parser("rl-rerun")
+    add_config_arg(p)
+    rl_rerun_sub = p.add_subparsers(dest="rl_rerun_command", required=True)
+    collect_state = rl_rerun_sub.add_parser("collect-state-data")
+    collect_state.add_argument("--episodes", type=int, required=True)
+    collect_state.add_argument("--output")
+    collect_state.add_argument("--seed-start", type=int)
+    collect_state.add_argument("--max-attempts", type=int)
+    collect_state.add_argument("--checkpoint")
+    collect_state.add_argument("--store-rgb", action="store_true")
+    collect_state.add_argument("--force", action="store_true")
+    collect_state.set_defaults(func=rl_rerun_cmd)
+    audit_state = rl_rerun_sub.add_parser("audit-state-data")
+    audit_state.add_argument("--dataset")
+    audit_state.add_argument("--samples", type=int, default=100)
+    audit_state.add_argument("--horizon", type=int, default=10)
+    audit_state.add_argument("--seed", type=int, default=0)
+    audit_state.add_argument("--recompute-dino", action="store_true")
+    audit_state.add_argument("--warm-start-replay", action="store_true")
+    audit_state.set_defaults(func=rl_rerun_cmd)
 
     p = sub.add_parser("rl")
     add_config_arg(p)
