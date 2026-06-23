@@ -85,3 +85,39 @@ Phase A is not passed for arbitrary direct `set_state()` local resets.
 Phase A is passed for exact reset-and-replay local resets from stored reset seed
 and action history. The RL local environment should use reset-and-replay unless
 future work identifies a complete hidden simulator/controller state API.
+
+## Full Dataset Audit
+
+After the pilot, the full rerun corpus was collected:
+
+```text
+data/rl_rerun/pusht_state_demos.h5
+```
+
+| item | value |
+| --- | ---: |
+| successful trajectories | 1200 |
+| collection attempts | 1498 |
+| file size | 1.3 GB |
+| state shape | 79 |
+| state observation dim | 31 |
+| DINO dim | 6528 |
+| sim backend | `physx_cuda` |
+
+Warm-start reset-and-replay audit on 1000 random windows:
+
+| metric | value |
+| --- | ---: |
+| sampled windows | 1000 |
+| horizon | 10 |
+| state restore max abs error | `0.0` |
+| observation/proprio restore max abs error | `0.0` |
+| 10-step replay state max abs error | `0.0` |
+| reward max abs error | `0.0` |
+| success mismatches | 0 |
+| DINO MSE mean | `3.93e-6` |
+| DINO MSE max | `2.51e-5` |
+
+Full Phase A decision: pass for exact reset-and-replay local resets. The next
+phase can define nested 500/1000 prefixes and retrain the supervised VAE/high
+level/low level components from this regenerated corpus.

@@ -117,3 +117,47 @@ resets are still possible using reset-and-replay, but arbitrary direct
 `set_state()` should not be used for RL training.
 
 Detailed audit: [`rl_rerun_state_load_audit.md`](rl_rerun_state_load_audit.md).
+
+## 2026-06-23 - RR-03: Full state-loadable dataset and Phase A gate
+
+Full collection command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml collect-state-data --episodes 1200 --output data/rl_rerun/pusht_state_demos.h5 --seed-start 920000 --max-attempts 24000 --force
+```
+
+Full dataset:
+
+| item | value |
+| --- | ---: |
+| successful trajectories | 1200 |
+| collection attempts | 1498 |
+| file size | 1.3 GB |
+| state shape | 79 |
+| state observation dim | 31 |
+| DINO dim | 6528 |
+| sim backend | `physx_cuda` |
+| teacher checkpoint | `artifacts/rl_pusht_official/ppo_best.pt` |
+
+Full warm-start audit command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-state-data --dataset data/rl_rerun/pusht_state_demos.h5 --samples 1000 --horizon 10 --seed 42 --warm-start-replay --recompute-dino
+```
+
+Result:
+
+| metric | value |
+| --- | ---: |
+| sampled windows | 1000 |
+| state restore max abs error | `0.0` |
+| observation/proprio restore max abs error | `0.0` |
+| 10-step replay state max abs error | `0.0` |
+| reward max abs error | `0.0` |
+| success mismatches | 0 |
+| DINO MSE mean | `3.93e-6` |
+| DINO MSE max | `2.51e-5` |
+
+Phase A gate decision: passed for exact reset-and-replay local resets. Direct
+arbitrary `set_state()` remains rejected for intermediate timesteps because it
+does not reproduce future contact dynamics.
