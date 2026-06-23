@@ -116,6 +116,7 @@ from hcl_poc.rl_rerun import (
     collect_rl_rerun_vector_dataset,
     create_rl_rerun_local_eval_manifest,
     ensure_rl_rerun_action_aliases,
+    evaluate_rl_rerun_closed_loop_r1,
     evaluate_rl_rerun_local_r1,
     run_rl_rerun_algorithm_audit,
     run_rl_rerun_local_reset_audit,
@@ -308,6 +309,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 terminal_weight=args.terminal_weight,
                 residual_penalty_weight=args.residual_penalty_weight,
                 learning_rate=args.learning_rate,
+                num_minibatches=args.num_minibatches,
                 checkpoint_every_updates=args.checkpoint_every_updates,
                 force=args.force,
             )
@@ -322,6 +324,19 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 seed=args.seed,
                 episodes=args.episodes,
                 manifest_path=Path(args.manifest) if args.manifest else None,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "eval-closed-loop-r1":
+        console.print(
+            evaluate_rl_rerun_closed_loop_r1(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                n_demo=args.n_demo,
+                seed=args.seed,
+                episodes=args.episodes,
+                eval_seed_start=args.eval_seed_start,
+                num_envs=args.num_envs,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -1412,6 +1427,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r1.add_argument("--terminal-weight", type=float, default=1.0)
     train_local_r1.add_argument("--residual-penalty-weight", type=float)
     train_local_r1.add_argument("--learning-rate", type=float)
+    train_local_r1.add_argument("--num-minibatches", type=int)
     train_local_r1.add_argument("--checkpoint-every-updates", type=int, default=5)
     train_local_r1.add_argument("--force", action="store_true")
     train_local_r1.set_defaults(func=rl_rerun_cmd)
@@ -1424,6 +1440,15 @@ def build_parser() -> argparse.ArgumentParser:
     eval_local_r1.add_argument("--manifest")
     eval_local_r1.add_argument("--output")
     eval_local_r1.set_defaults(func=rl_rerun_cmd)
+    eval_closed_loop_r1 = rl_rerun_sub.add_parser("eval-closed-loop-r1")
+    eval_closed_loop_r1.add_argument("--checkpoint", required=True)
+    eval_closed_loop_r1.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)
+    eval_closed_loop_r1.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    eval_closed_loop_r1.add_argument("--episodes", type=int, default=100)
+    eval_closed_loop_r1.add_argument("--eval-seed-start", type=int, default=10_000)
+    eval_closed_loop_r1.add_argument("--num-envs", type=int, default=64)
+    eval_closed_loop_r1.add_argument("--output")
+    eval_closed_loop_r1.set_defaults(func=rl_rerun_cmd)
     aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
     aliases.add_argument("--dataset")
     aliases.set_defaults(func=rl_rerun_cmd)

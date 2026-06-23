@@ -1,0 +1,37 @@
+{
+  "action_saturation_rate": 0.0099609375,
+  "chosen_batches": [
+    "batch_000000"
+  ],
+  "chosen_timestep_max": 34,
+  "chosen_timestep_min": 34,
+  "chosen_timesteps": [
+    34
+  ],
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5",
+  "distance_reduction_fraction": 0.830078125,
+  "distance_reduction_mean": 0.5193330645561218,
+  "distance_reduction_median": 0.4989040791988373,
+  "episodes": 1,
+  "evaluation_entries": [
+    {
+      "batch": "batch_000000",
+      "batch_seed": 9950000,
+      "timestep": 34
+    }
+  ],
+  "evaluation_manifest": "results/rl_rerun/local_eval_manifest_n512_val_b1_seed20260623.json",
+  "final_distance_mean": 0.6072980165481567,
+  "final_distance_median": 0.5359518527984619,
+  "gate_pass": true,
+  "horizon": 10,
+  "initial_distance_mean": 1.1266310214996338,
+  "initial_distance_median": 1.1121853590011597,
+  "n_demo": 500,
+  "num_envs": 512,
+  "progress_reward_mean": 0.5193330645561218,
+  "sampled_local_episodes": 512,
+  "seed": 0,
+  "task_success_once_fraction": 0.3203125,
+  "terminal_reward_mean": -0.6072980165481567
+}

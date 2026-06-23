@@ -956,3 +956,56 @@ stored steps: 60
 
 Its exact replay audit passes. Periodic checkpoints will be selected using
 latent reachability on this bank, never task success.
+
+## 2026-06-23 - RR-26: N=500 aligned R1 at 1M transitions
+
+Training completed:
+
+```text
+run: aligned10_n4096_lr3e4_alpha025_nopenalty_1m
+n_demo: 500
+RL-state corpus: data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5
+environments: 4096
+rollout horizon: 10
+updates: 25
+transitions: 1,024,000
+learning rate: 3e-4
+alpha: 0.25
+residual penalty: 0.0
+```
+
+Training terminal latent distance improved from `1.071` to `0.711`, but the
+decision must use held-out evaluation.
+
+Held-out 512-env local checkpoint selection:
+
+| checkpoint | final distance | mean reduction | reduction fraction | residual norm |
+| --- | ---: | ---: | ---: | ---: |
+| frozen BC | 0.6073 | 0.5193 | 0.8301 | 0.0000 |
+| 204800 | 0.6095 | 0.5172 | 0.8477 | 0.0094 |
+| 409600 | 0.6083 | 0.5184 | 0.8281 | 0.0127 |
+| 614400 | 0.6042 | 0.5225 | 0.8418 | 0.0155 |
+| 819200 | 0.5967 | 0.5300 | 0.8379 | 0.0171 |
+| 1024000 | 0.5912 | 0.5354 | 0.8418 | 0.0188 |
+
+The final checkpoint is best by held-out final latent distance, improving over
+frozen by `0.0161` absolute (`2.65%`). This is positive but still far below
+the Phase E gate (`25%` final-distance improvement and `15` percentage point
+goal-reach improvement).
+
+Closed-loop paired evaluation on 100 full Push-T episodes:
+
+| checkpoint | frozen success | residual success | success delta | final reward delta | max reward delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 204800 | 0.34 | 0.31 | -0.03 | -0.0235 | -0.0218 |
+| 409600 | 0.34 | 0.35 | +0.01 | +0.0048 | +0.0090 |
+| 614400 | 0.34 | 0.34 | 0.00 | -0.0021 | -0.0023 |
+| 819200 | 0.34 | 0.34 | 0.00 | -0.0036 | +0.0029 |
+| 1024000 | 0.34 | 0.31 | -0.03 | -0.0221 | -0.0225 |
+
+Interpretation: local latent reachability and closed-loop task success are not
+monotonic together. The best latent checkpoint is not the best deployed
+checkpoint. The only positive closed-loop signal is small (`+1` success on 100
+episodes) and too weak to pass the full-hierarchy gate. Before R2, run the
+requested ablation: train R1 on a separate ~500-stream expert-state corpus
+that is disjoint from the BC training trajectories.

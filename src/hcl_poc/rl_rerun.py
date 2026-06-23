@@ -1587,6 +1587,7 @@ def train_rl_rerun_local_r1(
     terminal_weight: float = 1.0,
     residual_penalty_weight: float | None = None,
     learning_rate: float | None = None,
+    num_minibatches: int | None = None,
     checkpoint_every_updates: int = 5,
     force: bool = False,
 ) -> Path:
@@ -1638,7 +1639,11 @@ def train_rl_rerun_local_r1(
         batch_keys = sorted(key for key in h5_meta.keys() if key.startswith("batch_"))
     rollout_steps = horizon
     batch_size = num_envs * rollout_steps
-    minibatches = int(config.get("low_level_rl.num_minibatches", 8))
+    minibatches = int(
+        num_minibatches
+        if num_minibatches is not None
+        else config.get("low_level_rl.num_minibatches", 8)
+    )
     if batch_size % minibatches:
         raise ValueError("RL batch size must divide num_minibatches")
     minibatch_size = batch_size // minibatches
@@ -2160,5 +2165,236 @@ def evaluate_rl_rerun_local_r1(
         / str(recipe["run_name"])
         / f"eval_local_{episodes}.json"
     )
+    write_json(out_path, result)
+    return out_path
+
+
+@torch.inference_mode()
+def evaluate_rl_rerun_closed_loop_r1(
+    config: Config,
+    checkpoint_path: Path,
+    n_demo: int = 500,
+    seed: int = 0,
+    episodes: int = 100,
+    eval_seed_start: int = 10_000,
+    num_envs: int = 64,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import ResidualActorCritic, _load_frozen
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(checkpoint_path)
+    if episodes <= 0 or num_envs <= 0:
+        raise ValueError("episodes and num_envs must be positive")
+
+    device = default_device()
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    recipe = checkpoint["recipe"]
+    if int(recipe["n_demo"]) != n_demo or int(recipe["seed"]) != seed:
+        raise ValueError("Residual checkpoint does not match n_demo/seed")
+    agent = ResidualActorCritic(
+        int(checkpoint["condition_dim"]),
+        width=int(recipe["actor_critic_width"]),
+        depth=int(recipe["actor_critic_depth"]),
+        initial_logstd=float(recipe["initial_logstd"]),
+    ).to(device)
+    agent.load_state_dict(checkpoint["agent"])
+    agent.eval()
+    dino = _phase4_dino_from_config(config, device)
+    alpha = float(recipe["alpha"])
+    max_steps = int(config.get("env_max_episode_steps", 100))
+
+    def rollout(use_residual: bool) -> dict[str, Any]:
+        successes: list[float] = []
+        final_rewards: list[float] = []
+        max_rewards: list[float] = []
+        residual_norms: list[float] = []
+        saturated_actions = 0
+        active_actions = 0
+        high_decisions = 0
+
+        for batch_start in range(0, episodes, num_envs):
+            batch_envs = min(num_envs, episodes - batch_start)
+            reset_seeds = [
+                eval_seed_start + batch_start + index for index in range(batch_envs)
+            ]
+            env = gym.make(
+                config.get("env_id"),
+                obs_mode="rgb+state",
+                control_mode=config.get("control_mode"),
+                reward_mode="normalized_dense",
+                render_mode=None,
+                sim_backend=_rl_backend(config),
+                num_envs=batch_envs,
+                reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+            )
+            action_low = torch.as_tensor(
+                np.asarray(env.action_space.low, dtype=np.float32),
+                device=device,
+            )
+            action_high = torch.as_tensor(
+                np.asarray(env.action_space.high, dtype=np.float32),
+                device=device,
+            )
+            if action_low.ndim == 1:
+                action_low = action_low.unsqueeze(0)
+                action_high = action_high.unsqueeze(0)
+            zero_previous = frozen.action_norm.transform(
+                np.zeros((1, 3), dtype=np.float32)
+            )[0]
+            previous_action = np.repeat(
+                zero_previous[None], batch_envs, axis=0
+            )
+            held_goal = np.zeros(
+                (batch_envs, frozen.goal_dim), dtype=np.float32
+            )
+            countdown = np.zeros(batch_envs, dtype=np.int32)
+            active = np.ones(batch_envs, dtype=np.bool_)
+            success_once = np.zeros(batch_envs, dtype=np.bool_)
+            batch_final = np.zeros(batch_envs, dtype=np.float32)
+            batch_max = np.full(batch_envs, -np.inf, dtype=np.float32)
+            try:
+                obs, _info = env.reset(seed=reset_seeds)
+                for _step in range(max_steps):
+                    if not np.any(active):
+                        break
+                    frames = _phase4_frame_inputs(
+                        obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    normalized_frames = frozen.frame_norm.transform(frames)
+                    replan = active & (countdown <= 0)
+                    if np.any(replan):
+                        high_input = np.concatenate(
+                            [normalized_frames, previous_action], axis=-1
+                        )
+                        predicted_goal = frozen.high_model(
+                            torch.from_numpy(high_input).to(device).float()
+                        ).cpu().numpy()
+                        held_goal[replan] = predicted_goal[replan]
+                        countdown[replan] = frozen.update_period
+                        high_decisions += int(np.sum(replan))
+
+                    if frozen.conditioning in {"delta", "relation"}:
+                        current_z = _encode_rerun_frames(frozen, frames, device)
+                    else:
+                        current_z = np.empty_like(held_goal)
+                    remaining = np.maximum(countdown, 1).astype(np.float32)
+                    condition_np = _low_condition_array(
+                        normalized_frames,
+                        current_z,
+                        held_goal,
+                        previous_action,
+                        (remaining / frozen.horizon_steps)[:, None],
+                        frozen.conditioning,
+                    )
+                    condition = torch.from_numpy(condition_np).to(device).float()
+                    normalized_base = frozen.low_model(condition)
+                    base_action = torch.from_numpy(
+                        frozen.action_norm.inverse(
+                            normalized_base.cpu().numpy().astype(np.float32)
+                        )
+                    ).to(device)
+                    if use_residual:
+                        raw_residual, _logprob, _entropy, _value = (
+                            agent.get_action_and_value(
+                                condition, deterministic=True
+                            )
+                        )
+                        residual = alpha * torch.tanh(raw_residual)
+                        residual_norms.extend(
+                            torch.linalg.vector_norm(residual, dim=-1)
+                            .cpu()
+                            .numpy()[active]
+                            .tolist()
+                        )
+                    else:
+                        residual = torch.zeros_like(base_action)
+                    unclipped = base_action + residual
+                    active_tensor = torch.from_numpy(active).to(device)
+                    saturated_actions += int(
+                        torch.any(unclipped != torch.clamp(
+                            unclipped, action_low, action_high
+                        ), dim=-1)[active_tensor].sum().cpu()
+                    )
+                    active_actions += int(np.sum(active))
+                    action = torch.clamp(unclipped, action_low, action_high)
+                    action[~active_tensor] = 0.0
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    previous_action = frozen.action_norm.transform(
+                        action.cpu().numpy().astype(np.float32)
+                    )
+                    countdown -= 1
+                    reward_np = _to_numpy(reward).reshape(-1).astype(np.float32)
+                    batch_final[active] = reward_np[active]
+                    batch_max[active] = np.maximum(
+                        batch_max[active], reward_np[active]
+                    )
+                    if "success" in info:
+                        success_once |= (
+                            _to_numpy(info["success"])
+                            .reshape(-1)
+                            .astype(np.bool_)
+                        )
+                    done = np.logical_or(
+                        _to_numpy(terminated).reshape(-1),
+                        _to_numpy(truncated).reshape(-1),
+                    )
+                    active[done.astype(np.bool_)] = False
+            finally:
+                env.close()
+            successes.extend(success_once.astype(float).tolist())
+            final_rewards.extend(batch_final.astype(float).tolist())
+            max_rewards.extend(batch_max.astype(float).tolist())
+
+        return {
+            "success": float(np.mean(successes)),
+            "final_reward": float(np.mean(final_rewards)),
+            "max_reward": float(np.mean(max_rewards)),
+            "action_saturation_rate": saturated_actions / max(active_actions, 1),
+            "mean_residual_norm": (
+                float(np.mean(residual_norms)) if residual_norms else 0.0
+            ),
+            "high_level_decisions_per_episode": high_decisions / episodes,
+            "episode_success": successes,
+            "episode_final_reward": final_rewards,
+            "episode_max_reward": max_rewards,
+        }
+
+    frozen_result = rollout(use_residual=False)
+    residual_result = rollout(use_residual=True)
+    result = {
+        "stage": "closed_loop_r1_paired",
+        "checkpoint": str(checkpoint_path),
+        "n_demo": n_demo,
+        "seed": seed,
+        "episodes": episodes,
+        "eval_seed_start": eval_seed_start,
+        "num_envs": num_envs,
+        "horizon": frozen.horizon_steps,
+        "update_period": frozen.update_period,
+        "frozen": frozen_result,
+        "residual": residual_result,
+        "success_delta": residual_result["success"] - frozen_result["success"],
+        "final_reward_delta": (
+            residual_result["final_reward"] - frozen_result["final_reward"]
+        ),
+        "max_reward_delta": (
+            residual_result["max_reward"] - frozen_result["max_reward"]
+        ),
+        "recipe": recipe,
+    }
+    out_path = output_path or (
+        _state_audit_result_dir(config)
+        / "local_r1"
+        / f"n{n_demo}"
+        / f"seed{seed}"
+        / str(recipe["run_name"])
+        / f"closed_loop_{episodes}.json"
+    )
+    ensure_dir(out_path.parent)
     write_json(out_path, result)
     return out_path
