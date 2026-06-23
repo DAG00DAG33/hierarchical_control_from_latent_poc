@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,67 @@ class ResidualActorCritic(nn.Module):
         distribution = self.distribution(condition)
         if raw_action is None:
             raw_action = distribution.mean if deterministic else distribution.sample()
+        return (
+            raw_action,
+            distribution.log_prob(raw_action).sum(-1),
+            distribution.entropy().sum(-1),
+            self.critic(condition).flatten(),
+        )
+
+
+class DirectLowActorCritic(nn.Module):
+    def __init__(
+        self,
+        low_model: nn.Module,
+        action_mean: np.ndarray,
+        action_std: np.ndarray,
+        condition_dim: int,
+        width: int = 256,
+        depth: int = 2,
+        initial_logstd: float = -2.3,
+    ) -> None:
+        super().__init__()
+        self.condition_dim = condition_dim
+        self.action_dim = 3
+        self.width = width
+        self.depth = depth
+        self.low_model = copy.deepcopy(low_model)
+        for parameter in self.low_model.parameters():
+            parameter.requires_grad_(False)
+        try:
+            last = self.low_model.policy.net[-1]
+        except AttributeError as exc:
+            raise ValueError(
+                "R3 last-layer tuning currently requires concat/delta low policy"
+            ) from exc
+        if not isinstance(last, nn.Linear):
+            raise ValueError("Expected final low-policy module to be nn.Linear")
+        for parameter in last.parameters():
+            parameter.requires_grad_(True)
+        self.actor_logstd = nn.Parameter(torch.full((1, 3), initial_logstd))
+        self.critic = _mlp(condition_dim, 1, width, depth, output_std=1.0)
+        self.register_buffer(
+            "action_mean", torch.as_tensor(action_mean.reshape(1, -1), dtype=torch.float32)
+        )
+        self.register_buffer(
+            "action_std", torch.as_tensor(action_std.reshape(1, -1), dtype=torch.float32)
+        )
+
+    def mean_action(self, condition: torch.Tensor) -> torch.Tensor:
+        normalized = self.low_model(condition)
+        return normalized * self.action_std + self.action_mean
+
+    def get_action_and_value(
+        self,
+        condition: torch.Tensor,
+        raw_action: torch.Tensor | None = None,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean = self.mean_action(condition)
+        std = torch.exp(self.actor_logstd.expand_as(mean))
+        distribution = torch.distributions.Normal(mean, std)
+        if raw_action is None:
+            raw_action = mean if deterministic else distribution.sample()
         return (
             raw_action,
             distribution.log_prob(raw_action).sum(-1),
@@ -408,6 +470,25 @@ def _load_residual(path: Path, device: torch.device) -> tuple[ResidualActorCriti
     return agent, checkpoint
 
 
+def _load_direct(
+    path: Path,
+    frozen: FrozenHierarchy,
+    device: torch.device,
+) -> tuple[DirectLowActorCritic, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    agent = DirectLowActorCritic(
+        frozen.low_model,
+        frozen.action_norm.mean,
+        frozen.action_norm.std,
+        int(checkpoint["condition_dim"]),
+        int(checkpoint["width"]),
+        int(checkpoint["depth"]),
+    ).to(device)
+    agent.load_state_dict(checkpoint["agent"])
+    agent.eval()
+    return agent, checkpoint
+
+
 @torch.inference_mode()
 def evaluate_residual_rl(
     config: Config,
@@ -426,12 +507,18 @@ def evaluate_residual_rl(
     device = default_device()
     frozen = _load_frozen(config, n_demo, seed, device)
     checkpoint_path = checkpoint_path or artifact / "latest.pt"
-    agent = None
+    residual_agent: ResidualActorCritic | None = None
+    direct_agent: DirectLowActorCritic | None = None
     alpha = 0.0
     global_step = 0
     if checkpoint_path.exists():
-        agent, checkpoint = _load_residual(checkpoint_path, device)
-        alpha = float(checkpoint["recipe"]["alpha"])
+        raw_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        method = str(raw_checkpoint.get("recipe", {}).get("method", "r1_residual_deterministic"))
+        if method == "r3_direct_last_layer":
+            direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
+        else:
+            residual_agent, checkpoint = _load_residual(checkpoint_path, device)
+            alpha = float(checkpoint["recipe"]["alpha"])
         global_step = int(checkpoint["global_step"])
     num_envs = min(int(config.get("low_level_rl.eval_num_envs", 32)), episodes)
     rollout = HierarchyRollout(config, frozen, num_envs, seed_start, device)
@@ -454,13 +541,17 @@ def evaluate_residual_rl(
             current_segment_initial = distance.copy()
         else:
             current_segment_initial[replan] = distance[replan]
-        raw_residual = (
-            agent.get_action_and_value(condition, deterministic=True)[0]
-            if agent is not None
-            else torch.zeros_like(base_action)
-        )
-        residual = alpha * torch.tanh(raw_residual)
-        unclipped = base_action + residual
+        if direct_agent is not None:
+            unclipped = direct_agent.get_action_and_value(condition, deterministic=True)[0]
+            residual = unclipped - base_action
+        else:
+            raw_residual = (
+                residual_agent.get_action_and_value(condition, deterministic=True)[0]
+                if residual_agent is not None
+                else torch.zeros_like(base_action)
+            )
+            residual = alpha * torch.tanh(raw_residual)
+            unclipped = base_action + residual
         action = torch.clamp(unclipped, rollout.action_low, rollout.action_high)
         saturation += int(torch.any(unclipped != action, dim=-1).sum().cpu())
         action_count += num_envs
@@ -502,7 +593,9 @@ def evaluate_residual_rl(
         "n_demo": n_demo,
         "seed": seed,
         "run_name": run_name,
-        "checkpoint": str(checkpoint_path) if agent is not None else None,
+        "checkpoint": str(checkpoint_path)
+        if (residual_agent is not None or direct_agent is not None)
+        else None,
         "rl_steps": global_step,
         "episodes": count,
         "seed_start": seed_start,

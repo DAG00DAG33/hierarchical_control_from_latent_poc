@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import subprocess
 import sys
 from pathlib import Path
@@ -135,9 +136,14 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
     if args.low_level_rl_command == "audit":
         console.print(audit_low_level_rl(config, args.n_demo, args.seed))
     elif args.low_level_rl_command == "train-r1":
+        run_config = config
+        if args.no_segment_terminate_gae:
+            raw = copy.deepcopy(config.raw)
+            raw.setdefault("low_level_rl", {})["segment_terminates_gae"] = False
+            run_config = type(config)(raw=raw, path=config.path)
         console.print(
             train_residual_rl(
-                config,
+                run_config,
                 n_demo=args.n_demo,
                 seed=args.seed,
                 run_name=args.run_name,
@@ -1096,6 +1102,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_r1.add_argument("--alpha", type=float, default=0.1)
     train_r1.add_argument("--terminal-weight", type=float, default=1.0)
     train_r1.add_argument("--task-reward-weight", type=float, default=0.0)
+    train_r1.add_argument("--no-segment-terminate-gae", action="store_true")
     train_r1.add_argument("--force", action="store_true")
     train_r1.set_defaults(func=low_level_rl_cmd)
     low_eval = low_level_rl_sub.add_parser("eval")

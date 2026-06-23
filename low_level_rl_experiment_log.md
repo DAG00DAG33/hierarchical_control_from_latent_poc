@@ -81,3 +81,28 @@ latent MSE (`1.459 -> 1.646`) and goal reach (`0.621 -> 0.560`). Therefore no
 50k recipe passes either the local or full-hierarchy gate. The two least
 aggressive `alpha=0.05` recipes proceed to the planned 500k development budget
 to test whether this is insufficient optimization rather than a bad asymptote.
+
+## 2026-06-23 - RL-03: R1 500k development decision
+
+Three R1 variants were run to 500k or to diagnostic 50k limits and evaluated
+on 300 development episodes. Immutable checkpoints were evaluated at roughly
+100k-step intervals.
+
+| method | best step | success | final latent MSE | goal reach | decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| frozen | 0 | 0.363 | 1.459 | 0.621 | reference |
+| R1 progress | 200,704 | 0.350 | 1.512 | 0.598 | reject |
+| R1 terminal + 0.1 task | 200,704 | 0.373 | 1.539 | 0.580 | reject: tiny success gain, worse latent reach |
+| R1 task only, full GAE | 500,736 | 0.290 | 1.588 | 0.562 | reject |
+| R1 alpha 0.50 diagnostics | 50,176 | <=0.223 | >=1.642 | <=0.537 | reject |
+
+R1 does not pass the local reachability gate or the full-hierarchy gate. The
+best success point is only one percentage point above frozen on 300 episodes
+and simultaneously worsens latent final distance and goal reach. This is not a
+usable positive result.
+
+Direct final-layer low-level fine-tuning was partially scaffolded as reusable
+model code, but the executable CLI was not kept because the R1 gate failed and
+the plan explicitly treats R2-R4 as follow-ons only after R1 stability. The
+next serious branch should add stricter BC regularization and/or a physical
+progress reward before running direct fine-tuning.

@@ -21,7 +21,7 @@ from hcl_poc.learned_interface import (
     _variance_covariance_losses,
     _vae_kl,
 )
-from hcl_poc.low_level_rl import ResidualActorCritic
+from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
@@ -75,6 +75,27 @@ def test_residual_policy_logprob_matches_stored_raw_action() -> None:
         condition, raw_action=raw_action
     )
     assert torch.allclose(logprob, repeated_logprob)
+
+
+def test_direct_low_actor_trains_only_final_low_layer() -> None:
+    low = _GoalConditionedLowPolicy(5, 3, 8, "concat")
+    actor = DirectLowActorCritic(
+        low,
+        action_mean=np.zeros(3, dtype=np.float32),
+        action_std=np.ones(3, dtype=np.float32),
+        condition_dim=12,
+        width=8,
+        depth=1,
+    )
+    low_trainable = [
+        name for name, parameter in actor.low_model.named_parameters() if parameter.requires_grad
+    ]
+    assert low_trainable == ["policy.net.8.weight", "policy.net.8.bias"]
+    condition = torch.randn(4, 12)
+    action, logprob, _entropy, value = actor.get_action_and_value(condition)
+    assert action.shape == (4, 3)
+    assert logprob.shape == (4,)
+    assert value.shape == (4,)
 
 
 def test_vae_free_bits_apply_per_dimension() -> None:
