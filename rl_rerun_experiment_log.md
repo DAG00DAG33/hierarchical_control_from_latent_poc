@@ -721,3 +721,39 @@ local-goal improvement gate. The deterministic residual remains very small
 Next tuning should try lower residual penalty, larger `alpha`, and/or larger
 residual learning rate, and should evaluate on fixed local validation resets
 during training.
+
+## 2026-06-23 - RR-17: R1 local PPO alpha/penalty tuning
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r1 --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --n-demo 1000 --seed 0 --run-name alpha025_nopenalty_262k --steps 262144 --alpha 0.25 --terminal-weight 1.0 --residual-penalty-weight 0.0 --force
+```
+
+Evaluation:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r1 --checkpoint artifacts/rl_rerun/local_r1/n1000/seed0/alpha025_nopenalty_262k/latest.pt --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --n-demo 1000 --seed 0 --episodes 4 --output results/rl_rerun/local_r1/n1000/seed0/alpha025_nopenalty_262k/eval_local_4.json
+```
+
+Tracked outputs:
+
+```text
+rl_rerun_local_r1_alpha025_nopenalty_262k_history.json
+rl_rerun_local_r1_alpha025_nopenalty_262k_eval4.json
+```
+
+Paired local evaluation on 2048 local episodes:
+
+| policy | final distance | distance reduction | reduction fraction | residual norm | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen BC low-level | 1.131 | 0.415 | 0.812 | n/a | 0.0219 |
+| R1 alpha 0.10, penalty 0.01 | 1.138 | 0.408 | 0.799 | 0.00335 | 0.0207 |
+| R1 alpha 0.25, penalty 0.00 | 1.135 | 0.411 | 0.804 | 0.00886 | 0.0213 |
+
+Decision: increasing residual authority and removing the residual penalty
+increased deterministic residual usage but still did not pass the local-goal
+gate. The result remains slightly below the frozen controller. Before spending
+on 1M+ steps, improve the training setup: use multiple vector batches, add
+fixed validation evaluation during training, and consider a stronger residual
+mean optimization signal.

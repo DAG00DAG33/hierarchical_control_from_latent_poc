@@ -100,3 +100,31 @@ Next tuning ideas:
    terminal distance alone was optimistic here;
 5. collect more than one `512`-env vector batch to reduce overfitting to a
    single reset batch.
+
+## Follow-Up: Alpha 0.25, No Residual Penalty
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r1 --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --n-demo 1000 --seed 0 --run-name alpha025_nopenalty_262k --steps 262144 --alpha 0.25 --terminal-weight 1.0 --residual-penalty-weight 0.0 --force
+```
+
+Tracked files:
+
+```text
+rl_rerun_local_r1_alpha025_nopenalty_262k_history.json
+rl_rerun_local_r1_alpha025_nopenalty_262k_eval4.json
+```
+
+Evaluation on the same 2048 local episodes:
+
+| policy | final distance | distance reduction | reduction fraction | residual norm | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen BC low-level | 1.131 | 0.415 | 0.812 | n/a | 0.0219 |
+| R1 alpha 0.10, penalty 0.01 | 1.138 | 0.408 | 0.799 | 0.00335 | 0.0207 |
+| R1 alpha 0.25, penalty 0.00 | 1.135 | 0.411 | 0.804 | 0.00886 | 0.0213 |
+
+This tuning increased deterministic residual usage but still did not beat the
+frozen controller. The next likely bottleneck is not simply residual authority;
+the PPO objective is not finding a better deterministic mean policy in this
+single-vector-batch setup.
