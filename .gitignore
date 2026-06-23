@@ -15,4 +15,5 @@ results/**/*.zip
 results/videos/
 run_logs/
 logs/
+logs_*.txt
 !results/.gitkeep
