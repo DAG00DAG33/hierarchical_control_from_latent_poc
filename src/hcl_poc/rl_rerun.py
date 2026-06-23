@@ -3306,3 +3306,221 @@ def evaluate_rl_rerun_closed_loop_r3(
         num_envs=num_envs,
         output_path=output_path,
     )
+
+
+@torch.inference_mode()
+def record_rl_rerun_videos(
+    config: Config,
+    checkpoint_path: Path,
+    n_demo: int = 500,
+    seed: int = 0,
+    episodes: int = 6,
+    eval_seed_start: int = 10_000,
+    mode: str = "both",
+    output_dir: Path | None = None,
+    force: bool = False,
+) -> list[Path]:
+    import imageio.v2 as imageio
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
+
+    if mode not in {"frozen", "tuned", "both"}:
+        raise ValueError("mode must be one of: frozen, tuned, both")
+    if episodes <= 0:
+        raise ValueError("episodes must be positive")
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(checkpoint_path)
+
+    device = default_device()
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    recipe = checkpoint["recipe"]
+    if int(recipe["n_demo"]) != n_demo or int(recipe["seed"]) != seed:
+        raise ValueError("Checkpoint does not match n_demo/seed")
+    method = str(recipe.get("method", ""))
+    is_direct = method.startswith("r3_direct")
+    base_policy = str(recipe.get("base_policy", "deterministic"))
+    flow_model: FlowModel | None = None
+    flow_checkpoint: dict[str, Any] | None = None
+    if is_direct:
+        base_policy = "deterministic"
+    elif base_policy == "flow":
+        flow_path = recipe.get("flow_checkpoint")
+        if not flow_path:
+            raise ValueError("R2 checkpoint is missing flow_checkpoint")
+        flow_model, flow_checkpoint = _load_low_flow_base(Path(flow_path), device)
+    elif base_policy != "deterministic":
+        raise ValueError(f"Unknown base policy: {base_policy}")
+
+    if is_direct:
+        agent: nn.Module = DirectLowActorCritic(
+            frozen.low_model,
+            frozen.action_norm.mean,
+            frozen.action_norm.std,
+            int(checkpoint["condition_dim"]),
+            width=int(recipe["actor_critic_width"]),
+            depth=int(recipe["actor_critic_depth"]),
+            initial_logstd=float(recipe["initial_logstd"]),
+        ).to(device)
+    else:
+        agent = ResidualActorCritic(
+            int(checkpoint["condition_dim"]),
+            width=int(recipe["actor_critic_width"]),
+            depth=int(recipe["actor_critic_depth"]),
+            initial_logstd=float(recipe["initial_logstd"]),
+        ).to(device)
+    agent.load_state_dict(checkpoint["agent"])
+    agent.eval()
+    alpha = float(recipe.get("alpha", 0.0))
+    dino = _phase4_dino_from_config(config, device)
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    control_freq = int(config.get("control_freq", 20))
+    root = ensure_dir(output_dir or Path("rl_rerun_failure_videos"))
+    selected_modes = ["frozen", "tuned"] if mode == "both" else [mode]
+    written: list[Path] = []
+
+    def render_frame(env: gym.Env) -> np.ndarray:
+        rendered = env.render()
+        frame = (
+            rendered.detach().cpu().numpy()
+            if isinstance(rendered, torch.Tensor)
+            else np.asarray(rendered)
+        )
+        if frame.ndim == 4:
+            frame = frame[0]
+        return frame.astype(np.uint8)
+
+    for selected_mode in selected_modes:
+        mode_dir = ensure_dir(root / selected_mode)
+        for episode_index in trange(
+            episodes,
+            desc=f"record rl rerun {selected_mode}",
+        ):
+            rollout_seed = eval_seed_start + episode_index
+            existing = sorted(mode_dir.glob(f"seed{rollout_seed}_*.mp4"))
+            if existing and not force:
+                written.append(existing[0])
+                continue
+            env = gym.make(
+                config.get("env_id"),
+                obs_mode="rgb+state",
+                control_mode=config.get("control_mode"),
+                reward_mode="normalized_dense",
+                render_mode="rgb_array",
+                sim_backend=_rl_backend(config),
+                num_envs=1,
+                reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+            )
+            action_low_np = np.asarray(env.action_space.low, dtype=np.float32)
+            action_high_np = np.asarray(env.action_space.high, dtype=np.float32)
+            if action_low_np.ndim == 2:
+                action_low_np = action_low_np[0]
+                action_high_np = action_high_np[0]
+            action_low = torch.as_tensor(action_low_np, device=device)
+            action_high = torch.as_tensor(action_high_np, device=device)
+            previous_action = frozen.action_norm.transform(
+                np.zeros((1, 3), dtype=np.float32)
+            )
+            held_goal = np.zeros((1, frozen.goal_dim), dtype=np.float32)
+            countdown = np.zeros(1, dtype=np.int32)
+            frames_out: list[np.ndarray] = []
+            success = False
+            final_reward = 0.0
+            max_reward = -float("inf")
+            try:
+                obs, _info = env.reset(seed=[rollout_seed])
+                frames_out.append(render_frame(env))
+                for _step in range(max_steps):
+                    frames = _phase4_frame_inputs(
+                        obs,
+                        dino,
+                        int(config.get("dino.batch_size", 64)),
+                    )
+                    normalized_frames = frozen.frame_norm.transform(frames)
+                    if countdown[0] <= 0:
+                        high_input = np.concatenate(
+                            [normalized_frames, previous_action],
+                            axis=-1,
+                        )
+                        held_goal = (
+                            frozen.high_model(
+                                torch.from_numpy(high_input).to(device).float()
+                            )
+                            .cpu()
+                            .numpy()
+                        )
+                        countdown[0] = frozen.update_period
+
+                    if frozen.conditioning in {"delta", "relation"}:
+                        current_z = _encode_rerun_frames(frozen, frames, device)
+                    else:
+                        current_z = np.empty_like(held_goal)
+                    condition_np = _low_condition_array(
+                        normalized_frames,
+                        current_z,
+                        held_goal,
+                        previous_action,
+                        (np.maximum(countdown, 1).astype(np.float32) / frozen.horizon_steps)[
+                            :, None
+                        ],
+                        frozen.conditioning,
+                    )
+                    condition = torch.from_numpy(condition_np).to(device).float()
+                    if base_policy == "deterministic":
+                        normalized_base = frozen.low_model(condition)
+                        base_action = torch.from_numpy(
+                            frozen.action_norm.inverse(
+                                normalized_base.cpu().numpy().astype(np.float32)
+                            )
+                        ).to(device)
+                    else:
+                        if flow_model is None or flow_checkpoint is None:
+                            raise RuntimeError("R2 flow base was not loaded")
+                        base_action = _low_flow_base_action(
+                            flow_model,
+                            flow_checkpoint,
+                            condition,
+                            frozen,
+                        )
+
+                    if selected_mode == "frozen":
+                        unclipped = base_action
+                    elif is_direct:
+                        unclipped = agent.get_action_and_value(
+                            condition,
+                            deterministic=True,
+                        )[0]
+                    else:
+                        raw_residual = agent.get_action_and_value(
+                            condition,
+                            deterministic=True,
+                        )[0]
+                        unclipped = base_action + alpha * torch.tanh(raw_residual)
+                    action = torch.clamp(unclipped, action_low, action_high)
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    previous_action = frozen.action_norm.transform(
+                        action.cpu().numpy().astype(np.float32)
+                    )
+                    countdown -= 1
+                    frames_out.append(render_frame(env))
+                    final_reward = float(_to_numpy(reward).reshape(-1)[0])
+                    max_reward = max(max_reward, final_reward)
+                    if "success" in info:
+                        success = success or bool(_to_numpy(info["success"]).reshape(-1)[0])
+                    done = bool(
+                        _to_numpy(torch.logical_or(terminated, truncated)).reshape(-1)[0]
+                    )
+                    if done:
+                        break
+            finally:
+                env.close()
+
+            path = mode_dir / (
+                f"seed{rollout_seed}_step{int(checkpoint['global_step'])}_"
+                f"success{int(success)}_final{final_reward:.3f}_max{max_reward:.3f}.mp4"
+            )
+            imageio.mimsave(path, frames_out, fps=control_freq, macro_block_size=1)
+            written.append(path)
+    return written

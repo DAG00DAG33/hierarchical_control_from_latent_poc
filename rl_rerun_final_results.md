@@ -49,6 +49,7 @@ gate of `+0.10` success.
 | `data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5` | cheap fixed checkpoint-selection corpus |
 | `rl_rerun_vector_state_audit_n4096_b2.json` | exact replay audit for the main corpus |
 | `rl_rerun_throughput_rollout10_large.csv` | 10-step throughput benchmark |
+| `rl_rerun_failure_videos/` | paired frozen/tuned deployment videos for the best R3 checkpoint |
 
 The single-env corpus replays exactly in a single-env CUDA simulator, but
 single-env intermediate states are not vector-reset equivalent. Serious local
@@ -178,3 +179,17 @@ The current best scientific conclusion is:
   success/failure.
 - A final positive claim would require at least three policy seeds and a larger
   evaluation budget for the selected R3 setting.
+
+## Videos
+
+Representative paired videos for the best R3 checkpoint are in
+`rl_rerun_failure_videos/`.
+
+```text
+checkpoint: artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt
+evaluation seeds: 10000-10005
+modes: frozen, tuned
+```
+
+The filenames include `success`, `final`, and `max` reward fields. The set
+contains both successes and failures for qualitative inspection.

@@ -1416,3 +1416,35 @@ Both `N=1000` R3 smokes are locally worse than the frozen `N=1000` low level.
 Decision: do not spend a full 4096-env 1M-transition run on these exact
 `N=1000` R3 settings. The positive low-level RL signal currently exists only
 for `N=500`, lower-LR direct last-layer tuning.
+
+## 2026-06-24 - RR-33: Failure-video deliverable
+
+Added rerun-specific video recording for the exact policy path used in the
+closed-loop R1/R2/R3 evaluations:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml record-videos \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 6 --eval-seed-start 10000 \
+  --mode both --output-dir rl_rerun_failure_videos --force
+```
+
+Generated 12 videos:
+
+```text
+rl_rerun_failure_videos/frozen/seed10000_step409600_success1_final1.000_max1.000.mp4
+rl_rerun_failure_videos/frozen/seed10001_step409600_success1_final1.000_max1.000.mp4
+rl_rerun_failure_videos/frozen/seed10002_step409600_success1_final1.000_max1.000.mp4
+rl_rerun_failure_videos/frozen/seed10003_step409600_success0_final0.258_max0.265.mp4
+rl_rerun_failure_videos/frozen/seed10004_step409600_success0_final0.262_max0.323.mp4
+rl_rerun_failure_videos/frozen/seed10005_step409600_success0_final0.182_max0.224.mp4
+rl_rerun_failure_videos/tuned/seed10000_step409600_success1_final1.000_max1.000.mp4
+rl_rerun_failure_videos/tuned/seed10001_step409600_success0_final0.326_max0.329.mp4
+rl_rerun_failure_videos/tuned/seed10002_step409600_success1_final1.000_max1.000.mp4
+rl_rerun_failure_videos/tuned/seed10003_step409600_success0_final0.028_max0.093.mp4
+rl_rerun_failure_videos/tuned/seed10004_step409600_success1_final1.000_max1.000.mp4
+rl_rerun_failure_videos/tuned/seed10005_step409600_success0_final0.201_max0.225.mp4
+```
+
+The set intentionally includes both successes and failures for frozen and tuned
+policies, so the action-level qualitative differences can be inspected directly.

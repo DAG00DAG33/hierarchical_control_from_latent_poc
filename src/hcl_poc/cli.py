@@ -125,6 +125,7 @@ from hcl_poc.rl_rerun import (
     run_rl_rerun_algorithm_audit,
     run_rl_rerun_local_reset_audit,
     run_rl_rerun_throughput_benchmark,
+    record_rl_rerun_videos,
     train_rl_rerun_low_flow_base,
     train_rl_rerun_local_r1,
     train_rl_rerun_local_r2,
@@ -446,6 +447,19 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 output_path=Path(args.output) if args.output else None,
             )
         )
+    elif args.rl_rerun_command == "record-videos":
+        for path in record_rl_rerun_videos(
+            config,
+            checkpoint_path=Path(args.checkpoint),
+            n_demo=args.n_demo,
+            seed=args.seed,
+            episodes=args.episodes,
+            eval_seed_start=args.eval_seed_start,
+            mode=args.mode,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            force=args.force,
+        ):
+            console.print(path)
     elif args.rl_rerun_command == "ensure-action-aliases":
         console.print(
             ensure_rl_rerun_action_aliases(
@@ -1624,6 +1638,16 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r3.add_argument("--num-envs", type=int, default=64)
     eval_closed_loop_r3.add_argument("--output")
     eval_closed_loop_r3.set_defaults(func=rl_rerun_cmd)
+    record_rerun_videos = rl_rerun_sub.add_parser("record-videos")
+    record_rerun_videos.add_argument("--checkpoint", required=True)
+    record_rerun_videos.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)
+    record_rerun_videos.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    record_rerun_videos.add_argument("--episodes", type=int, default=6)
+    record_rerun_videos.add_argument("--eval-seed-start", type=int, default=10_000)
+    record_rerun_videos.add_argument("--mode", choices=["frozen", "tuned", "both"], default="both")
+    record_rerun_videos.add_argument("--output-dir")
+    record_rerun_videos.add_argument("--force", action="store_true")
+    record_rerun_videos.set_defaults(func=rl_rerun_cmd)
     aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
     aliases.add_argument("--dataset")
     aliases.set_defaults(func=rl_rerun_cmd)
