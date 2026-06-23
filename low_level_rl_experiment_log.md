@@ -190,3 +190,27 @@ latent goal metric is not clearly better than frozen, so this should be treated
 as a task-performance signal from mild low-level adaptation rather than proof
 that the latent reachability objective alone improved. Next step: repeat this
 same recipe for seeds 1 and 2 before doing longer or final-budget evaluations.
+
+## 2026-06-23 - RL-06: R3 seed confirmation at N=500
+
+Repeated the selected R3 recipe for seeds 1 and 2:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r3 --n-demo 500 --seed <seed> --run-name r3_bc1_lownoise_progress1_50k --steps 50176 --bc-weight 1.0 --terminal-weight 1.0 --task-progress-weight 1.0 --force
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval --n-demo 500 --seed <seed> --run-name r3_bc1_lownoise_progress1_50k_best300 --episodes 300 --seed-start 3200000 --checkpoint artifacts/incremental/low_level_rl/n500/seed<seed>/r3_bc1_lownoise_progress1_50k/best_train_latent.pt --force
+```
+
+Matched frozen references were evaluated with the same 300 development seeds.
+
+| seed | frozen success | R3 selected success | delta | frozen final latent MSE | R3 final latent MSE | R3 selected step | R3 action drift |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.313 | 0.390 | +0.077 | 1.576 | 1.597 | 5,120 | 0.0056 |
+| 1 | 0.313 | 0.300 | -0.013 | 1.563 | 1.507 | 39,936 | 0.0158 |
+| 2 | 0.290 | 0.303 | +0.013 | 1.482 | 1.485 | 18,432 | 0.0071 |
+| mean | 0.306 | 0.331 | +0.026 | 1.540 | 1.530 | - | 0.0095 |
+
+Decision: R3 with low exploration and task-progress shaping is the first
+method that improves mean success over the frozen hierarchy, but the gain is
+modest and seed-dependent. It is worth testing at the confirmation budget
+`N_demo=1000`, but it is not yet strong enough to justify a large final sweep
+without that check.
