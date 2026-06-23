@@ -1,0 +1,65 @@
+{
+  "action_saturation_rate": 0.011328125,
+  "checkpoint": "artifacts/rl_rerun/local_r1/n500/seed0/disjoint512_lr3e4_alpha025_nopenalty_1m/checkpoints/step_000204800.pt",
+  "chosen_batches": [
+    "batch_000000"
+  ],
+  "chosen_timestep_max": 34,
+  "chosen_timestep_min": 34,
+  "chosen_timesteps": [
+    34
+  ],
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5",
+  "distance_reduction_fraction": 0.84375,
+  "distance_reduction_mean": 0.5308670997619629,
+  "episodes": 1,
+  "evaluation_entries": [
+    {
+      "batch": "batch_000000",
+      "batch_seed": 9950000,
+      "timestep": 34
+    }
+  ],
+  "evaluation_manifest": "results/rl_rerun/local_eval_manifest_n512_val_b1_seed20260623.json",
+  "final_distance_mean": 0.5957639217376709,
+  "horizon": 10,
+  "initial_distance_mean": 1.1266310214996338,
+  "mean_residual_norm": 0.022958317771553993,
+  "n_demo": 500,
+  "num_envs": 512,
+  "recipe": {
+    "actor_critic_depth": 2,
+    "actor_critic_width": 256,
+    "alpha": 0.25,
+    "clip_coef": 0.2,
+    "dataset": "data/rl_rerun/pusht_vector_state_demos_n512_b1.h5",
+    "disallowed_training_signals": [
+      "mani_skill_reward",
+      "task_success",
+      "object_pose",
+      "task_progress"
+    ],
+    "entropy_coef": 0.0,
+    "gae_lambda": 0.95,
+    "gamma": 0.99,
+    "horizon": 10,
+    "initial_logstd": -2.3,
+    "learning_rate": 0.0003,
+    "max_grad_norm": 1.0,
+    "method": "r1_residual_deterministic_local_mode_a",
+    "minibatch_size": 5120,
+    "minibatches": 1,
+    "n_demo": 500,
+    "num_envs": 512,
+    "residual_penalty_weight": 0.0,
+    "reward": "latent_progress_minus_terminal_distance_minus_residual_penalty",
+    "rollout_steps": 10,
+    "run_name": "disjoint512_lr3e4_alpha025_nopenalty_1m",
+    "seed": 0,
+    "terminal_weight": 1.0,
+    "update_epochs": 4,
+    "value_coef": 1.0
+  },
+  "sampled_local_episodes": 512,
+  "seed": 0
+}

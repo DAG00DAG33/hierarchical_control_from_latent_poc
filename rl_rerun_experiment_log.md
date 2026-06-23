@@ -1009,3 +1009,64 @@ checkpoint. The only positive closed-loop signal is small (`+1` success on 100
 episodes) and too weak to pass the full-hierarchy gate. Before R2, run the
 requested ablation: train R1 on a separate ~500-stream expert-state corpus
 that is disjoint from the BC training trajectories.
+
+R2 remains on the active task list. After the disjoint-state R1 ablation and
+closed-loop checks are logged, run the residual flow low-level PPO branch from
+the rerun plan instead of dropping it based on the deterministic R1 result.
+
+## 2026-06-23 - RR-27: Disjoint-state R1 ablation
+
+Question: does RL improve more if its reset states come from expert trajectories
+not used to train the frozen `N=500` low-level BC policy?
+
+Constraint: the strict "episodes 500--999 from the single-env corpus" version
+cannot be used for large-vector PPO because previous reset audits showed that
+single-env intermediate states do not replay exactly after loading into a
+vectorized simulator. The vector-valid ablation uses a separately collected
+512-stream expert corpus with exact vector reset/replay:
+
+```text
+BC training data: first 500 single-env expert trajectories
+RL local reset corpus: data/rl_rerun/pusht_vector_state_demos_n512_b1.h5
+RL corpus source: fresh vector expert rollouts, not the BC training file split
+environments: 512
+rollout horizon: 10
+minibatches: 1
+learning rate: 3e-4
+alpha: 0.25
+residual penalty: 0.0
+transitions: 1,024,000
+```
+
+Training diagnostics did not improve monotonically: terminal latent distance
+started at `0.607` and ended at `0.619`, while residual norm grew from `0.0396`
+to `0.0672`.
+
+Held-out 512-env local checkpoint selection:
+
+| checkpoint | final distance | mean reduction | reduction fraction | residual norm |
+| --- | ---: | ---: | ---: | ---: |
+| frozen BC | 0.6073 | 0.5193 | 0.8301 | 0.0000 |
+| 204800 | 0.5958 | 0.5309 | 0.8438 | 0.0230 |
+| 409600 | 0.6163 | 0.5103 | 0.8438 | 0.0333 |
+| 614400 | 0.6359 | 0.4907 | 0.8281 | 0.0425 |
+| 819200 | 0.6250 | 0.5016 | 0.8281 | 0.0461 |
+| 1024000 | 0.6363 | 0.4903 | 0.8340 | 0.0518 |
+
+The best local checkpoint is early, at `204800` transitions. It improves held-
+out final latent distance by `0.0115` absolute (`1.90%`) and improves the
+distance-reduction fraction by `1.37` percentage points.
+
+Closed-loop paired evaluation for that best local checkpoint on the same 100
+deployment seeds:
+
+| policy | success | final reward | max reward | saturation |
+| --- | ---: | ---: | ---: | ---: |
+| frozen BC low level | 0.34 | 0.4946 | 0.5163 | 0.0444 |
+| disjoint-state R1 | 0.30 | 0.4544 | 0.4820 | 0.0388 |
+
+Conclusion: using a separate vector expert-state corpus did not solve the R1
+problem. It can improve local latent reach slightly at an early checkpoint, but
+the deployed closed-loop hierarchy gets worse. The deterministic residual R1
+branch remains below the plan gates. Proceed to R2 residual flow low-level PPO
+as the next active branch.
