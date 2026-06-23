@@ -115,9 +115,11 @@ from hcl_poc.rl_rerun import (
     collect_rl_rerun_state_dataset,
     collect_rl_rerun_vector_dataset,
     ensure_rl_rerun_action_aliases,
+    evaluate_rl_rerun_local_r1,
     run_rl_rerun_algorithm_audit,
     run_rl_rerun_local_reset_audit,
     run_rl_rerun_throughput_benchmark,
+    train_rl_rerun_local_r1,
     train_rl_rerun_supervised_point,
 )
 from hcl_poc.train import (
@@ -274,6 +276,33 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
         console.print(
             audit_rl_rerun_local_mode_a(
                 config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                episodes=args.episodes,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "train-local-r1":
+        console.print(
+            train_rl_rerun_local_r1(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                run_name=args.run_name,
+                total_steps=args.steps,
+                alpha=args.alpha,
+                terminal_weight=args.terminal_weight,
+                residual_penalty_weight=args.residual_penalty_weight,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-local-r1":
+        console.print(
+            evaluate_rl_rerun_local_r1(
+                config,
+                checkpoint_path=Path(args.checkpoint),
                 dataset_path=Path(args.dataset) if args.dataset else None,
                 n_demo=args.n_demo,
                 seed=args.seed,
@@ -1350,6 +1379,25 @@ def build_parser() -> argparse.ArgumentParser:
     local_mode_a.add_argument("--episodes", type=int, default=4)
     local_mode_a.add_argument("--output")
     local_mode_a.set_defaults(func=rl_rerun_cmd)
+    train_local_r1 = rl_rerun_sub.add_parser("train-local-r1")
+    train_local_r1.add_argument("--dataset")
+    train_local_r1.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
+    train_local_r1.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    train_local_r1.add_argument("--run-name", default="local_r1_mode_a")
+    train_local_r1.add_argument("--steps", type=int, default=32768)
+    train_local_r1.add_argument("--alpha", type=float, default=0.1)
+    train_local_r1.add_argument("--terminal-weight", type=float, default=1.0)
+    train_local_r1.add_argument("--residual-penalty-weight", type=float)
+    train_local_r1.add_argument("--force", action="store_true")
+    train_local_r1.set_defaults(func=rl_rerun_cmd)
+    eval_local_r1 = rl_rerun_sub.add_parser("eval-local-r1")
+    eval_local_r1.add_argument("--checkpoint", required=True)
+    eval_local_r1.add_argument("--dataset")
+    eval_local_r1.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
+    eval_local_r1.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    eval_local_r1.add_argument("--episodes", type=int, default=4)
+    eval_local_r1.add_argument("--output")
+    eval_local_r1.set_defaults(func=rl_rerun_cmd)
     aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
     aliases.add_argument("--dataset")
     aliases.set_defaults(func=rl_rerun_cmd)

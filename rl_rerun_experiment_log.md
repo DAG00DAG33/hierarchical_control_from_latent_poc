@@ -666,3 +666,58 @@ frozen supervised low-level policy usually moves toward the reachable Mode-A
 goal. This establishes the local baseline for R1 residual PPO. The R1 reward
 should use the same clean latent progress and terminal distance terms, not
 ManiSkill task reward or task-progress shaping.
+
+## 2026-06-23 - RR-16: R1 local PPO smoke
+
+Implemented:
+
+```text
+hcl-poc rl-rerun train-local-r1
+hcl-poc rl-rerun eval-local-r1
+```
+
+Training command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r1 --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --n-demo 1000 --seed 0 --run-name smoke_32k --steps 262144 --alpha 0.1 --terminal-weight 1.0
+```
+
+Evaluation commands:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml local-mode-a-audit --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --n-demo 1000 --seed 0 --episodes 4 --output results/rl_rerun/local_mode_a_audit_n512_b1_seed0_eval4.json
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r1 --checkpoint artifacts/rl_rerun/local_r1/n1000/seed0/smoke_32k/latest.pt --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --n-demo 1000 --seed 0 --episodes 4 --output results/rl_rerun/local_r1/n1000/seed0/smoke_32k/eval_local_4_after262k.json
+```
+
+Tracked outputs:
+
+```text
+rl_rerun_local_r1_smoke.md
+rl_rerun_local_r1_smoke_262k_history.json
+rl_rerun_local_mode_a_audit_n512_b1_seed0_eval4.json
+rl_rerun_local_r1_smoke_262k_eval4.json
+```
+
+Training summary:
+
+| metric | first update | last update |
+| --- | ---: | ---: |
+| global step | 32768 | 262144 |
+| mean terminal distance | 1.233 | 1.079 |
+| action saturation rate | 0.071 | 0.034 |
+| clip fraction | 0.058 | 0.118 |
+| explained variance | -0.534 | 0.449 |
+
+Paired local evaluation on 2048 local episodes:
+
+| policy | final distance | distance reduction | reduction fraction | saturation |
+| --- | ---: | ---: | ---: | ---: |
+| frozen BC low-level | 1.131 | 0.415 | 0.812 | 0.0219 |
+| R1 residual, 262k | 1.138 | 0.408 | 0.799 | 0.0207 |
+
+Decision: R1 smoke validates the local PPO code path but does not pass the
+local-goal improvement gate. The deterministic residual remains very small
+(`mean_residual_norm = 0.00335`) and mostly reproduces the frozen controller.
+Next tuning should try lower residual penalty, larger `alpha`, and/or larger
+residual learning rate, and should evaluate on fixed local validation resets
+during training.

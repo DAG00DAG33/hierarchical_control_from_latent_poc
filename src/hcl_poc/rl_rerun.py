@@ -92,6 +92,10 @@ def _state_audit_result_dir(config: Config) -> Path:
     return ensure_dir(config.path_value("paths.incremental_results_dir").parent / "rl_rerun")
 
 
+def _rl_rerun_artifact_dir(config: Config) -> Path:
+    return ensure_dir(config.path_value("paths.incremental_artifact_dir").parent / "rl_rerun")
+
+
 def _rerun_base_config(config: Config, dataset_path: Path | None = None) -> Config:
     raw = copy.deepcopy(config.raw)
     raw["paths"]["incremental_artifact_dir"] = str(
@@ -1459,5 +1463,556 @@ def audit_rl_rerun_local_mode_a(
     }
     out_path = output_path or (_state_audit_result_dir(config) / "local_mode_a_audit.json")
     ensure_dir(out_path.parent)
+    write_json(out_path, result)
+    return out_path
+
+
+def train_rl_rerun_local_r1(
+    config: Config,
+    dataset_path: Path | None = None,
+    n_demo: int = 1000,
+    seed: int = 0,
+    run_name: str = "local_r1_mode_a",
+    total_steps: int = 32_768,
+    alpha: float = 0.1,
+    terminal_weight: float = 1.0,
+    residual_penalty_weight: float | None = None,
+    force: bool = False,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import ResidualActorCritic, _load_frozen
+    from hcl_poc.utils import set_seed
+
+    path = dataset_path or _vector_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+
+    artifact = ensure_dir(
+        _rl_rerun_artifact_dir(config)
+        / "local_r1"
+        / f"n{n_demo}"
+        / f"seed{seed}"
+        / run_name
+    )
+    result_dir = ensure_dir(
+        _state_audit_result_dir(config)
+        / "local_r1"
+        / f"n{n_demo}"
+        / f"seed{seed}"
+        / run_name
+    )
+    latest = artifact / "latest.pt"
+    history_path = result_dir / "history.json"
+    if force:
+        latest.unlink(missing_ok=True)
+        history_path.unlink(missing_ok=True)
+
+    device = default_device()
+    set_seed(seed + 90_000)
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    horizon = int(frozen.horizon_steps)
+    if horizon != 10:
+        raise ValueError(f"Expected 10-step local horizon, got {horizon}")
+
+    with h5py.File(path, "r") as h5_meta:
+        meta = h5_meta["meta"].attrs
+        num_envs = int(meta["num_envs"])
+        max_steps = int(meta["max_steps"])
+        batch_keys = sorted(key for key in h5_meta.keys() if key.startswith("batch_"))
+    rollout_steps = max(64, int(config.get("low_level_rl.rollout_steps", 64)))
+    if rollout_steps < horizon:
+        raise ValueError("rollout_steps must be at least the local horizon")
+    batch_size = num_envs * rollout_steps
+    minibatches = int(config.get("low_level_rl.num_minibatches", 8))
+    if batch_size % minibatches:
+        raise ValueError("RL batch size must divide num_minibatches")
+    minibatch_size = batch_size // minibatches
+    if minibatch_size < 4096:
+        raise ValueError(
+            f"minibatch size {minibatch_size} is below the Phase D minimum of 4096"
+        )
+
+    dino = _phase4_dino_from_config(config, device)
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+    h5 = h5py.File(path, "r")
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    condition_dim = frozen.frame_dim + frozen.goal_dim + 4
+    agent = ResidualActorCritic(
+        condition_dim,
+        width=int(config.get("low_level_rl.residual_width", 256)),
+        depth=int(config.get("low_level_rl.residual_depth", 2)),
+        initial_logstd=float(config.get("low_level_rl.initial_logstd", -2.3)),
+    ).to(device)
+    optimizer = torch.optim.Adam(
+        agent.parameters(), lr=float(config.get("low_level_rl.learning_rate", 1e-4)), eps=1e-5
+    )
+    recipe = {
+        "method": "r1_residual_deterministic_local_mode_a",
+        "dataset": str(path),
+        "n_demo": n_demo,
+        "seed": seed,
+        "run_name": run_name,
+        "num_envs": num_envs,
+        "rollout_steps": rollout_steps,
+        "horizon": horizon,
+        "alpha": alpha,
+        "terminal_weight": terminal_weight,
+        "residual_penalty_weight": float(
+            residual_penalty_weight
+            if residual_penalty_weight is not None
+            else config.get("low_level_rl.residual_penalty_weight", 0.01)
+        ),
+        "reward": "latent_progress_minus_terminal_distance_minus_residual_penalty",
+        "disallowed_training_signals": [
+            "mani_skill_reward",
+            "task_success",
+            "object_pose",
+            "task_progress",
+        ],
+    }
+    global_step = 0
+    history: list[dict[str, Any]] = []
+    if latest.exists() and not force:
+        checkpoint = torch.load(latest, map_location=device, weights_only=False)
+        if checkpoint["recipe"] != recipe:
+            raise ValueError(f"Existing run {run_name} has a different recipe")
+        agent.load_state_dict(checkpoint["agent"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        global_step = int(checkpoint["global_step"])
+        history = list(checkpoint["history"])
+    if global_step >= total_steps:
+        return latest
+
+    rng = np.random.default_rng(seed + 123_000)
+    current_obs: dict[str, Any]
+    current_frames: np.ndarray
+    current_z: np.ndarray
+    goal_z: np.ndarray
+    previous_action: np.ndarray
+    local_step = 0
+    current_batch = ""
+    current_t = 0
+
+    @torch.inference_mode()
+    def reset_local_episode() -> None:
+        nonlocal current_obs, current_frames, current_z, goal_z, previous_action
+        nonlocal local_step, current_batch, current_t
+        current_batch = str(rng.choice(batch_keys))
+        group = h5[current_batch]
+        current_t = int(rng.integers(0, max_steps - horizon + 1))
+        current_obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
+        for replay_step in range(current_t):
+            replay_action = torch.from_numpy(
+                np.asarray(group["executed_actions"][replay_step], dtype=np.float32)
+            ).to(device)
+            current_obs, _reward, _terminated, _truncated, _info = env.step(replay_action)
+        current_frames = _phase4_frame_inputs(
+            current_obs, dino, int(config.get("dino.batch_size", 64))
+        )
+        current_z = _encode_rerun_frames(frozen, current_frames, device)
+        goal_frame = np.concatenate(
+            [
+                np.asarray(group["dino"][current_t + horizon], dtype=np.float32),
+                np.asarray(group["proprio"][current_t + horizon], dtype=np.float32),
+            ],
+            axis=-1,
+        )
+        goal_z = _encode_rerun_frames(frozen, goal_frame, device)
+        previous_action = frozen.action_norm.transform(
+            np.asarray(group["previous_executed_actions"][current_t], dtype=np.float32)
+        )
+        local_step = 0
+
+    @torch.inference_mode()
+    def condition_and_base() -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
+        distance = np.mean(np.square(current_z - goal_z), axis=-1).astype(np.float32)
+        remaining = np.full(
+            (num_envs, 1),
+            max(horizon - local_step, 1) / horizon,
+            dtype=np.float32,
+        )
+        condition_np = _low_condition_array(
+            frozen.frame_norm.transform(current_frames),
+            current_z,
+            goal_z,
+            previous_action,
+            remaining,
+            frozen.conditioning,
+        )
+        condition = torch.from_numpy(condition_np).to(device).float()
+        normalized_base = frozen.low_model(condition)
+        base_action = torch.from_numpy(
+            frozen.action_norm.inverse(normalized_base.cpu().numpy().astype(np.float32))
+        ).to(device)
+        return condition, base_action, distance
+
+    @torch.inference_mode()
+    def local_step_env(action: torch.Tensor, previous_distance: np.ndarray, residual: torch.Tensor) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        nonlocal current_obs, current_frames, current_z, previous_action, local_step
+        next_obs, _env_reward, _terminated, _truncated, info = env.step(action)
+        next_frames = _phase4_frame_inputs(next_obs, dino, int(config.get("dino.batch_size", 64)))
+        next_z = _encode_rerun_frames(frozen, next_frames, device)
+        next_distance = np.mean(np.square(next_z - goal_z), axis=-1).astype(np.float32)
+        segment_end = local_step == horizon - 1
+        penalty_weight = float(recipe["residual_penalty_weight"])
+        residual_penalty = penalty_weight * torch.mean(residual.square(), dim=-1).cpu().numpy()
+        reward = previous_distance - next_distance - residual_penalty
+        if segment_end:
+            reward -= terminal_weight * next_distance
+        current_obs = next_obs
+        current_frames = next_frames
+        current_z = next_z
+        previous_action = frozen.action_norm.transform(action.cpu().numpy().astype(np.float32))
+        local_step += 1
+        done = np.full(num_envs, segment_end, dtype=np.bool_)
+        metrics = {
+            "next_distance": next_distance,
+            "segment_end": segment_end,
+            "residual_norm": torch.linalg.vector_norm(residual, dim=-1).cpu().numpy(),
+            "success": _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_)))
+            .reshape(-1)
+            .astype(np.bool_),
+        }
+        if segment_end:
+            reset_local_episode()
+        return reward.astype(np.float32), done, metrics
+
+    reset_local_episode()
+    condition_buf = torch.zeros((rollout_steps, num_envs, condition_dim), device=device)
+    raw_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
+    logprob_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    reward_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    done_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    value_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    next_done = torch.zeros(num_envs, device=device)
+    gamma = float(config.get("low_level_rl.gamma", 0.99))
+    gae_lambda = float(config.get("low_level_rl.gae_lambda", 0.95))
+    clip_coef = float(config.get("low_level_rl.clip_coef", 0.2))
+    ent_coef = float(config.get("low_level_rl.entropy_coef", 0.0))
+    value_coef = float(config.get("low_level_rl.value_coef", 0.5))
+    update_epochs = int(config.get("low_level_rl.update_epochs", 4))
+    max_grad_norm = float(config.get("low_level_rl.max_grad_norm", 0.5))
+
+    try:
+        with trange(global_step, total_steps, initial=global_step, total=total_steps, desc=run_name) as progress:
+            while global_step < total_steps:
+                distance_values: list[float] = []
+                terminal_distances: list[float] = []
+                reward_values: list[float] = []
+                residual_values: list[float] = []
+                saturation_count = 0
+                success_count = 0
+                agent.eval()
+                for step in range(rollout_steps):
+                    condition, base_action, distance = condition_and_base()
+                    condition_buf[step] = condition
+                    done_buf[step] = next_done
+                    with torch.no_grad():
+                        raw_action, logprob, _entropy, value = agent.get_action_and_value(condition)
+                    residual = alpha * torch.tanh(raw_action)
+                    unclipped = base_action + residual
+                    action = torch.clamp(unclipped, action_low, action_high)
+                    raw_action_buf[step] = raw_action
+                    logprob_buf[step] = logprob
+                    value_buf[step] = value
+                    reward, done, metrics = local_step_env(action, distance, residual)
+                    reward_buf[step] = torch.from_numpy(reward).to(device)
+                    next_done = torch.from_numpy(done.astype(np.float32)).to(device)
+                    distance_values.extend(distance.tolist())
+                    reward_values.extend(reward.tolist())
+                    residual_values.extend(metrics["residual_norm"].tolist())
+                    success_count += int(metrics["success"].sum())
+                    if metrics["segment_end"]:
+                        terminal_distances.extend(metrics["next_distance"].tolist())
+                    saturation_count += int(torch.any(unclipped != action, dim=-1).sum().cpu())
+                    global_step += num_envs
+                    progress.update(min(num_envs, total_steps - progress.n))
+                    if global_step >= total_steps and step == rollout_steps - 1:
+                        break
+
+                with torch.no_grad():
+                    next_condition, _base, _distance = condition_and_base()
+                    next_value = agent.critic(next_condition).flatten()
+                    advantages = torch.zeros_like(reward_buf)
+                    last_gae = torch.zeros(num_envs, device=device)
+                    for step in reversed(range(rollout_steps)):
+                        if step == rollout_steps - 1:
+                            next_nonterminal = 1.0 - next_done
+                            following_value = next_value
+                        else:
+                            next_nonterminal = 1.0 - done_buf[step + 1]
+                            following_value = value_buf[step + 1]
+                        delta = (
+                            reward_buf[step]
+                            + gamma * following_value * next_nonterminal
+                            - value_buf[step]
+                        )
+                        last_gae = delta + gamma * gae_lambda * next_nonterminal * last_gae
+                        advantages[step] = last_gae
+                    returns = advantages + value_buf
+
+                flat_condition = condition_buf.flatten(0, 1)
+                flat_raw_action = raw_action_buf.flatten(0, 1)
+                flat_logprob = logprob_buf.flatten()
+                flat_advantages = advantages.flatten()
+                flat_returns = returns.flatten()
+                flat_values = value_buf.flatten()
+                indices = np.arange(batch_size)
+                clipfracs: list[float] = []
+                policy_losses: list[float] = []
+                value_losses: list[float] = []
+                entropies: list[float] = []
+                approx_kl = torch.tensor(0.0, device=device)
+                agent.train()
+                for _epoch in range(update_epochs):
+                    np.random.shuffle(indices)
+                    for start in range(0, batch_size, minibatch_size):
+                        mb = indices[start : start + minibatch_size]
+                        _new_action, new_logprob, entropy, new_value = agent.get_action_and_value(
+                            flat_condition[mb],
+                            flat_raw_action[mb],
+                        )
+                        logratio = new_logprob - flat_logprob[mb]
+                        ratio = logratio.exp()
+                        with torch.no_grad():
+                            approx_kl = ((ratio - 1.0) - logratio).mean()
+                            clipfracs.append(
+                                float(((ratio - 1.0).abs() > clip_coef).float().mean().item())
+                            )
+                        mb_adv = flat_advantages[mb]
+                        mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                        pg_loss = torch.max(
+                            -mb_adv * ratio,
+                            -mb_adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef),
+                        ).mean()
+                        value_loss = 0.5 * (new_value - flat_returns[mb]).square().mean()
+                        entropy_loss = entropy.mean()
+                        loss = pg_loss - ent_coef * entropy_loss + value_coef * value_loss
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+                        optimizer.step()
+                        policy_losses.append(float(pg_loss.detach().cpu()))
+                        value_losses.append(float(value_loss.detach().cpu()))
+                        entropies.append(float(entropy_loss.detach().cpu()))
+
+                explained_variance = float(
+                    1.0
+                    - torch.var(flat_returns - flat_values).item()
+                    / max(torch.var(flat_returns).item(), 1e-8)
+                )
+                update_metrics = {
+                    "global_step": int(global_step),
+                    "mean_return": float(torch.mean(returns).detach().cpu()),
+                    "mean_reward": float(np.mean(reward_values)),
+                    "mean_distance": float(np.mean(distance_values)),
+                    "mean_terminal_distance": float(np.mean(terminal_distances))
+                    if terminal_distances
+                    else None,
+                    "goal_reach_rate_distance_improved_proxy": None,
+                    "mean_residual_norm": float(np.mean(residual_values)),
+                    "action_saturation_rate": float(saturation_count / batch_size),
+                    "task_success_diagnostic_rate": float(success_count / batch_size),
+                    "policy_loss": float(np.mean(policy_losses)),
+                    "value_loss": float(np.mean(value_losses)),
+                    "entropy": float(np.mean(entropies)),
+                    "approx_kl": float(approx_kl.detach().cpu()),
+                    "clip_fraction": float(np.mean(clipfracs)),
+                    "explained_variance": explained_variance,
+                    "batch_size": int(batch_size),
+                    "minibatch_size": int(minibatch_size),
+                }
+                history.append(update_metrics)
+                write_json(history_path, {"recipe": recipe, "history": history})
+                torch.save(
+                    {
+                        "agent": agent.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "global_step": global_step,
+                        "history": history,
+                        "recipe": recipe,
+                        "condition_dim": condition_dim,
+                    },
+                    latest,
+                )
+    finally:
+        h5.close()
+        env.close()
+    return latest
+
+
+@torch.inference_mode()
+def evaluate_rl_rerun_local_r1(
+    config: Config,
+    checkpoint_path: Path,
+    dataset_path: Path | None = None,
+    n_demo: int = 1000,
+    seed: int = 0,
+    episodes: int = 4,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import ResidualActorCritic, _load_frozen
+
+    path = dataset_path or _vector_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(checkpoint_path)
+    if episodes <= 0:
+        raise ValueError("episodes must be positive")
+
+    device = default_device()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    recipe = checkpoint["recipe"]
+    rng = np.random.default_rng(seed)
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    horizon = int(frozen.horizon_steps)
+    dino = _phase4_dino_from_config(config, device)
+    condition_dim = int(checkpoint["condition_dim"])
+    agent = ResidualActorCritic(
+        condition_dim,
+        width=int(config.get("low_level_rl.residual_width", 256)),
+        depth=int(config.get("low_level_rl.residual_depth", 2)),
+        initial_logstd=float(config.get("low_level_rl.initial_logstd", -2.3)),
+    ).to(device)
+    agent.load_state_dict(checkpoint["agent"])
+    agent.eval()
+    alpha = float(recipe["alpha"])
+
+    with h5py.File(path, "r") as h5:
+        meta = h5["meta"].attrs
+        num_envs = int(meta["num_envs"])
+        max_steps = int(meta["max_steps"])
+        batch_keys = sorted(key for key in h5.keys() if key.startswith("batch_"))
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+
+    initial_distances: list[np.ndarray] = []
+    final_distances: list[np.ndarray] = []
+    residual_norms: list[np.ndarray] = []
+    saturation_rates: list[float] = []
+    chosen_batches: list[str] = []
+    chosen_timesteps: list[int] = []
+    try:
+        with h5py.File(path, "r") as h5:
+            for _episode in trange(episodes, desc="eval local R1"):
+                key = str(rng.choice(batch_keys))
+                group = h5[key]
+                t = int(rng.integers(0, max_steps - horizon + 1))
+                obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
+                for replay_step in range(t):
+                    replay_action = torch.from_numpy(
+                        np.asarray(group["executed_actions"][replay_step], dtype=np.float32)
+                    ).to(device)
+                    obs, _reward, _terminated, _truncated, _info = env.step(replay_action)
+                goal_frame = np.concatenate(
+                    [
+                        np.asarray(group["dino"][t + horizon], dtype=np.float32),
+                        np.asarray(group["proprio"][t + horizon], dtype=np.float32),
+                    ],
+                    axis=-1,
+                )
+                goal_z = _encode_rerun_frames(frozen, goal_frame, device)
+                previous = frozen.action_norm.transform(
+                    np.asarray(group["previous_executed_actions"][t], dtype=np.float32)
+                )
+                episode_initial_distance: np.ndarray | None = None
+                saturation_count = 0
+                for local_step in range(horizon):
+                    frames = _phase4_frame_inputs(
+                        obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    current_z = _encode_rerun_frames(frozen, frames, device)
+                    distance = np.mean(np.square(current_z - goal_z), axis=-1).astype(np.float32)
+                    if episode_initial_distance is None:
+                        episode_initial_distance = distance.copy()
+                    remaining = np.full(
+                        (num_envs, 1),
+                        (horizon - local_step) / horizon,
+                        dtype=np.float32,
+                    )
+                    condition = _low_condition_array(
+                        frozen.frame_norm.transform(frames),
+                        current_z,
+                        goal_z,
+                        previous,
+                        remaining,
+                        frozen.conditioning,
+                    )
+                    condition_t = torch.from_numpy(condition).to(device).float()
+                    normalized_base = frozen.low_model(condition_t)
+                    base_action = torch.from_numpy(
+                        frozen.action_norm.inverse(
+                            normalized_base.cpu().numpy().astype(np.float32)
+                        )
+                    ).to(device)
+                    raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
+                        condition_t,
+                        deterministic=True,
+                    )
+                    residual = alpha * torch.tanh(raw_action)
+                    residual_norms.append(torch.linalg.vector_norm(residual, dim=-1).cpu().numpy())
+                    unclipped = base_action + residual
+                    action = torch.clamp(unclipped, action_low, action_high)
+                    saturation_count += int(torch.any(unclipped != action, dim=-1).sum().cpu())
+                    obs, _reward, _terminated, _truncated, _info = env.step(action)
+                    previous = frozen.action_norm.transform(action.cpu().numpy())
+                    if local_step == horizon - 1:
+                        next_frames = _phase4_frame_inputs(
+                            obs, dino, int(config.get("dino.batch_size", 64))
+                        )
+                        next_z = _encode_rerun_frames(frozen, next_frames, device)
+                        final_distances.append(
+                            np.mean(np.square(next_z - goal_z), axis=-1).astype(np.float32)
+                        )
+                if episode_initial_distance is None:
+                    raise RuntimeError("Local R1 evaluation did not execute any steps")
+                initial_distances.append(episode_initial_distance)
+                saturation_rates.append(saturation_count / float(num_envs * horizon))
+                chosen_batches.append(key)
+                chosen_timesteps.append(t)
+    finally:
+        env.close()
+
+    initial = np.concatenate(initial_distances)
+    final = np.concatenate(final_distances)
+    residual = np.concatenate(residual_norms)
+    result = {
+        "checkpoint": str(checkpoint_path),
+        "dataset": str(path),
+        "n_demo": n_demo,
+        "seed": seed,
+        "episodes": episodes,
+        "num_envs": num_envs,
+        "sampled_local_episodes": int(episodes * num_envs),
+        "horizon": horizon,
+        "chosen_batches": chosen_batches,
+        "chosen_timestep_min": int(min(chosen_timesteps)),
+        "chosen_timestep_max": int(max(chosen_timesteps)),
+        "initial_distance_mean": float(np.mean(initial)),
+        "final_distance_mean": float(np.mean(final)),
+        "distance_reduction_mean": float(np.mean(initial - final)),
+        "distance_reduction_fraction": float(np.mean(final < initial)),
+        "mean_residual_norm": float(np.mean(residual)),
+        "action_saturation_rate": float(np.mean(saturation_rates)),
+        "recipe": recipe,
+    }
+    out_path = output_path or (
+        _state_audit_result_dir(config)
+        / "local_r1"
+        / f"n{n_demo}"
+        / f"seed{seed}"
+        / str(recipe["run_name"])
+        / f"eval_local_{episodes}.json"
+    )
     write_json(out_path, result)
     return out_path
