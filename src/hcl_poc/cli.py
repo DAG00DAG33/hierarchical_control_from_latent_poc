@@ -117,11 +117,15 @@ from hcl_poc.rl_rerun import (
     create_rl_rerun_local_eval_manifest,
     ensure_rl_rerun_action_aliases,
     evaluate_rl_rerun_closed_loop_r1,
+    evaluate_rl_rerun_closed_loop_r2,
     evaluate_rl_rerun_local_r1,
+    evaluate_rl_rerun_local_r2,
     run_rl_rerun_algorithm_audit,
     run_rl_rerun_local_reset_audit,
     run_rl_rerun_throughput_benchmark,
+    train_rl_rerun_low_flow_base,
     train_rl_rerun_local_r1,
+    train_rl_rerun_local_r2,
     train_rl_rerun_supervised_point,
 )
 from hcl_poc.train import (
@@ -330,6 +334,62 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
     elif args.rl_rerun_command == "eval-closed-loop-r1":
         console.print(
             evaluate_rl_rerun_closed_loop_r1(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                n_demo=args.n_demo,
+                seed=args.seed,
+                episodes=args.episodes,
+                eval_seed_start=args.eval_seed_start,
+                num_envs=args.num_envs,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "train-low-flow-base":
+        console.print(
+            train_rl_rerun_low_flow_base(
+                config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "train-local-r2":
+        console.print(
+            train_rl_rerun_local_r2(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                run_name=args.run_name,
+                total_steps=args.steps,
+                alpha=args.alpha,
+                terminal_weight=args.terminal_weight,
+                residual_penalty_weight=args.residual_penalty_weight,
+                learning_rate=args.learning_rate,
+                num_minibatches=args.num_minibatches,
+                checkpoint_every_updates=args.checkpoint_every_updates,
+                flow_checkpoint_path=Path(args.flow_checkpoint)
+                if args.flow_checkpoint
+                else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-local-r2":
+        console.print(
+            evaluate_rl_rerun_local_r2(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                episodes=args.episodes,
+                manifest_path=Path(args.manifest) if args.manifest else None,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "eval-closed-loop-r2":
+        console.print(
+            evaluate_rl_rerun_closed_loop_r2(
                 config,
                 checkpoint_path=Path(args.checkpoint),
                 n_demo=args.n_demo,
@@ -1449,6 +1509,44 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r1.add_argument("--num-envs", type=int, default=64)
     eval_closed_loop_r1.add_argument("--output")
     eval_closed_loop_r1.set_defaults(func=rl_rerun_cmd)
+    low_flow_base = rl_rerun_sub.add_parser("train-low-flow-base")
+    low_flow_base.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)
+    low_flow_base.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    low_flow_base.add_argument("--force", action="store_true")
+    low_flow_base.set_defaults(func=rl_rerun_cmd)
+    train_local_r2 = rl_rerun_sub.add_parser("train-local-r2")
+    train_local_r2.add_argument("--dataset")
+    train_local_r2.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)
+    train_local_r2.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    train_local_r2.add_argument("--run-name", default="local_r2_flow_residual")
+    train_local_r2.add_argument("--steps", type=int, default=32768)
+    train_local_r2.add_argument("--alpha", type=float, default=0.1)
+    train_local_r2.add_argument("--terminal-weight", type=float, default=1.0)
+    train_local_r2.add_argument("--residual-penalty-weight", type=float)
+    train_local_r2.add_argument("--learning-rate", type=float)
+    train_local_r2.add_argument("--num-minibatches", type=int)
+    train_local_r2.add_argument("--checkpoint-every-updates", type=int, default=5)
+    train_local_r2.add_argument("--flow-checkpoint")
+    train_local_r2.add_argument("--force", action="store_true")
+    train_local_r2.set_defaults(func=rl_rerun_cmd)
+    eval_local_r2 = rl_rerun_sub.add_parser("eval-local-r2")
+    eval_local_r2.add_argument("--checkpoint", required=True)
+    eval_local_r2.add_argument("--dataset")
+    eval_local_r2.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)
+    eval_local_r2.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    eval_local_r2.add_argument("--episodes", type=int, default=4)
+    eval_local_r2.add_argument("--manifest")
+    eval_local_r2.add_argument("--output")
+    eval_local_r2.set_defaults(func=rl_rerun_cmd)
+    eval_closed_loop_r2 = rl_rerun_sub.add_parser("eval-closed-loop-r2")
+    eval_closed_loop_r2.add_argument("--checkpoint", required=True)
+    eval_closed_loop_r2.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)
+    eval_closed_loop_r2.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    eval_closed_loop_r2.add_argument("--episodes", type=int, default=100)
+    eval_closed_loop_r2.add_argument("--eval-seed-start", type=int, default=10_000)
+    eval_closed_loop_r2.add_argument("--num-envs", type=int, default=64)
+    eval_closed_loop_r2.add_argument("--output")
+    eval_closed_loop_r2.set_defaults(func=rl_rerun_cmd)
     aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
     aliases.add_argument("--dataset")
     aliases.set_defaults(func=rl_rerun_cmd)

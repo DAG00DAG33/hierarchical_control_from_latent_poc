@@ -13,12 +13,15 @@ import h5py
 import mani_skill  # noqa: F401
 import numpy as np
 import torch
+from torch import nn
 from tqdm import trange
 
 from hcl_poc.config import Config
 from hcl_poc.features import batched, dino_from_config
+from hcl_poc.flow import flow_matching_loss, sample_flow
+from hcl_poc.models import FlowModel
 from hcl_poc.rl import _rl_backend, _rl_paths, load_ppo_agent
-from hcl_poc.utils import default_device, ensure_dir, write_json
+from hcl_poc.utils import Timer, default_device, ensure_dir, write_json
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -1400,6 +1403,246 @@ def _encode_rerun_frames(frozen: Any, frames: np.ndarray, device: torch.device) 
     )
 
 
+def _local_condition_dim(frozen: Any) -> int:
+    goal_features = 2 * frozen.goal_dim if frozen.conditioning == "relation" else frozen.goal_dim
+    return int(frozen.frame_dim + goal_features + 4)
+
+
+def _load_low_flow_base(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model = FlowModel(
+        int(checkpoint["sample_dim"]),
+        int(checkpoint["condition_dim"]),
+        int(checkpoint["hidden_dim"]),
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    model.requires_grad_(False)
+    return model, checkpoint
+
+
+@torch.inference_mode()
+def _low_flow_base_action(
+    model: FlowModel,
+    checkpoint: dict[str, Any],
+    condition: torch.Tensor,
+    frozen: Any,
+) -> torch.Tensor:
+    normalized = sample_flow(
+        model,
+        condition,
+        steps=int(checkpoint["flow_steps"]),
+        sample_dim=int(checkpoint["sample_dim"]),
+        initial_noise=torch.zeros(
+            (condition.shape[0], int(checkpoint["sample_dim"])),
+            device=condition.device,
+            dtype=condition.dtype,
+        ),
+    )
+    return torch.from_numpy(
+        frozen.action_norm.inverse(normalized.cpu().numpy().astype(np.float32))
+    ).to(condition.device)
+
+
+def train_rl_rerun_low_flow_base(
+    config: Config,
+    n_demo: int = 500,
+    seed: int = 0,
+    force: bool = False,
+) -> Path:
+    from hcl_poc.learned_interface import (
+        _HeldGoalDataset,
+        _load_phase6_train_episodes,
+        _low_condition_array,
+        prepare_learned_interface_episodes,
+    )
+    from hcl_poc.low_level_rl import _load_frozen
+    from hcl_poc.utils import set_seed
+    from hcl_poc.vae_scaling import VAE_CANDIDATE, vae_scaling_config
+
+    artifact = ensure_dir(
+        _rl_rerun_artifact_dir(config)
+        / "local_r2"
+        / f"n{n_demo}"
+        / f"seed{seed}"
+        / "low_flow_base"
+    )
+    checkpoint_path = artifact / "low_flow.pt"
+    metrics_path = artifact / "low_flow_metrics.json"
+    if checkpoint_path.exists() and not force:
+        return checkpoint_path
+
+    set_seed(seed + 170_000)
+    device = default_device()
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    horizon = int(frozen.horizon_steps)
+    if horizon != 10:
+        raise ValueError(f"Expected 10-step local horizon, got {horizon}")
+
+    point_config = vae_scaling_config(rerun_config, n_demo)
+    encoded_path = prepare_learned_interface_episodes(
+        point_config,
+        VAE_CANDIDATE,
+        seed,
+        force=False,
+    )
+    encoded = torch.load(encoded_path, map_location="cpu", weights_only=False)
+    train_frames, validation_frames, data_metadata = _load_phase6_train_episodes(point_config)
+
+    if int(encoded.get("format_version", 1)) != 2:
+        raise ValueError("R2 low-flow training expects learned-interface format_version=2")
+    if len(train_frames) != len(encoded["train_goals"]):
+        raise ValueError("R2 low-flow train frame/goal episode mismatch")
+    if len(validation_frames) != len(encoded["validation_goals"]):
+        raise ValueError("R2 low-flow validation frame/goal episode mismatch")
+
+    def combine(
+        frame_episodes: list[dict[str, np.ndarray]],
+        goal_episodes: list[np.ndarray],
+    ) -> list[dict[str, np.ndarray]]:
+        return [
+            {
+                "frames": frame_episode["frames"],
+                "goals": goals,
+                "actions": frame_episode["actions"],
+            }
+            for frame_episode, goals in zip(frame_episodes, goal_episodes, strict=True)
+        ]
+
+    train = combine(train_frames, encoded["train_goals"])
+    validation = combine(validation_frames, encoded["validation_goals"])
+    batch_size = int(config.get("learned_interface.policy.batch_size", 512))
+    batches_per_epoch = int(config.get("learned_interface.policy.batches_per_epoch", 200))
+    epochs = int(config.get("learned_interface.policy.epochs", 60))
+    hidden_dim = int(config.get("learned_interface.policy.hidden_dim", 512))
+    learning_rate = float(config.get("learned_interface.policy.lr", 3e-4))
+    flow_steps = int(config.get("vae_scaling.flow_steps", 24))
+    validation_samples = int(config.get("learned_interface.policy.validation_samples", 5000))
+    train_loader = torch.utils.data.DataLoader(
+        _HeldGoalDataset(
+            train,
+            frozen.frame_norm,
+            frozen.goal_norm,
+            frozen.action_norm,
+            horizon,
+            "low",
+            batch_size * batches_per_epoch,
+            frozen.conditioning,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    validation_loader = torch.utils.data.DataLoader(
+        _HeldGoalDataset(
+            validation,
+            frozen.frame_norm,
+            frozen.goal_norm,
+            frozen.action_norm,
+            horizon,
+            "low",
+            validation_samples,
+            frozen.conditioning,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+    condition_dim = _local_condition_dim(frozen)
+    model = FlowModel(3, condition_dim, hidden_dim).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    history: list[dict[str, Any]] = []
+    best_state: dict[str, torch.Tensor] | None = None
+    best_mae = float("inf")
+    best_epoch = 0
+    timer = Timer()
+
+    def validation_action_mae() -> float:
+        predictions = []
+        targets = []
+        model.eval()
+        with torch.inference_mode():
+            for condition, target in validation_loader:
+                condition = condition.to(device, non_blocking=True).float()
+                normalized = sample_flow(
+                    model,
+                    condition,
+                    flow_steps,
+                    3,
+                    initial_noise=torch.zeros((len(condition), 3), device=device),
+                )
+                predictions.append(
+                    frozen.action_norm.inverse(
+                        normalized.cpu().numpy().astype(np.float32)
+                    )
+                )
+                targets.append(
+                    frozen.action_norm.inverse(target.numpy().astype(np.float32))
+                )
+        return float(np.mean(np.abs(np.concatenate(predictions) - np.concatenate(targets))))
+
+    for epoch in trange(1, epochs + 1, desc=f"train R2 low flow n={n_demo} seed={seed}"):
+        model.train()
+        train_loss = 0.0
+        for condition, target in train_loader:
+            condition = condition.to(device, non_blocking=True).float()
+            target = target.to(device, non_blocking=True).float()
+            loss = flow_matching_loss(model, target, condition)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            train_loss += float(loss.detach().cpu())
+        action_mae = validation_action_mae()
+        history.append(
+            {
+                "epoch": epoch,
+                "train_flow_loss": train_loss / batches_per_epoch,
+                "validation_zero_noise_action_mae": action_mae,
+            }
+        )
+        if action_mae < best_mae:
+            best_mae = action_mae
+            best_epoch = epoch
+            best_state = copy.deepcopy(model.state_dict())
+
+    if best_state is None:
+        raise RuntimeError("R2 low-flow base training produced no checkpoint")
+    payload = {
+        "method": "r2_low_flow_base",
+        "n_demo": n_demo,
+        "seed": seed,
+        "candidate": "vae512_w2048_b1e6",
+        "sample_dim": 3,
+        "condition_dim": condition_dim,
+        "hidden_dim": hidden_dim,
+        "flow_steps": flow_steps,
+        "horizon": horizon,
+        "conditioning": frozen.conditioning,
+        "model": best_state,
+        "best_epoch": best_epoch,
+        "validation_zero_noise_action_mae": best_mae,
+        "history": history,
+        "learning_rate": learning_rate,
+        "batch_size": batch_size,
+        "batches_per_epoch": batches_per_epoch,
+        "epochs": epochs,
+        "hierarchy_checkpoint": str(frozen.checkpoint_path),
+        "encoded_episodes": str(encoded_path),
+        "data": data_metadata,
+        "elapsed_s": timer.elapsed(),
+    }
+    torch.save(payload, checkpoint_path)
+    write_json(
+        metrics_path,
+        {key: value for key, value in payload.items() if key != "model"},
+    )
+    return checkpoint_path
+
+
 @torch.inference_mode()
 def audit_rl_rerun_local_mode_a(
     config: Config,
@@ -1590,6 +1833,10 @@ def train_rl_rerun_local_r1(
     num_minibatches: int | None = None,
     checkpoint_every_updates: int = 5,
     force: bool = False,
+    base_policy: str = "deterministic",
+    flow_checkpoint_path: Path | None = None,
+    family_dir: str = "local_r1",
+    method_name: str = "r1_residual_deterministic_local_mode_a",
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
@@ -1601,17 +1848,19 @@ def train_rl_rerun_local_r1(
         raise FileNotFoundError(path)
     if total_steps <= 0:
         raise ValueError("total_steps must be positive")
+    if base_policy not in {"deterministic", "flow"}:
+        raise ValueError(f"Unknown residual base policy: {base_policy}")
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
-        / "local_r1"
+        / family_dir
         / f"n{n_demo}"
         / f"seed{seed}"
         / run_name
     )
     result_dir = ensure_dir(
         _state_audit_result_dir(config)
-        / "local_r1"
+        / family_dir
         / f"n{n_demo}"
         / f"seed{seed}"
         / run_name
@@ -1631,6 +1880,22 @@ def train_rl_rerun_local_r1(
         raise ValueError(f"Expected 10-step local horizon, got {horizon}")
     if checkpoint_every_updates <= 0:
         raise ValueError("checkpoint_every_updates must be positive")
+    flow_model: FlowModel | None = None
+    flow_checkpoint: dict[str, Any] | None = None
+    resolved_flow_checkpoint_path: Path | None = None
+    if base_policy == "flow":
+        resolved_flow_checkpoint_path = flow_checkpoint_path or train_rl_rerun_low_flow_base(
+            config,
+            n_demo=n_demo,
+            seed=seed,
+            force=False,
+        )
+        flow_model, flow_checkpoint = _load_low_flow_base(
+            resolved_flow_checkpoint_path,
+            device,
+        )
+        if int(flow_checkpoint["condition_dim"]) != _local_condition_dim(frozen):
+            raise ValueError("R2 low-flow base condition dimension does not match frozen hierarchy")
 
     with h5py.File(path, "r") as h5_meta:
         meta = h5_meta["meta"].attrs
@@ -1657,7 +1922,7 @@ def train_rl_rerun_local_r1(
     h5 = h5py.File(path, "r")
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
-    condition_dim = frozen.frame_dim + frozen.goal_dim + 4
+    condition_dim = _local_condition_dim(frozen)
     agent = ResidualActorCritic(
         condition_dim,
         width=int(config.get("low_level_rl.residual_width", 256)),
@@ -1678,14 +1943,19 @@ def train_rl_rerun_local_r1(
     max_grad_norm = float(config.get("low_level_rl.max_grad_norm", 1.0))
     optimizer = torch.optim.Adam(agent.parameters(), lr=resolved_learning_rate, eps=1e-5)
     recipe = {
-        "method": "r1_residual_deterministic_local_mode_a",
+        "method": method_name,
         "dataset": str(path),
         "n_demo": n_demo,
         "seed": seed,
         "run_name": run_name,
+        "family_dir": family_dir,
         "num_envs": num_envs,
         "rollout_steps": rollout_steps,
         "horizon": horizon,
+        "base_policy": base_policy,
+        "flow_checkpoint": (
+            str(resolved_flow_checkpoint_path) if resolved_flow_checkpoint_path else None
+        ),
         "alpha": alpha,
         "terminal_weight": terminal_weight,
         "learning_rate": resolved_learning_rate,
@@ -1784,10 +2054,15 @@ def train_rl_rerun_local_r1(
             frozen.conditioning,
         )
         condition = torch.from_numpy(condition_np).to(device).float()
-        normalized_base = frozen.low_model(condition)
-        base_action = torch.from_numpy(
-            frozen.action_norm.inverse(normalized_base.cpu().numpy().astype(np.float32))
-        ).to(device)
+        if base_policy == "deterministic":
+            normalized_base = frozen.low_model(condition)
+            base_action = torch.from_numpy(
+                frozen.action_norm.inverse(normalized_base.cpu().numpy().astype(np.float32))
+            ).to(device)
+        else:
+            if flow_model is None or flow_checkpoint is None:
+                raise RuntimeError("R2 flow base was not loaded")
+            base_action = _low_flow_base_action(flow_model, flow_checkpoint, condition, frozen)
         return condition, base_action, distance
 
     @torch.inference_mode()
@@ -1984,6 +2259,43 @@ def train_rl_rerun_local_r1(
     return latest
 
 
+def train_rl_rerun_local_r2(
+    config: Config,
+    dataset_path: Path | None = None,
+    n_demo: int = 500,
+    seed: int = 0,
+    run_name: str = "local_r2_flow_residual",
+    total_steps: int = 32_768,
+    alpha: float = 0.1,
+    terminal_weight: float = 1.0,
+    residual_penalty_weight: float | None = None,
+    learning_rate: float | None = None,
+    num_minibatches: int | None = None,
+    checkpoint_every_updates: int = 5,
+    flow_checkpoint_path: Path | None = None,
+    force: bool = False,
+) -> Path:
+    return train_rl_rerun_local_r1(
+        config,
+        dataset_path=dataset_path,
+        n_demo=n_demo,
+        seed=seed,
+        run_name=run_name,
+        total_steps=total_steps,
+        alpha=alpha,
+        terminal_weight=terminal_weight,
+        residual_penalty_weight=residual_penalty_weight,
+        learning_rate=learning_rate,
+        num_minibatches=num_minibatches,
+        checkpoint_every_updates=checkpoint_every_updates,
+        force=force,
+        base_policy="flow",
+        flow_checkpoint_path=flow_checkpoint_path,
+        family_dir="local_r2",
+        method_name="r2_residual_flow_local_mode_a",
+    )
+
+
 @torch.inference_mode()
 def evaluate_rl_rerun_local_r1(
     config: Config,
@@ -2015,6 +2327,16 @@ def evaluate_rl_rerun_local_r1(
     horizon = int(frozen.horizon_steps)
     dino = _phase4_dino_from_config(config, device)
     condition_dim = int(checkpoint["condition_dim"])
+    base_policy = str(recipe.get("base_policy", "deterministic"))
+    flow_model: FlowModel | None = None
+    flow_checkpoint: dict[str, Any] | None = None
+    if base_policy == "flow":
+        flow_path = recipe.get("flow_checkpoint")
+        if not flow_path:
+            raise ValueError("R2 checkpoint is missing flow_checkpoint")
+        flow_model, flow_checkpoint = _load_low_flow_base(Path(flow_path), device)
+    elif base_policy != "deterministic":
+        raise ValueError(f"Unknown residual base policy: {base_policy}")
     agent = ResidualActorCritic(
         condition_dim,
         width=int(config.get("low_level_rl.residual_width", 256)),
@@ -2097,12 +2419,22 @@ def evaluate_rl_rerun_local_r1(
                         frozen.conditioning,
                     )
                     condition_t = torch.from_numpy(condition).to(device).float()
-                    normalized_base = frozen.low_model(condition_t)
-                    base_action = torch.from_numpy(
-                        frozen.action_norm.inverse(
-                            normalized_base.cpu().numpy().astype(np.float32)
+                    if base_policy == "deterministic":
+                        normalized_base = frozen.low_model(condition_t)
+                        base_action = torch.from_numpy(
+                            frozen.action_norm.inverse(
+                                normalized_base.cpu().numpy().astype(np.float32)
+                            )
+                        ).to(device)
+                    else:
+                        if flow_model is None or flow_checkpoint is None:
+                            raise RuntimeError("R2 flow base was not loaded")
+                        base_action = _low_flow_base_action(
+                            flow_model,
+                            flow_checkpoint,
+                            condition_t,
+                            frozen,
                         )
-                    ).to(device)
                     raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
                         condition_t,
                         deterministic=True,
@@ -2159,7 +2491,7 @@ def evaluate_rl_rerun_local_r1(
     }
     out_path = output_path or (
         _state_audit_result_dir(config)
-        / "local_r1"
+        / str(recipe.get("family_dir", "local_r1"))
         / f"n{n_demo}"
         / f"seed{seed}"
         / str(recipe["run_name"])
@@ -2167,6 +2499,29 @@ def evaluate_rl_rerun_local_r1(
     )
     write_json(out_path, result)
     return out_path
+
+
+@torch.inference_mode()
+def evaluate_rl_rerun_local_r2(
+    config: Config,
+    checkpoint_path: Path,
+    dataset_path: Path | None = None,
+    n_demo: int = 500,
+    seed: int = 0,
+    episodes: int = 4,
+    manifest_path: Path | None = None,
+    output_path: Path | None = None,
+) -> Path:
+    return evaluate_rl_rerun_local_r1(
+        config,
+        checkpoint_path=checkpoint_path,
+        dataset_path=dataset_path,
+        n_demo=n_demo,
+        seed=seed,
+        episodes=episodes,
+        manifest_path=manifest_path,
+        output_path=output_path,
+    )
 
 
 @torch.inference_mode()
@@ -2196,6 +2551,16 @@ def evaluate_rl_rerun_closed_loop_r1(
     recipe = checkpoint["recipe"]
     if int(recipe["n_demo"]) != n_demo or int(recipe["seed"]) != seed:
         raise ValueError("Residual checkpoint does not match n_demo/seed")
+    base_policy = str(recipe.get("base_policy", "deterministic"))
+    flow_model: FlowModel | None = None
+    flow_checkpoint: dict[str, Any] | None = None
+    if base_policy == "flow":
+        flow_path = recipe.get("flow_checkpoint")
+        if not flow_path:
+            raise ValueError("R2 checkpoint is missing flow_checkpoint")
+        flow_model, flow_checkpoint = _load_low_flow_base(Path(flow_path), device)
+    elif base_policy != "deterministic":
+        raise ValueError(f"Unknown residual base policy: {base_policy}")
     agent = ResidualActorCritic(
         int(checkpoint["condition_dim"]),
         width=int(recipe["actor_critic_width"]),
@@ -2292,12 +2657,22 @@ def evaluate_rl_rerun_closed_loop_r1(
                         frozen.conditioning,
                     )
                     condition = torch.from_numpy(condition_np).to(device).float()
-                    normalized_base = frozen.low_model(condition)
-                    base_action = torch.from_numpy(
-                        frozen.action_norm.inverse(
-                            normalized_base.cpu().numpy().astype(np.float32)
+                    if base_policy == "deterministic":
+                        normalized_base = frozen.low_model(condition)
+                        base_action = torch.from_numpy(
+                            frozen.action_norm.inverse(
+                                normalized_base.cpu().numpy().astype(np.float32)
+                            )
+                        ).to(device)
+                    else:
+                        if flow_model is None or flow_checkpoint is None:
+                            raise RuntimeError("R2 flow base was not loaded")
+                        base_action = _low_flow_base_action(
+                            flow_model,
+                            flow_checkpoint,
+                            condition,
+                            frozen,
                         )
-                    ).to(device)
                     if use_residual:
                         raw_residual, _logprob, _entropy, _value = (
                             agent.get_action_and_value(
@@ -2367,7 +2742,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     frozen_result = rollout(use_residual=False)
     residual_result = rollout(use_residual=True)
     result = {
-        "stage": "closed_loop_r1_paired",
+        "stage": "closed_loop_residual_paired",
         "checkpoint": str(checkpoint_path),
         "n_demo": n_demo,
         "seed": seed,
@@ -2376,6 +2751,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         "num_envs": num_envs,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
+        "base_policy": base_policy,
         "frozen": frozen_result,
         "residual": residual_result,
         "success_delta": residual_result["success"] - frozen_result["success"],
@@ -2389,7 +2765,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     }
     out_path = output_path or (
         _state_audit_result_dir(config)
-        / "local_r1"
+        / str(recipe.get("family_dir", "local_r1"))
         / f"n{n_demo}"
         / f"seed{seed}"
         / str(recipe["run_name"])
@@ -2398,3 +2774,26 @@ def evaluate_rl_rerun_closed_loop_r1(
     ensure_dir(out_path.parent)
     write_json(out_path, result)
     return out_path
+
+
+@torch.inference_mode()
+def evaluate_rl_rerun_closed_loop_r2(
+    config: Config,
+    checkpoint_path: Path,
+    n_demo: int = 500,
+    seed: int = 0,
+    episodes: int = 100,
+    eval_seed_start: int = 10_000,
+    num_envs: int = 64,
+    output_path: Path | None = None,
+) -> Path:
+    return evaluate_rl_rerun_closed_loop_r1(
+        config,
+        checkpoint_path=checkpoint_path,
+        n_demo=n_demo,
+        seed=seed,
+        episodes=episodes,
+        eval_seed_start=eval_seed_start,
+        num_envs=num_envs,
+        output_path=output_path,
+    )
