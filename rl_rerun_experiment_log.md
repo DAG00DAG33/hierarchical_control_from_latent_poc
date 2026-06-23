@@ -1070,3 +1070,59 @@ problem. It can improve local latent reach slightly at an early checkpoint, but
 the deployed closed-loop hierarchy gets worse. The deterministic residual R1
 branch remains below the plan gates. Proceed to R2 residual flow low-level PPO
 as the next active branch.
+
+## 2026-06-23 - RR-28: R2 residual-flow plumbing and smoke
+
+Clarification on the last R1 run: the disjoint-state R1 ablation used the
+available exact-reset `512`-stream vector corpus, with rollout horizon `10`, so
+the PPO batch was only `5120` samples/update. That satisfies the minimum
+parallel environment count from the plan, but it is much smaller than the
+serious aligned R1 run (`4096 x 10 = 40960` samples/update). Interpret the
+disjoint result as an ablation, not as the strongest possible R1 PPO setting.
+
+Implemented R2 as a matched variant of the R1 local PPO loop:
+
+- train a zero-noise action-flow low-level base on the same learned-interface
+  low-level condition used by the deterministic policy;
+- use the flow endpoint as the frozen base action;
+- train a residual actor-critic on top with the same clean latent progress and
+  terminal-distance reward as R1;
+- keep local rollouts exactly `10` steps long;
+- disallow ManiSkill reward, task success, object pose, and task progress in
+  training.
+
+Commands:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-low-flow-base --n-demo 500 --seed 0
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r2 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 \
+  --n-demo 500 --seed 0 --run-name smoke_10k --steps 10240 \
+  --alpha 0.25 --terminal-weight 1.0 --residual-penalty-weight 0.0 \
+  --learning-rate 0.0003 --num-minibatches 1 --checkpoint-every-updates 1 \
+  --flow-checkpoint artifacts/rl_rerun/local_r2/n500/seed0/low_flow_base/low_flow.pt --force
+```
+
+Low-flow base:
+
+| metric | value |
+| --- | ---: |
+| best epoch | 51 |
+| zero-noise validation action MAE | 0.0640 |
+| flow steps | 24 |
+| condition dim | 7065 |
+| train time | 253 s |
+
+Smoke local held-out eval on the existing 512-env manifest:
+
+| policy | final latent distance | reduction | improved fraction | saturation |
+| --- | ---: | ---: | ---: | ---: |
+| deterministic frozen baseline | 0.6073 | 0.5193 | 0.8301 | 0.0100 |
+| R2 smoke, 10k transitions | 0.6607 | 0.4659 | 0.7949 | 0.0150 |
+
+The 10k smoke checkpoint has mean residual norm `0.0056`, so this mostly
+measures the frozen zero-noise flow base. The flow base is locally worse than
+the deterministic low-level before serious residual tuning. Next run R2 on the
+4096-stream corpus with the same `4096 x 10` batch size used for the serious R1
+run.
