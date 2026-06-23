@@ -9,3 +9,11 @@ r1_a050_task_seg,R1_residual,500,0,50176,0.50,latent_terminal_plus_task,1.0,0.1,
 r1_a050_taskonly_seg,R1_residual,500,0,50176,0.50,task_only,0.0,1.0,true,residual_mlp,300,3200000
 r1_a005_taskonly_fullgae,R1_residual,500,0,50176,0.05,task_only,0.0,1.0,false,residual_mlp,300,3200000
 r1_a025_taskonly_fullgae,R1_residual,500,0,50176,0.25,task_only,0.0,1.0,false,residual_mlp,300,3200000
+r3_bc1_lownoise_progress1_50k_best300,R3_direct_last_layer,500,0,5120,,latent_terminal_plus_task_progress,1.0,0.0,true,low_final_layer_plus_logstd_and_critic,300,3200000
+r3_bc1_lownoise_progress1_50k_best300,R3_direct_last_layer,500,1,39936,,latent_terminal_plus_task_progress,1.0,0.0,true,low_final_layer_plus_logstd_and_critic,300,3200000
+r3_bc1_lownoise_progress1_50k_best300,R3_direct_last_layer,500,2,18432,,latent_terminal_plus_task_progress,1.0,0.0,true,low_final_layer_plus_logstd_and_critic,300,3200000
+r3_bc1_lownoise_progress1_50k_best300,R3_direct_last_layer,1000,0,47104,,latent_terminal_plus_task_progress,1.0,0.0,true,low_final_layer_plus_logstd_and_critic,300,3200000
+r1_a005_progress1_50k_best300,R1_residual,500,0,39936,0.05,latent_terminal_plus_task_progress,1.0,0.0,true,residual_mlp,300,3200000
+r1_a005_progress1_50k_best300,R1_residual,500,1,20480,0.05,latent_terminal_plus_task_progress,1.0,0.0,true,residual_mlp,300,3200000
+r1_a005_progress1_50k_best300,R1_residual,500,2,11264,0.05,latent_terminal_plus_task_progress,1.0,0.0,true,residual_mlp,300,3200000
+r1_a005_progress1_50k_best300,R1_residual,1000,0,24576,0.05,latent_terminal_plus_task_progress,1.0,0.0,true,residual_mlp,300,3200000

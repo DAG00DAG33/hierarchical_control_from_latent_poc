@@ -214,3 +214,58 @@ method that improves mean success over the frozen hierarchy, but the gain is
 modest and seed-dependent. It is worth testing at the confirmation budget
 `N_demo=1000`, but it is not yet strong enough to justify a large final sweep
 without that check.
+
+## 2026-06-23 - RL-07: N=1000 confirmation for selected R3
+
+Ran the selected R3 recipe at the confirmation budget:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r3 --n-demo 1000 --seed 0 --run-name r3_bc1_lownoise_progress1_50k --steps 50176 --bc-weight 1.0 --terminal-weight 1.0 --task-progress-weight 1.0 --force
+```
+
+300-episode development comparison:
+
+| policy | success | final latent MSE | goal reach | max reward | action drift |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen N=1000 seed 0 | 0.553 | 1.104 | 0.780 | 0.676 | 0.000 |
+| R3 selected N=1000 seed 0 | 0.493 | 1.187 | 0.753 | 0.629 | 0.012 |
+
+Decision: the selected R3 recipe does not confirm at `N_demo=1000`. It appears
+useful only as a small-data adaptation for some seeds, and can harm a stronger
+frozen hierarchy. Do not scale this R3 recipe to final evaluation. Next
+follow-up is to test the same task-progress shaping in the safer R1 residual
+adapter, where exploration is alpha-limited and cannot directly perturb the BC
+action as much as direct PPO.
+
+## 2026-06-23 - RL-08: R1 residual with task-progress shaping
+
+Ran an R1 follow-up using the same task-progress reward but the safer
+alpha-limited residual action:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r1 --n-demo <N> --seed <seed> --run-name r1_a005_progress1_50k --steps 50176 --alpha 0.05 --terminal-weight 1.0 --task-progress-weight 1.0 --force
+```
+
+Selected checkpoint is `best_train_latent.pt`.
+
+N=500, 300-episode development comparison:
+
+| seed | frozen success | R1 selected success | delta | frozen final latent MSE | R1 final latent MSE | R1 selected step | R1 action drift |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.313 | 0.370 | +0.057 | 1.576 | 1.542 | 39,936 | 0.0050 |
+| 1 | 0.313 | 0.307 | -0.007 | 1.563 | 1.554 | 20,480 | 0.0043 |
+| 2 | 0.290 | 0.300 | +0.010 | 1.482 | 1.554 | 11,264 | 0.0029 |
+| mean | 0.306 | 0.326 | +0.020 | 1.540 | 1.550 | - | 0.0040 |
+
+N=1000, seed 0 confirmation:
+
+| policy | success | final latent MSE | goal reach | max reward | action drift |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen N=1000 seed 0 | 0.553 | 1.104 | 0.780 | 0.676 | 0.000 |
+| R1 selected N=1000 seed 0 | 0.527 | 1.133 | 0.767 | 0.656 | 0.004 |
+
+Decision: task-progress shaping makes R1 better than the original R1 attempts
+and gives a small N=500 mean improvement, but it still does not confirm at
+`N_demo=1000`. The best current conclusion is a useful negative/limited result:
+low-level PPO can slightly adapt weak hierarchies when heavily constrained, but
+the effect is not robust enough to use as the final method.
