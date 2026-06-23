@@ -284,3 +284,76 @@ trajectories gives a clear gain in online success and offline reconstruction /
 action prediction. This argues against an obvious data-format regression in the
 new corpus. Phase B should continue with additional supervised seeds before the
 local-reset RL variants are treated as comparable.
+
+## 2026-06-23 - RR-07: Phase B `n=500, seed=1` supervised rerun
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-supervised --n-demo 500 --seed 1 --eval-episodes 100 --force
+```
+
+Evaluation result:
+
+| metric | value |
+| --- | ---: |
+| episodes | 100 |
+| success | 0.31 |
+| final reward | 0.467 |
+| max reward | 0.487 |
+| teacher action MAE | 0.182 |
+| action saturation rate | 0.046 |
+| offline oracle action MAE | 0.0611 |
+| offline predicted action MAE | 0.0620 |
+| offline normalized goal L2 | 21.95 |
+| representation reconstruction MSE | 0.109 |
+| representation active dimensions | 512 |
+
+Interim `n=500` seed summary:
+
+| seed | success | final reward | max reward | teacher action MAE |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.24 | 0.404 | 0.432 | 0.192 |
+| 1 | 0.31 | 0.467 | 0.487 | 0.182 |
+
+Interpretation: `n=500` has moderate seed variation but remains in the same
+performance band. Continue with `seed=2` before using this as the matched
+supervised baseline for local low-level RL.
+
+## 2026-06-23 - RR-08: Phase B `n=500, seed=2` supervised rerun
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-supervised --n-demo 500 --seed 2 --eval-episodes 100 --force
+```
+
+Evaluation result:
+
+| metric | value |
+| --- | ---: |
+| episodes | 100 |
+| success | 0.29 |
+| final reward | 0.440 |
+| max reward | 0.472 |
+| teacher action MAE | 0.190 |
+| action saturation rate | 0.044 |
+| offline oracle action MAE | 0.0602 |
+| offline predicted action MAE | 0.0613 |
+| offline normalized goal L2 | 22.66 |
+| representation reconstruction MSE | 0.108 |
+| representation active dimensions | 512 |
+
+Completed `n=500` supervised rerun summary:
+
+| seed | success | final reward | max reward | teacher action MAE |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.24 | 0.404 | 0.432 | 0.192 |
+| 1 | 0.31 | 0.467 | 0.487 | 0.182 |
+| 2 | 0.29 | 0.440 | 0.472 | 0.190 |
+| mean | 0.28 | 0.437 | 0.463 | 0.188 |
+| sample SD | 0.036 | 0.032 | 0.028 | 0.005 |
+
+Interpretation: the regenerated `n=500` supervised hierarchy is stable across
+three seeds but only moderately successful. It is suitable as a low-data matched
+baseline for Phase B, not as a strong final system.
