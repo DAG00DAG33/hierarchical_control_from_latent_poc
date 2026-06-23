@@ -1206,3 +1206,98 @@ base itself is worse than the deterministic low-level (`28%` versus the R1
 deterministic frozen baseline of `34%` on the same deployment seed range), and
 the residual-tuned flow policy further degrades closed-loop success. R2 does
 not pass the local or closed-loop gates.
+
+## 2026-06-23 - RR-30: R3 direct deterministic low-level last-layer tuning
+
+Because R1 and R2 did not pass, the next plan branch is R3: directly tune the
+deterministic low-level policy starting from BC. The first R3 variant follows
+the plan's conservative setting: tune only the final low-policy layer plus
+actor log-std and critic, with BC action regularization.
+
+Implementation:
+
+- exact-reset local Mode-A data path, same as R1/R2;
+- one local episode per PPO rollout (`10` steps);
+- deterministic low-level final layer trainable;
+- earlier low-level layers, high-level model, representation encoder, and
+  normalizers frozen;
+- PPO samples the final action directly;
+- BC regularization keeps the deterministic mean near the frozen BC action;
+- training reward remains clean latent progress plus terminal latent distance;
+- no ManiSkill reward, task success, object pose, or task progress in training.
+
+Smoke on 512-env exact-reset corpus:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 \
+  --n-demo 500 --seed 0 --run-name smoke_10k_bc1 --steps 10240 \
+  --bc-weight 1.0 --terminal-weight 1.0 --learning-rate 0.00003 \
+  --num-minibatches 1 --checkpoint-every-updates 1 --force
+```
+
+Held-out 512-env smoke eval:
+
+| policy | final distance | mean reduction | reduction fraction | action delta | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen deterministic low level | 0.6073 | 0.5193 | 0.8301 | 0.0000 | 0.0100 |
+| R3 smoke, 10k transitions | 0.6020 | 0.5246 | 0.8379 | 0.0030 | 0.0092 |
+
+Serious run:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --run-name aligned10_n4096_lr3e5_bc1_1m \
+  --steps 1024000 --bc-weight 1.0 --terminal-weight 1.0 \
+  --learning-rate 0.00003 --num-minibatches 8 --checkpoint-every-updates 5 --force
+```
+
+Configuration:
+
+| item | value |
+| --- | ---: |
+| environments | 4096 |
+| rollout horizon | 10 |
+| samples/update | 40960 |
+| minibatches | 8 |
+| minibatch size | 5120 |
+| total transitions | 1,024,000 |
+| learning rate | 3e-5 |
+| BC weight | 1.0 |
+
+Training diagnostics were noisy; later updates sometimes saturated more and
+had worse terminal latent distance. Therefore checkpoint selection used the
+fixed held-out 512-env local manifest.
+
+Held-out 512-env local checkpoint selection:
+
+| checkpoint | final distance | mean reduction | reduction fraction | action delta | saturation |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen BC | 0.6073 | 0.5193 | 0.8301 | 0.0000 | 0.0100 |
+| 204800 | 0.5920 | 0.5346 | 0.8438 | 0.0039 | 0.0102 |
+| 409600 | 0.6034 | 0.5232 | 0.8457 | 0.0068 | 0.0109 |
+| 614400 | 0.5903 | 0.5364 | 0.8457 | 0.0067 | 0.0123 |
+| 819200 | 0.6035 | 0.5231 | 0.8340 | 0.0081 | 0.0115 |
+| 1024000 | 0.5851 | 0.5415 | 0.8379 | 0.0093 | 0.0096 |
+
+The best local checkpoint is the final checkpoint. It improves final latent
+distance by `0.0222` absolute (`3.65%`) relative to the frozen deterministic
+low level, below the R1/R3 local gate target but clearly better than R1/R2.
+
+Closed-loop paired evaluations on 100 deployment seeds:
+
+| checkpoint | frozen success | tuned success | success delta | final reward delta | max reward delta | action delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 204800 | 0.34 | 0.34 | 0.00 | -0.0008 | +0.0012 | 0.0037 |
+| 614400 | 0.34 | 0.29 | -0.05 | -0.0346 | -0.0334 | 0.0066 |
+| 1024000 | 0.34 | 0.29 | -0.05 | -0.0363 | -0.0347 | 0.0096 |
+
+Conclusion: R3 last-layer tuning gives the strongest local latent-reaching
+improvement so far, but too much tuning degrades full-task deployment. The
+early `204800` checkpoint is task-neutral and slightly improves max reward,
+while later locally better checkpoints hurt success by 5 percentage points.
+R3 last-layer with `bc_weight=1.0` does not pass the full closed-loop gate.
+Next R3 variants should keep the useful local signal but reduce deployment
+drift, for example by increasing BC regularization or using a smaller direct
+learning rate and selecting by paired closed-loop performance.

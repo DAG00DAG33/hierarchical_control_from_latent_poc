@@ -2997,7 +2997,7 @@ def evaluate_rl_rerun_closed_loop_r1(
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
-    from hcl_poc.low_level_rl import ResidualActorCritic, _load_frozen
+    from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(checkpoint_path)
