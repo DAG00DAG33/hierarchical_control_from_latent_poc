@@ -46,8 +46,8 @@ low_level_rl:
   gae_lambda: 0.95
   clip_coef: 0.2
   entropy_coef: 0.0
-  value_coef: 0.5
-  max_grad_norm: 0.5
+  value_coef: 1.0
+  max_grad_norm: 1.0
   residual_penalty_weight: 0.01
   checkpoint_every_steps: 25000
   train_seed_start: 3000000

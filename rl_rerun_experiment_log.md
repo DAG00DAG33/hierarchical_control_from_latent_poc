@@ -926,3 +926,33 @@ that the result is not only memorization of the two training vector seeds, but
 it is far below the Phase E target of 25% lower final distance and 15
 percentage points higher goal reach. Treat this checkpoint as a successful
 correctness/smoke result, not as a passed R1 local-goal gate.
+
+## 2026-06-23 - RR-25: Serious N=500 R1 setup
+
+The Phase E gate is defined at `N_demo=500`; the preceding aligned run used
+`N_demo=1000` and therefore remains an implementation smoke test.
+
+Trainer changes for the serious run:
+
+```text
+rollout length: exactly 10
+environments: 4096
+samples/update: 40960
+residual learning rate: explicit CLI override, 3e-4
+value-loss coefficient: 1.0
+gradient-norm limit: 1.0
+periodic checkpoint snapshots: every 5 PPO updates
+checkpoint recipe: records all PPO and actor-critic hyperparameters
+```
+
+Collected an independent, lower-cost checkpoint-selection bank:
+
+```text
+dataset: data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5
+batch seed: 9950000
+environments: 512
+stored steps: 60
+```
+
+Its exact replay audit passes. Periodic checkpoints will be selected using
+latent reachability on this bank, never task success.

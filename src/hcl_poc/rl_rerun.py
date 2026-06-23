@@ -1586,6 +1586,8 @@ def train_rl_rerun_local_r1(
     alpha: float = 0.1,
     terminal_weight: float = 1.0,
     residual_penalty_weight: float | None = None,
+    learning_rate: float | None = None,
+    checkpoint_every_updates: int = 5,
     force: bool = False,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
@@ -1626,6 +1628,8 @@ def train_rl_rerun_local_r1(
     horizon = int(frozen.horizon_steps)
     if horizon != 10:
         raise ValueError(f"Expected 10-step local horizon, got {horizon}")
+    if checkpoint_every_updates <= 0:
+        raise ValueError("checkpoint_every_updates must be positive")
 
     with h5py.File(path, "r") as h5_meta:
         meta = h5_meta["meta"].attrs
@@ -1655,9 +1659,19 @@ def train_rl_rerun_local_r1(
         depth=int(config.get("low_level_rl.residual_depth", 2)),
         initial_logstd=float(config.get("low_level_rl.initial_logstd", -2.3)),
     ).to(device)
-    optimizer = torch.optim.Adam(
-        agent.parameters(), lr=float(config.get("low_level_rl.learning_rate", 1e-4)), eps=1e-5
+    resolved_learning_rate = float(
+        learning_rate
+        if learning_rate is not None
+        else config.get("low_level_rl.learning_rate", 1e-4)
     )
+    gamma = float(config.get("low_level_rl.gamma", 0.99))
+    gae_lambda = float(config.get("low_level_rl.gae_lambda", 0.95))
+    clip_coef = float(config.get("low_level_rl.clip_coef", 0.2))
+    ent_coef = float(config.get("low_level_rl.entropy_coef", 0.0))
+    value_coef = float(config.get("low_level_rl.value_coef", 1.0))
+    update_epochs = int(config.get("low_level_rl.update_epochs", 4))
+    max_grad_norm = float(config.get("low_level_rl.max_grad_norm", 1.0))
+    optimizer = torch.optim.Adam(agent.parameters(), lr=resolved_learning_rate, eps=1e-5)
     recipe = {
         "method": "r1_residual_deterministic_local_mode_a",
         "dataset": str(path),
@@ -1669,6 +1683,19 @@ def train_rl_rerun_local_r1(
         "horizon": horizon,
         "alpha": alpha,
         "terminal_weight": terminal_weight,
+        "learning_rate": resolved_learning_rate,
+        "minibatches": minibatches,
+        "minibatch_size": minibatch_size,
+        "update_epochs": update_epochs,
+        "gamma": gamma,
+        "gae_lambda": gae_lambda,
+        "clip_coef": clip_coef,
+        "entropy_coef": ent_coef,
+        "value_coef": value_coef,
+        "max_grad_norm": max_grad_norm,
+        "actor_critic_width": int(config.get("low_level_rl.residual_width", 256)),
+        "actor_critic_depth": int(config.get("low_level_rl.residual_depth", 2)),
+        "initial_logstd": float(config.get("low_level_rl.initial_logstd", -2.3)),
         "residual_penalty_weight": float(
             residual_penalty_weight
             if residual_penalty_weight is not None
@@ -1797,14 +1824,6 @@ def train_rl_rerun_local_r1(
     done_buf = torch.zeros((rollout_steps, num_envs), device=device)
     value_buf = torch.zeros((rollout_steps, num_envs), device=device)
     next_done = torch.zeros(num_envs, device=device)
-    gamma = float(config.get("low_level_rl.gamma", 0.99))
-    gae_lambda = float(config.get("low_level_rl.gae_lambda", 0.95))
-    clip_coef = float(config.get("low_level_rl.clip_coef", 0.2))
-    ent_coef = float(config.get("low_level_rl.entropy_coef", 0.0))
-    value_coef = float(config.get("low_level_rl.value_coef", 0.5))
-    update_epochs = int(config.get("low_level_rl.update_epochs", 4))
-    max_grad_norm = float(config.get("low_level_rl.max_grad_norm", 0.5))
-
     try:
         with trange(global_step, total_steps, initial=global_step, total=total_steps, desc=run_name) as progress:
             while global_step < total_steps:
@@ -1936,17 +1955,24 @@ def train_rl_rerun_local_r1(
                 }
                 history.append(update_metrics)
                 write_json(history_path, {"recipe": recipe, "history": history})
-                torch.save(
-                    {
-                        "agent": agent.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "global_step": global_step,
-                        "history": history,
-                        "recipe": recipe,
-                        "condition_dim": condition_dim,
-                    },
-                    latest,
-                )
+                checkpoint_state = {
+                    "agent": agent.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "global_step": global_step,
+                    "history": history,
+                    "recipe": recipe,
+                    "condition_dim": condition_dim,
+                }
+                torch.save(checkpoint_state, latest)
+                if (
+                    len(history) % checkpoint_every_updates == 0
+                    or global_step >= total_steps
+                ):
+                    checkpoint_dir = ensure_dir(artifact / "checkpoints")
+                    torch.save(
+                        checkpoint_state,
+                        checkpoint_dir / f"step_{global_step:09d}.pt",
+                    )
     finally:
         h5.close()
         env.close()

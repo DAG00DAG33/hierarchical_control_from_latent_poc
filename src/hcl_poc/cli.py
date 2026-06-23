@@ -307,6 +307,8 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 alpha=args.alpha,
                 terminal_weight=args.terminal_weight,
                 residual_penalty_weight=args.residual_penalty_weight,
+                learning_rate=args.learning_rate,
+                checkpoint_every_updates=args.checkpoint_every_updates,
                 force=args.force,
             )
         )
@@ -1409,6 +1411,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r1.add_argument("--alpha", type=float, default=0.1)
     train_local_r1.add_argument("--terminal-weight", type=float, default=1.0)
     train_local_r1.add_argument("--residual-penalty-weight", type=float)
+    train_local_r1.add_argument("--learning-rate", type=float)
+    train_local_r1.add_argument("--checkpoint-every-updates", type=int, default=5)
     train_local_r1.add_argument("--force", action="store_true")
     train_local_r1.set_defaults(func=rl_rerun_cmd)
     eval_local_r1 = rl_rerun_sub.add_parser("eval-local-r1")

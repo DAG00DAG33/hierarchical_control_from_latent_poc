@@ -1,0 +1,14 @@
+{
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5",
+  "entries": [
+    {
+      "batch": "batch_000000",
+      "batch_seed": 9950000,
+      "timestep": 34
+    }
+  ],
+  "horizon": 10,
+  "num_envs": 512,
+  "sampled_local_episodes": 512,
+  "seed": 20260623
+}
