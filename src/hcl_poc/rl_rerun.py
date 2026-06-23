@@ -1170,11 +1170,16 @@ def audit_rl_rerun_vector_dataset(
     previous_action_errors: list[float] = []
     chosen_timesteps: list[int] = []
     chosen_batches: list[str] = []
+    audit_keys = rng.choice(
+        batch_keys,
+        size=batches,
+        replace=batches > len(batch_keys),
+    )
 
     try:
         with h5py.File(path, "r") as h5:
-            for _ in range(batches):
-                key = str(rng.choice(batch_keys))
+            for selected_key in audit_keys:
+                key = str(selected_key)
                 group = h5[key]
                 t = int(rng.integers(0, max_steps - horizon + 1))
                 obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
@@ -1348,11 +1353,16 @@ def audit_rl_rerun_local_mode_a(
     task_success_once = np.zeros((episodes, num_envs), dtype=np.bool_)
     chosen_batches: list[str] = []
     chosen_timesteps: list[int] = []
+    evaluation_keys = rng.choice(
+        batch_keys,
+        size=episodes,
+        replace=episodes > len(batch_keys),
+    )
 
     try:
         with h5py.File(path, "r") as h5:
             for episode in trange(episodes, desc="audit local Mode-A"):
-                key = str(rng.choice(batch_keys))
+                key = str(evaluation_keys[episode])
                 group = h5[key]
                 t = int(rng.integers(0, max_steps - horizon + 1))
                 obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
@@ -1523,9 +1533,7 @@ def train_rl_rerun_local_r1(
         num_envs = int(meta["num_envs"])
         max_steps = int(meta["max_steps"])
         batch_keys = sorted(key for key in h5_meta.keys() if key.startswith("batch_"))
-    rollout_steps = max(64, int(config.get("low_level_rl.rollout_steps", 64)))
-    if rollout_steps < horizon:
-        raise ValueError("rollout_steps must be at least the local horizon")
+    rollout_steps = horizon
     batch_size = num_envs * rollout_steps
     minibatches = int(config.get("low_level_rl.num_minibatches", 8))
     if batch_size % minibatches:
@@ -1902,10 +1910,15 @@ def evaluate_rl_rerun_local_r1(
     saturation_rates: list[float] = []
     chosen_batches: list[str] = []
     chosen_timesteps: list[int] = []
+    evaluation_keys = rng.choice(
+        batch_keys,
+        size=episodes,
+        replace=episodes > len(batch_keys),
+    )
     try:
         with h5py.File(path, "r") as h5:
-            for _episode in trange(episodes, desc="eval local R1"):
-                key = str(rng.choice(batch_keys))
+            for episode_index in trange(episodes, desc="eval local R1"):
+                key = str(evaluation_keys[episode_index])
                 group = h5[key]
                 t = int(rng.integers(0, max_steps - horizon + 1))
                 obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))

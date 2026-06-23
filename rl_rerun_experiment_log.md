@@ -757,3 +757,116 @@ gate. The result remains slightly below the frozen controller. Before spending
 on 1M+ steps, improve the training setup: use multiple vector batches, add
 fixed validation evaluation during training, and consider a stronger residual
 mean optimization signal.
+
+## 2026-06-23 - RR-18: Align PPO rollouts with the local MDP
+
+The PPO rollout is now exactly one complete local episode:
+
+```text
+future-goal horizon: 10 simulator steps
+rollout steps per environment: 10
+terminal mask: true after step 10
+```
+
+This removes concatenated local episodes and partial episodes at PPO update
+boundaries. Each collected trajectory has one initial state, one reachable
+10-step future goal, and exactly ten policy decisions.
+
+## 2026-06-23 - RR-19: Large 10-step vector-width benchmark
+
+Benchmark:
+
+| environments | samples/update | full stack steps/s | estimated rollout/update | result |
+| ---: | ---: | ---: | ---: | --- |
+| 2048 | 20480 | 391.5 | 52.3 s | pass |
+| 4096 | 40960 | 392.1 | 104.5 s | pass |
+| 8192 | 81920 | n/a | n/a | GPU camera-group allocation failure |
+
+The full stack includes CUDA simulation, rendering, DINO, VAE, and policy
+inference. DINO/rendering saturates throughput near 400 environment steps/s,
+but 4096 environments is stable and provides a sufficiently large one-episode
+PPO batch. Select `num_envs=4096`.
+
+## 2026-06-23 - RR-20: 4096-environment exact-replay corpus
+
+Collected:
+
+```text
+data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5
+vector environments per batch: 4096
+independent vector batches: 2
+stored simulator steps per stream: 60
+total streams: 8192
+file size: 12 GB
+collection time: 25 min 26 s
+```
+
+The initial exact replay audit passed with zero error for simulator state,
+state observation, DINO/proprio frame, previous action, and the stored
+10-step future goal. The audit implementation was then changed to sample
+distinct vector batches whenever the requested audit count does not exceed
+the number of stored batches.
+
+## 2026-06-23 - RR-21: Explicit frozen low-level baseline
+
+The primary R1 baseline is the frozen supervised low-level controller, not the
+privileged PPO expert and not the complete learned hierarchy. It receives the
+same current observation latent, reachable 10-step Mode-A future latent,
+previous action, and remaining-horizon input as the residual RL policy. The
+only difference is that its RL residual is identically zero.
+
+Evaluation on one complete 4096-environment reset batch:
+
+| metric | frozen BC low level |
+| --- | ---: |
+| sampled local episodes | 4096 |
+| initial latent distance | 1.466 |
+| final latent distance | 1.105 |
+| mean latent-distance reduction | 0.361 |
+| fraction ending closer to the goal | 0.793 |
+| action saturation rate | 0.0144 |
+| task-success diagnostic fraction | 0.314 |
+
+The task-success fraction is secondary because each local episode starts from
+an arbitrary teacher-trajectory state and lasts only ten steps. The R1 gate is
+a paired comparison on identical starting states and reachable goals:
+
+```text
+RL residual final distance <= frozen BC final distance
+RL residual distance-reduction fraction >= frozen BC fraction
+```
+
+For system-level context, the complete frozen `n=1000` learned hierarchy has
+100-episode success rates of `0.46`, `0.48`, and `0.43` for policy seeds 0, 1,
+and 2 respectively (`mean=0.457`, sample SD `0.025`). Seed 0 is the frozen
+checkpoint used by the current local R1 run.
+
+## 2026-06-23 - RR-22: Aligned 4096-environment R1 result
+
+Training:
+
+```text
+method: deterministic residual PPO, Mode A
+environments: 4096
+rollout/episode horizon: 10
+samples per PPO update: 40960
+minibatches: 8
+minibatch size: 5120
+updates: 8
+total transitions: 327680
+residual scale alpha: 0.25
+residual penalty: 0.0
+```
+
+Paired evaluation across both stored vector batches, 8192 local episodes:
+
+| policy | final distance | mean reduction | reduction fraction | saturation |
+| --- | ---: | ---: | ---: | ---: |
+| frozen BC low level | 1.2328 | 0.5331 | 0.8649 | 0.0344 |
+| aligned R1 residual | 1.2250 | 0.5409 | 0.8701 | 0.0339 |
+
+The residual improves final distance by `0.0078` and the distance-improvement
+fraction by `0.0052`. Its deterministic mean residual norm is `0.00868`.
+This is the first positive paired R1 result, but the margin is small and the
+same two vector batches supplied training resets. Validate on a separately
+collected vector seed before extending the run to one million transitions.

@@ -31,7 +31,9 @@ rl:
 
 low_level_rl:
   num_envs: 32
-  rollout_steps: 32
+  # One complete local MDP per PPO rollout. The RL rerun trainer verifies this
+  # against the selected high/low interface horizon.
+  rollout_steps: 10
   num_minibatches: 8
   update_epochs: 4
   residual_width: 256

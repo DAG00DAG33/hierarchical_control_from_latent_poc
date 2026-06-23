@@ -1,0 +1,24 @@
+{
+  "audited_batches": 2,
+  "chosen_batches": [
+    "batch_000000",
+    "batch_000001"
+  ],
+  "chosen_timestep_max": 26,
+  "chosen_timestep_min": 13,
+  "current_frame_mse_max": 0.0,
+  "current_frame_mse_mean": 0.0,
+  "current_obs_state_max_abs_error": 0.0,
+  "current_state_max_abs_error": 0.0,
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5",
+  "gate_pass": true,
+  "goal_frame_mse_max": 0.0,
+  "goal_frame_mse_mean": 0.0,
+  "goal_obs_state_max_abs_error": 0.0,
+  "goal_state_max_abs_error": 0.0,
+  "horizon": 10,
+  "max_steps": 60,
+  "num_envs": 4096,
+  "previous_action_max_abs_error": 0.0,
+  "seed": 0
+}

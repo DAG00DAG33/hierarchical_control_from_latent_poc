@@ -585,7 +585,7 @@ For local 10-step episodes:
 
 ```text
 num_envs: largest stable from throughput gate
-num_steps_per_env: 10 or 20
+num_steps_per_env: 10
 episode_length: 10
 gamma: 0.99
 gae_lambda: 0.95
@@ -598,6 +598,9 @@ value_loss_coef: 1.0
 max_grad_norm: 1.0
 normalize_advantages: True
 ```
+
+Use exactly one complete local episode per PPO rollout. Do not concatenate
+multiple local episodes or split a local episode across PPO updates.
 
 For residual policies:
 

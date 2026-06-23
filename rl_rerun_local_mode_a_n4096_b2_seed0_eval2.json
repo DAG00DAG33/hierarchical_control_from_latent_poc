@@ -1,0 +1,27 @@
+{
+  "action_saturation_rate": 0.0343994140625,
+  "chosen_batches": [
+    "batch_000000",
+    "batch_000001"
+  ],
+  "chosen_timestep_max": 26,
+  "chosen_timestep_min": 13,
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5",
+  "distance_reduction_fraction": 0.8648681640625,
+  "distance_reduction_mean": 0.5331164002418518,
+  "distance_reduction_median": 0.5284728407859802,
+  "episodes": 2,
+  "final_distance_mean": 1.23279869556427,
+  "final_distance_median": 1.1324372291564941,
+  "gate_pass": true,
+  "horizon": 10,
+  "initial_distance_mean": 1.7659151554107666,
+  "initial_distance_median": 1.7212483882904053,
+  "n_demo": 1000,
+  "num_envs": 4096,
+  "progress_reward_mean": 0.5331164002418518,
+  "sampled_local_episodes": 8192,
+  "seed": 0,
+  "task_success_once_fraction": 0.2117919921875,
+  "terminal_reward_mean": -1.23279869556427
+}
