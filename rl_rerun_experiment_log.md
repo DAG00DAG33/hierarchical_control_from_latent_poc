@@ -1301,3 +1301,77 @@ R3 last-layer with `bc_weight=1.0` does not pass the full closed-loop gate.
 Next R3 variants should keep the useful local signal but reduce deployment
 drift, for example by increasing BC regularization or using a smaller direct
 learning rate and selecting by paired closed-loop performance.
+
+## 2026-06-23 - RR-31: Constrained R3 variants
+
+R3 `lr=3e-5, bc_weight=1.0` showed useful local latent improvement but degraded
+closed-loop deployment when action drift grew. Tested two constrained variants.
+
+### Smoke variants
+
+Held-out 512-env local smoke eval:
+
+| variant | final distance | mean reduction | reduction fraction | action delta | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen deterministic low level | 0.6073 | 0.5193 | 0.8301 | 0.0000 | 0.0100 |
+| `lr=3e-5, bc=1`, 10k | 0.6020 | 0.5246 | 0.8379 | 0.0030 | 0.0092 |
+| `lr=3e-5, bc=10`, 10k | 0.6120 | 0.5146 | 0.8145 | 0.0030 | 0.0096 |
+| `lr=1e-5, bc=1`, 10k | 0.6036 | 0.5231 | 0.8281 | 0.0014 | 0.0092 |
+
+Increasing BC weight to `10` over-constrained the update and removed the local
+gain. Lowering the direct learning rate to `1e-5` preserved a small local gain
+with much lower deterministic action drift in the smoke run, so it was selected
+for a serious run.
+
+### Serious lower-LR R3 run
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --run-name aligned10_n4096_lr1e5_bc1_1m \
+  --steps 1024000 --bc-weight 1.0 --terminal-weight 1.0 \
+  --learning-rate 0.00001 --num-minibatches 8 --checkpoint-every-updates 5 --force
+```
+
+Configuration:
+
+| item | value |
+| --- | ---: |
+| environments | 4096 |
+| rollout horizon | 10 |
+| samples/update | 40960 |
+| total transitions | 1,024,000 |
+| learning rate | 1e-5 |
+| BC weight | 1.0 |
+
+Held-out 512-env local checkpoint selection:
+
+| checkpoint | final distance | mean reduction | reduction fraction | action delta | saturation |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen BC | 0.6073 | 0.5193 | 0.8301 | 0.0000 | 0.0100 |
+| 204800 | 0.6040 | 0.5226 | 0.8320 | 0.0036 | 0.0096 |
+| 409600 | 0.5950 | 0.5316 | 0.8516 | 0.0052 | 0.0102 |
+| 614400 | 0.5957 | 0.5310 | 0.8379 | 0.0053 | 0.0090 |
+| 819200 | 0.5932 | 0.5334 | 0.8301 | 0.0061 | 0.0104 |
+| 1024000 | 0.5996 | 0.5270 | 0.8359 | 0.0062 | 0.0096 |
+
+This variant gives a smaller local gain than `lr=3e-5`, but keeps action drift
+lower. The locally best final-distance checkpoint is `819200`; the best
+reduction-fraction checkpoint is `409600`.
+
+Closed-loop paired evaluations on 100 deployment seeds:
+
+| run | checkpoint | frozen success | tuned success | success delta | final reward delta | max reward delta | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lr=3e-5, bc=1` | 204800 | 0.34 | 0.34 | 0.00 | -0.0008 | +0.0012 | 0.0037 |
+| `lr=3e-5, bc=1` | 614400 | 0.34 | 0.29 | -0.05 | -0.0346 | -0.0334 | 0.0066 |
+| `lr=3e-5, bc=1` | 1024000 | 0.34 | 0.29 | -0.05 | -0.0363 | -0.0347 | 0.0096 |
+| `lr=1e-5, bc=1` | 409600 | 0.34 | 0.38 | +0.04 | +0.0307 | +0.0315 | 0.0045 |
+| `lr=1e-5, bc=1` | 819200 | 0.34 | 0.38 | +0.04 | +0.0272 | +0.0250 | 0.0054 |
+
+Conclusion: the lower-LR R3 variant is the first positive closed-loop low-level
+RL result. It improves paired success by 4 percentage points and improves final
+and max reward, while keeping deterministic action drift near `0.005`. This
+still does not reach the original `+10` point full-hierarchy gate, but it is a
+meaningful positive signal and suggests direct last-layer tuning is more useful
+than residual R1 or residual-flow R2 for this setup.
