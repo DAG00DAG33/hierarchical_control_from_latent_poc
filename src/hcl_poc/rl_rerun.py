@@ -1283,3 +1283,181 @@ def audit_rl_rerun_vector_dataset(
     ensure_dir(out_path.parent)
     write_json(out_path, result)
     return out_path
+
+
+def _encode_rerun_frames(frozen: Any, frames: np.ndarray, device: torch.device) -> np.ndarray:
+    return frozen.goal_norm.transform(
+        frozen.encoder(
+            torch.from_numpy(frozen.representation_frame_norm.transform(frames))
+            .to(device)
+            .float()
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+
+
+@torch.inference_mode()
+def audit_rl_rerun_local_mode_a(
+    config: Config,
+    dataset_path: Path | None = None,
+    n_demo: int = 1000,
+    seed: int = 0,
+    episodes: int = 4,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import _load_frozen
+
+    path = dataset_path or _vector_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if episodes <= 0:
+        raise ValueError("episodes must be positive")
+
+    device = default_device()
+    rng = np.random.default_rng(seed)
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    horizon = int(frozen.horizon_steps)
+    if horizon != 10:
+        raise ValueError(f"Expected 10-step local horizon, got {horizon}")
+    dino = _phase4_dino_from_config(config, device)
+
+    with h5py.File(path, "r") as h5:
+        meta = h5["meta"].attrs
+        num_envs = int(meta["num_envs"])
+        max_steps = int(meta["max_steps"])
+        batch_keys = sorted(key for key in h5.keys() if key.startswith("batch_"))
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+
+    initial_distances: list[np.ndarray] = []
+    final_distances: list[np.ndarray] = []
+    terminal_rewards: list[np.ndarray] = []
+    progress_rewards: list[np.ndarray] = []
+    saturation_rates: list[float] = []
+    task_success_once = np.zeros((episodes, num_envs), dtype=np.bool_)
+    chosen_batches: list[str] = []
+    chosen_timesteps: list[int] = []
+
+    try:
+        with h5py.File(path, "r") as h5:
+            for episode in trange(episodes, desc="audit local Mode-A"):
+                key = str(rng.choice(batch_keys))
+                group = h5[key]
+                t = int(rng.integers(0, max_steps - horizon + 1))
+                obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
+                for step in range(t):
+                    action = torch.from_numpy(
+                        np.asarray(group["executed_actions"][step], dtype=np.float32)
+                    ).to(device)
+                    obs, _reward, _terminated, _truncated, _info = env.step(action)
+                goal_frame = np.concatenate(
+                    [
+                        np.asarray(group["dino"][t + horizon], dtype=np.float32),
+                        np.asarray(group["proprio"][t + horizon], dtype=np.float32),
+                    ],
+                    axis=-1,
+                )
+                goal_z = _encode_rerun_frames(frozen, goal_frame, device)
+                previous = frozen.action_norm.transform(
+                    np.asarray(group["previous_executed_actions"][t], dtype=np.float32)
+                )
+                episode_initial_distance: np.ndarray | None = None
+                total_progress = np.zeros(num_envs, dtype=np.float32)
+                saturation_count = 0
+                for local_step in range(horizon):
+                    frames = _phase4_frame_inputs(
+                        obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    current_z = _encode_rerun_frames(frozen, frames, device)
+                    distance = np.mean(np.square(current_z - goal_z), axis=-1).astype(np.float32)
+                    if episode_initial_distance is None:
+                        episode_initial_distance = distance.copy()
+                    remaining = np.full(
+                        (num_envs, 1),
+                        (horizon - local_step) / horizon,
+                        dtype=np.float32,
+                    )
+                    condition = _low_condition_array(
+                        frozen.frame_norm.transform(frames),
+                        current_z,
+                        goal_z,
+                        previous,
+                        remaining,
+                        frozen.conditioning,
+                    )
+                    normalized_action = frozen.low_model(
+                        torch.from_numpy(condition).to(device).float()
+                    )
+                    raw_action = frozen.action_norm.inverse(
+                        normalized_action.cpu().numpy().astype(np.float32)
+                    )
+                    unclipped = torch.from_numpy(raw_action).to(device).float()
+                    action = torch.clamp(unclipped, action_low, action_high)
+                    saturation_count += int(torch.any(unclipped != action, dim=-1).sum().cpu())
+                    obs, _reward, _terminated, _truncated, info = env.step(action)
+                    next_frames = _phase4_frame_inputs(
+                        obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    next_z = _encode_rerun_frames(frozen, next_frames, device)
+                    next_distance = np.mean(
+                        np.square(next_z - goal_z), axis=-1
+                    ).astype(np.float32)
+                    total_progress += distance - next_distance
+                    previous = frozen.action_norm.transform(action.cpu().numpy())
+                    task_success_once[episode] |= (
+                        _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_)))
+                        .reshape(-1)
+                        .astype(np.bool_)
+                    )
+                    if local_step == horizon - 1:
+                        final_distances.append(next_distance)
+                        terminal_rewards.append(-next_distance)
+                if episode_initial_distance is None:
+                    raise RuntimeError("Local Mode-A audit did not execute any steps")
+                initial_distances.append(episode_initial_distance)
+                progress_rewards.append(total_progress)
+                saturation_rates.append(saturation_count / float(num_envs * horizon))
+                chosen_batches.append(key)
+                chosen_timesteps.append(t)
+    finally:
+        env.close()
+
+    initial = np.concatenate(initial_distances)
+    final = np.concatenate(final_distances)
+    progress = np.concatenate(progress_rewards)
+    terminal = np.concatenate(terminal_rewards)
+    result = {
+        "dataset": str(path),
+        "n_demo": n_demo,
+        "seed": seed,
+        "episodes": episodes,
+        "num_envs": num_envs,
+        "sampled_local_episodes": int(episodes * num_envs),
+        "horizon": horizon,
+        "chosen_batches": chosen_batches,
+        "chosen_timestep_min": int(min(chosen_timesteps)),
+        "chosen_timestep_max": int(max(chosen_timesteps)),
+        "initial_distance_mean": float(np.mean(initial)),
+        "initial_distance_median": float(np.median(initial)),
+        "final_distance_mean": float(np.mean(final)),
+        "final_distance_median": float(np.median(final)),
+        "distance_reduction_mean": float(np.mean(initial - final)),
+        "distance_reduction_median": float(np.median(initial - final)),
+        "distance_reduction_fraction": float(np.mean(final < initial)),
+        "progress_reward_mean": float(np.mean(progress)),
+        "terminal_reward_mean": float(np.mean(terminal)),
+        "action_saturation_rate": float(np.mean(saturation_rates)),
+        "task_success_once_fraction": float(np.mean(task_success_once)),
+        "gate_pass": bool(np.mean(final < initial) > 0.5),
+    }
+    out_path = output_path or (_state_audit_result_dir(config) / "local_mode_a_audit.json")
+    ensure_dir(out_path.parent)
+    write_json(out_path, result)
+    return out_path

@@ -625,3 +625,44 @@ found in RR-13. The `512 x 60` corpus is exact for current state and local
 Mode-A future goal replay at `t+10`, matching the first serious parallelism
 setting from the throughput gate. The next implementation step is to build the
 Mode-A local PPO environment on top of this vector batch reset rule.
+
+## 2026-06-23 - RR-15: Local Mode-A frozen-policy audit
+
+Implemented:
+
+```text
+hcl-poc rl-rerun local-mode-a-audit
+```
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml local-mode-a-audit --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --n-demo 1000 --seed 0 --episodes 2 --output results/rl_rerun/local_mode_a_audit_n512_b1_seed0.json
+```
+
+Tracked outputs:
+
+```text
+rl_rerun_local_mode_a_audit.md
+rl_rerun_local_mode_a_audit_n512_b1_seed0.json
+```
+
+Result:
+
+| metric | value |
+| --- | ---: |
+| sampled local episodes | 1024 |
+| horizon | 10 |
+| initial latent distance mean | 1.351 |
+| final latent distance mean | 1.082 |
+| mean distance reduction | 0.270 |
+| median distance reduction | 0.247 |
+| fraction with reduced distance | 0.746 |
+| action saturation rate | 0.008 |
+| task success diagnostic fraction | 0.452 |
+
+Interpretation: the exact vector local reset environment is usable and the
+frozen supervised low-level policy usually moves toward the reachable Mode-A
+goal. This establishes the local baseline for R1 residual PPO. The R1 reward
+should use the same clean latent progress and terminal distance terms, not
+ManiSkill task reward or task-progress shaping.

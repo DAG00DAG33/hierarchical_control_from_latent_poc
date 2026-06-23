@@ -111,6 +111,7 @@ from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.rl_rerun import (
     audit_rl_rerun_state_dataset,
     audit_rl_rerun_vector_dataset,
+    audit_rl_rerun_local_mode_a,
     collect_rl_rerun_state_dataset,
     collect_rl_rerun_vector_dataset,
     ensure_rl_rerun_action_aliases,
@@ -266,6 +267,17 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 batches=args.batches,
                 seed=args.seed,
                 horizon=args.horizon,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "local-mode-a-audit":
+        console.print(
+            audit_rl_rerun_local_mode_a(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                episodes=args.episodes,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -1331,6 +1343,13 @@ def build_parser() -> argparse.ArgumentParser:
     audit_vector.add_argument("--horizon", type=int, default=10)
     audit_vector.add_argument("--output")
     audit_vector.set_defaults(func=rl_rerun_cmd)
+    local_mode_a = rl_rerun_sub.add_parser("local-mode-a-audit")
+    local_mode_a.add_argument("--dataset")
+    local_mode_a.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
+    local_mode_a.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    local_mode_a.add_argument("--episodes", type=int, default=4)
+    local_mode_a.add_argument("--output")
+    local_mode_a.set_defaults(func=rl_rerun_cmd)
     aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
     aliases.add_argument("--dataset")
     aliases.set_defaults(func=rl_rerun_cmd)
