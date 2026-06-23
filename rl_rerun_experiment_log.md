@@ -1126,3 +1126,83 @@ measures the frozen zero-noise flow base. The flow base is locally worse than
 the deterministic low-level before serious residual tuning. Next run R2 on the
 4096-stream corpus with the same `4096 x 10` batch size used for the serious R1
 run.
+
+## 2026-06-23 - RR-29: Serious N=500 R2 residual-flow PPO
+
+Run:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r2 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 \
+  --run-name aligned10_n4096_lr3e4_alpha025_nopenalty_1m \
+  --steps 1024000 --alpha 0.25 --terminal-weight 1.0 \
+  --residual-penalty-weight 0.0 --learning-rate 0.0003 \
+  --num-minibatches 8 --checkpoint-every-updates 5 \
+  --flow-checkpoint artifacts/rl_rerun/local_r2/n500/seed0/low_flow_base/low_flow.pt --force
+```
+
+Configuration:
+
+| item | value |
+| --- | ---: |
+| environments | 4096 |
+| rollout horizon | 10 |
+| samples/update | 40960 |
+| minibatches | 8 |
+| minibatch size | 5120 |
+| total transitions | 1,024,000 |
+| base policy | zero-noise action flow |
+| flow steps | 24 |
+
+Training diagnostics:
+
+| step | train mean distance | train terminal distance | residual norm | saturation |
+| ---: | ---: | ---: | ---: | ---: |
+| 40,960 | 1.9320 | 1.0915 | 0.0398 | 0.2088 |
+| 860,160 | 0.9323 | 0.6604 | 0.0419 | 0.0121 |
+| 901,120 | 0.9891 | 0.7193 | 0.0421 | 0.0240 |
+| 942,080 | 1.0611 | 0.7359 | 0.0421 | 0.0177 |
+| 983,040 | 0.9884 | 0.7239 | 0.0419 | 0.0208 |
+| 1,024,000 | 1.0404 | 0.7370 | 0.0418 | 0.0170 |
+
+Held-out 512-env local checkpoint selection:
+
+| checkpoint | final distance | mean reduction | reduction fraction | residual norm | saturation |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| flow base smoke-like | 0.6607 | 0.4659 | 0.7949 | 0.0056 | 0.0150 |
+| 204800 | 0.6408 | 0.4858 | 0.8145 | 0.0099 | 0.0150 |
+| 409600 | 0.6435 | 0.4831 | 0.8086 | 0.0139 | 0.0135 |
+| 614400 | 0.6444 | 0.4822 | 0.8262 | 0.0183 | 0.0127 |
+| 819200 | 0.6377 | 0.4890 | 0.8340 | 0.0189 | 0.0127 |
+| 1024000 | 0.6267 | 0.4999 | 0.8359 | 0.0207 | 0.0129 |
+
+The best R2 local checkpoint is the final checkpoint. It improves the held-out
+flow-base local final distance by `0.0340` absolute (`5.15%`) and improves the
+reduction fraction by `4.10` percentage points. However, it remains worse than
+the deterministic frozen low-level in final latent distance (`0.6267` versus
+`0.6073`), though the reduction fraction is slightly higher (`0.8359` versus
+`0.8301`).
+
+Closed-loop paired evaluation for the best R2 checkpoint on 100 deployment
+seeds:
+
+| policy | success | final reward | max reward | saturation |
+| --- | ---: | ---: | ---: | ---: |
+| frozen flow-base low level | 0.28 | 0.4438 | 0.4783 | 0.0427 |
+| R2 residual flow low level | 0.23 | 0.3919 | 0.4357 | 0.0439 |
+
+R2 closed-loop deltas:
+
+| metric | delta |
+| --- | ---: |
+| success | -0.05 |
+| final reward | -0.0519 |
+| max reward | -0.0426 |
+
+Conclusion: R2 successfully improves local latent reaching relative to its weak
+flow base, but the improvement does not transfer to full deployment. The flow
+base itself is worse than the deterministic low-level (`28%` versus the R1
+deterministic frozen baseline of `34%` on the same deployment seed range), and
+the residual-tuned flow policy further degrades closed-loop success. R2 does
+not pass the local or closed-loop gates.
