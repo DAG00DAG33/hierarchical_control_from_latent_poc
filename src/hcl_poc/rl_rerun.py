@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import csv
-import subprocess
 import copy
+import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,97 @@ def _vector_dataset_path(config: Config) -> Path:
         / "rl_rerun"
         / "pusht_vector_state_demos.h5"
     )
+
+
+def create_rl_rerun_local_eval_manifest(
+    dataset_path: Path,
+    output_path: Path,
+    episodes: int,
+    seed: int,
+    horizon: int = 10,
+) -> Path:
+    if episodes <= 0:
+        raise ValueError("episodes must be positive")
+    with h5py.File(dataset_path, "r") as h5:
+        max_steps = int(h5["meta"].attrs["max_steps"])
+        num_envs = int(h5["meta"].attrs["num_envs"])
+        batch_keys = sorted(key for key in h5.keys() if key.startswith("batch_"))
+        if not batch_keys:
+            raise ValueError(f"No vector batches found in {dataset_path}")
+        rng = np.random.default_rng(seed)
+        selected_keys = rng.choice(
+            batch_keys,
+            size=episodes,
+            replace=episodes > len(batch_keys),
+        )
+        entries = []
+        for key in selected_keys:
+            batch_key = str(key)
+            entries.append(
+                {
+                    "batch": batch_key,
+                    "batch_seed": int(h5[batch_key].attrs["batch_seed"]),
+                    "timestep": int(rng.integers(0, max_steps - horizon + 1)),
+                }
+            )
+    manifest = {
+        "dataset": str(dataset_path),
+        "num_envs": num_envs,
+        "horizon": horizon,
+        "seed": seed,
+        "sampled_local_episodes": episodes * num_envs,
+        "entries": entries,
+    }
+    ensure_dir(output_path.parent)
+    write_json(output_path, manifest)
+    return output_path
+
+
+def _local_eval_entries(
+    dataset_path: Path,
+    batch_keys: list[str],
+    max_steps: int,
+    episodes: int,
+    seed: int,
+    horizon: int,
+    manifest_path: Path | None,
+) -> list[dict[str, Any]]:
+    if manifest_path is None:
+        rng = np.random.default_rng(seed)
+        selected_keys = rng.choice(
+            batch_keys,
+            size=episodes,
+            replace=episodes > len(batch_keys),
+        )
+        return [
+            {
+                "batch": str(key),
+                "timestep": int(rng.integers(0, max_steps - horizon + 1)),
+            }
+            for key in selected_keys
+        ]
+
+    manifest = json.loads(manifest_path.read_text())
+    if Path(manifest["dataset"]).resolve() != dataset_path.resolve():
+        raise ValueError(
+            f"Manifest dataset {manifest['dataset']} does not match {dataset_path}"
+        )
+    if int(manifest["horizon"]) != horizon:
+        raise ValueError(
+            f"Manifest horizon {manifest['horizon']} does not match {horizon}"
+        )
+    entries = list(manifest["entries"])
+    if episodes != len(entries):
+        raise ValueError(
+            f"Requested {episodes} episodes but manifest contains {len(entries)}"
+        )
+    for entry in entries:
+        if entry["batch"] not in batch_keys:
+            raise ValueError(f"Unknown manifest batch {entry['batch']}")
+        timestep = int(entry["timestep"])
+        if not 0 <= timestep <= max_steps - horizon:
+            raise ValueError(f"Invalid manifest timestep {timestep}")
+    return entries
 
 
 def _state_audit_result_dir(config: Config) -> Path:
@@ -1315,6 +1407,7 @@ def audit_rl_rerun_local_mode_a(
     n_demo: int = 1000,
     seed: int = 0,
     episodes: int = 4,
+    manifest_path: Path | None = None,
     output_path: Path | None = None,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
@@ -1328,7 +1421,6 @@ def audit_rl_rerun_local_mode_a(
         raise ValueError("episodes must be positive")
 
     device = default_device()
-    rng = np.random.default_rng(seed)
     rerun_config = _rerun_base_config(config)
     frozen = _load_frozen(rerun_config, n_demo, seed, device)
     horizon = int(frozen.horizon_steps)
@@ -1341,6 +1433,15 @@ def audit_rl_rerun_local_mode_a(
         num_envs = int(meta["num_envs"])
         max_steps = int(meta["max_steps"])
         batch_keys = sorted(key for key in h5.keys() if key.startswith("batch_"))
+    evaluation_entries = _local_eval_entries(
+        path,
+        batch_keys,
+        max_steps,
+        episodes,
+        seed,
+        horizon,
+        manifest_path,
+    )
     env = _make_benchmark_env(config, num_envs, "rgb+state")
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
@@ -1353,18 +1454,13 @@ def audit_rl_rerun_local_mode_a(
     task_success_once = np.zeros((episodes, num_envs), dtype=np.bool_)
     chosen_batches: list[str] = []
     chosen_timesteps: list[int] = []
-    evaluation_keys = rng.choice(
-        batch_keys,
-        size=episodes,
-        replace=episodes > len(batch_keys),
-    )
-
     try:
         with h5py.File(path, "r") as h5:
             for episode in trange(episodes, desc="audit local Mode-A"):
-                key = str(evaluation_keys[episode])
+                entry = evaluation_entries[episode]
+                key = str(entry["batch"])
                 group = h5[key]
-                t = int(rng.integers(0, max_steps - horizon + 1))
+                t = int(entry["timestep"])
                 obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
                 for step in range(t):
                     action = torch.from_numpy(
@@ -1451,11 +1547,14 @@ def audit_rl_rerun_local_mode_a(
         "dataset": str(path),
         "n_demo": n_demo,
         "seed": seed,
+        "evaluation_manifest": str(manifest_path) if manifest_path else None,
+        "evaluation_entries": evaluation_entries,
         "episodes": episodes,
         "num_envs": num_envs,
         "sampled_local_episodes": int(episodes * num_envs),
         "horizon": horizon,
         "chosen_batches": chosen_batches,
+        "chosen_timesteps": chosen_timesteps,
         "chosen_timestep_min": int(min(chosen_timesteps)),
         "chosen_timestep_max": int(max(chosen_timesteps)),
         "initial_distance_mean": float(np.mean(initial)),
@@ -1862,6 +1961,7 @@ def evaluate_rl_rerun_local_r1(
     n_demo: int = 1000,
     seed: int = 0,
     episodes: int = 4,
+    manifest_path: Path | None = None,
     output_path: Path | None = None,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
@@ -1879,7 +1979,6 @@ def evaluate_rl_rerun_local_r1(
     device = default_device()
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     recipe = checkpoint["recipe"]
-    rng = np.random.default_rng(seed)
     rerun_config = _rerun_base_config(config)
     frozen = _load_frozen(rerun_config, n_demo, seed, device)
     horizon = int(frozen.horizon_steps)
@@ -1900,6 +1999,15 @@ def evaluate_rl_rerun_local_r1(
         num_envs = int(meta["num_envs"])
         max_steps = int(meta["max_steps"])
         batch_keys = sorted(key for key in h5.keys() if key.startswith("batch_"))
+    evaluation_entries = _local_eval_entries(
+        path,
+        batch_keys,
+        max_steps,
+        episodes,
+        seed,
+        horizon,
+        manifest_path,
+    )
     env = _make_benchmark_env(config, num_envs, "rgb+state")
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
@@ -1910,17 +2018,13 @@ def evaluate_rl_rerun_local_r1(
     saturation_rates: list[float] = []
     chosen_batches: list[str] = []
     chosen_timesteps: list[int] = []
-    evaluation_keys = rng.choice(
-        batch_keys,
-        size=episodes,
-        replace=episodes > len(batch_keys),
-    )
     try:
         with h5py.File(path, "r") as h5:
             for episode_index in trange(episodes, desc="eval local R1"):
-                key = str(evaluation_keys[episode_index])
+                entry = evaluation_entries[episode_index]
+                key = str(entry["batch"])
                 group = h5[key]
-                t = int(rng.integers(0, max_steps - horizon + 1))
+                t = int(entry["timestep"])
                 obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
                 for replay_step in range(t):
                     replay_action = torch.from_numpy(
@@ -2004,11 +2108,14 @@ def evaluate_rl_rerun_local_r1(
         "dataset": str(path),
         "n_demo": n_demo,
         "seed": seed,
+        "evaluation_manifest": str(manifest_path) if manifest_path else None,
+        "evaluation_entries": evaluation_entries,
         "episodes": episodes,
         "num_envs": num_envs,
         "sampled_local_episodes": int(episodes * num_envs),
         "horizon": horizon,
         "chosen_batches": chosen_batches,
+        "chosen_timesteps": chosen_timesteps,
         "chosen_timestep_min": int(min(chosen_timesteps)),
         "chosen_timestep_max": int(max(chosen_timesteps)),
         "initial_distance_mean": float(np.mean(initial)),

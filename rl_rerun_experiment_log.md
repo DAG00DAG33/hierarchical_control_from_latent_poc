@@ -870,3 +870,59 @@ fraction by `0.0052`. Its deterministic mean residual norm is `0.00868`.
 This is the first positive paired R1 result, but the margin is small and the
 same two vector batches supplied training resets. Validate on a separately
 collected vector seed before extending the run to one million transitions.
+
+## 2026-06-23 - RR-23: Held-out local evaluation manifest
+
+Added `create-local-eval-manifest` and `--manifest` support to both frozen and
+R1 local evaluators. A manifest records:
+
+```text
+dataset
+vector batch
+batch reset seed
+local start timestep
+future-goal horizon
+number of vector environments
+```
+
+All paired policy comparisons must now use the same manifest. This prevents
+absolute baseline metrics from changing merely because the evaluators sampled
+different start timesteps.
+
+## 2026-06-23 - RR-24: Independent 4096-environment validation
+
+Collected a held-out vector corpus from a new reset seed:
+
+```text
+dataset: data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5
+batch seed: 9900000
+environments: 4096
+stored steps: 60
+size: 5.8 GB
+```
+
+Exact replay passed with zero simulator-state, observation, DINO/proprio-frame,
+previous-action, and 10-step goal error.
+
+Paired manifest:
+
+```text
+results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json
+batch: batch_000000
+timestep: 34
+local episodes: 4096
+```
+
+Held-out result:
+
+| policy | final distance | mean reduction | reduction fraction | saturation |
+| --- | ---: | ---: | ---: | ---: |
+| frozen BC low level | 1.08587 | 0.36427 | 0.79102 | 0.01130 |
+| aligned R1 residual | 1.08302 | 0.36712 | 0.79468 | 0.01050 |
+
+The R1 residual generalizes a small positive gain: final distance improves by
+`0.00285` and distance-improvement frequency by `0.00366`. This is evidence
+that the result is not only memorization of the two training vector seeds, but
+it is far below the Phase E target of 25% lower final distance and 15
+percentage points higher goal reach. Treat this checkpoint as a successful
+correctness/smoke result, not as a passed R1 local-goal gate.

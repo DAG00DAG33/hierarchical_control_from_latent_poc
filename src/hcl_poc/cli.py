@@ -114,6 +114,7 @@ from hcl_poc.rl_rerun import (
     audit_rl_rerun_local_mode_a,
     collect_rl_rerun_state_dataset,
     collect_rl_rerun_vector_dataset,
+    create_rl_rerun_local_eval_manifest,
     ensure_rl_rerun_action_aliases,
     evaluate_rl_rerun_local_r1,
     run_rl_rerun_algorithm_audit,
@@ -280,7 +281,18 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 n_demo=args.n_demo,
                 seed=args.seed,
                 episodes=args.episodes,
+                manifest_path=Path(args.manifest) if args.manifest else None,
                 output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "create-local-eval-manifest":
+        console.print(
+            create_rl_rerun_local_eval_manifest(
+                dataset_path=Path(args.dataset),
+                output_path=Path(args.output),
+                episodes=args.episodes,
+                seed=args.seed,
+                horizon=args.horizon,
             )
         )
     elif args.rl_rerun_command == "train-local-r1":
@@ -307,6 +319,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 n_demo=args.n_demo,
                 seed=args.seed,
                 episodes=args.episodes,
+                manifest_path=Path(args.manifest) if args.manifest else None,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -1377,8 +1390,16 @@ def build_parser() -> argparse.ArgumentParser:
     local_mode_a.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
     local_mode_a.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
     local_mode_a.add_argument("--episodes", type=int, default=4)
+    local_mode_a.add_argument("--manifest")
     local_mode_a.add_argument("--output")
     local_mode_a.set_defaults(func=rl_rerun_cmd)
+    local_manifest = rl_rerun_sub.add_parser("create-local-eval-manifest")
+    local_manifest.add_argument("--dataset", required=True)
+    local_manifest.add_argument("--output", required=True)
+    local_manifest.add_argument("--episodes", type=int, required=True)
+    local_manifest.add_argument("--seed", type=int, default=0)
+    local_manifest.add_argument("--horizon", type=int, default=10)
+    local_manifest.set_defaults(func=rl_rerun_cmd)
     train_local_r1 = rl_rerun_sub.add_parser("train-local-r1")
     train_local_r1.add_argument("--dataset")
     train_local_r1.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
@@ -1396,6 +1417,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_local_r1.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
     eval_local_r1.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
     eval_local_r1.add_argument("--episodes", type=int, default=4)
+    eval_local_r1.add_argument("--manifest")
     eval_local_r1.add_argument("--output")
     eval_local_r1.set_defaults(func=rl_rerun_cmd)
     aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
