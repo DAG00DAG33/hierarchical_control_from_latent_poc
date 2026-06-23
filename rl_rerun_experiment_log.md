@@ -161,3 +161,33 @@ Result:
 Phase A gate decision: passed for exact reset-and-replay local resets. Direct
 arbitrary `set_state()` remains rejected for intermediate timesteps because it
 does not reproduce future contact dynamics.
+
+## 2026-06-23 - RR-04: Phase B supervised training wiring
+
+Implemented:
+
+```text
+hcl-poc rl-rerun ensure-action-aliases
+hcl-poc rl-rerun train-supervised
+```
+
+`ensure-action-aliases` adds an HDF5 hard link:
+
+```text
+actions -> executed_actions
+```
+
+for every episode, allowing the existing VAE-512 learned-interface loaders to
+read the regenerated state dataset without duplicating action arrays.
+
+`train-supervised` builds a rerun-specific config:
+
+```text
+prepared_path = data/rl_rerun/pusht_state_demos.h5
+artifact root = artifacts/rl_rerun/vae512_scaling/n<N>
+result root   = results/rl_rerun/vae512_scaling/n<N>
+```
+
+It then writes the nested train/validation manifest, trains the VAE-512
+representation and deterministic high/low hierarchy from scratch, and evaluates
+the frozen learned-goal hierarchy.

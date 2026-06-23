@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,18 @@ def _state_dataset_path(config: Config) -> Path:
 
 def _state_audit_result_dir(config: Config) -> Path:
     return ensure_dir(config.path_value("paths.incremental_results_dir").parent / "rl_rerun")
+
+
+def _rerun_base_config(config: Config, dataset_path: Path | None = None) -> Config:
+    raw = copy.deepcopy(config.raw)
+    raw["paths"]["incremental_artifact_dir"] = str(
+        config.path_value("paths.incremental_artifact_dir").parent / "rl_rerun"
+    )
+    raw["paths"]["incremental_results_dir"] = str(
+        config.path_value("paths.incremental_results_dir").parent / "rl_rerun"
+    )
+    raw["incremental"]["phase4"]["prepared_path"] = str(dataset_path or _state_dataset_path(config))
+    return Config(raw=raw, path=config.path)
 
 
 def _make_state_data_env(config: Config):
@@ -226,6 +239,7 @@ def collect_rl_rerun_state_dataset(
                 group.create_dataset(
                     "executed_actions", data=np.stack(executed_actions), compression="gzip"
                 )
+                group["actions"] = group["executed_actions"]
                 group.create_dataset(
                     "previous_executed_actions",
                     data=np.stack(previous_actions),
@@ -253,6 +267,28 @@ def collect_rl_rerun_state_dataset(
         raise RuntimeError(f"Collected only {successes}/{episodes} successful trajectories")
     tmp_path.replace(out_path)
     return out_path
+
+
+def ensure_rl_rerun_action_aliases(
+    config: Config,
+    dataset_path: Path | None = None,
+) -> Path:
+    path = dataset_path or _state_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    created = 0
+    with h5py.File(path, "r+") as h5:
+        for key in sorted(k for k in h5.keys() if k.startswith("episode_")):
+            group = h5[key]
+            if "actions" in group:
+                continue
+            if "executed_actions" not in group:
+                raise KeyError(f"{key} has neither actions nor executed_actions")
+            group["actions"] = group["executed_actions"]
+            created += 1
+        h5["meta"].attrs["actions_alias_created"] = True
+        h5["meta"].attrs["actions_alias_count"] = created
+    return path
 
 
 def audit_rl_rerun_state_dataset(
@@ -343,3 +379,44 @@ def audit_rl_rerun_state_dataset(
     output = _state_audit_result_dir(config) / "state_load_audit.json"
     write_json(output, result)
     return output
+
+
+def train_rl_rerun_supervised_point(
+    config: Config,
+    n_demo: int,
+    seed: int,
+    dataset_path: Path | None = None,
+    eval_episodes: int = 100,
+    force: bool = False,
+) -> dict[str, str]:
+    from hcl_poc.learned_interface import (
+        evaluate_learned_interface_hierarchy,
+        train_learned_interface_hierarchy,
+        train_learned_interface_representation,
+    )
+    from hcl_poc.vae_scaling import VAE_CANDIDATE, vae_scaling_config, write_vae_scaling_manifest
+
+    ensure_rl_rerun_action_aliases(config, dataset_path)
+    base = _rerun_base_config(config, dataset_path)
+    point = vae_scaling_config(base, n_demo)
+    manifest = write_vae_scaling_manifest(base, n_demo, force=force)
+    representation = train_learned_interface_representation(
+        point, VAE_CANDIDATE, seed=seed, force=force
+    )
+    hierarchy = train_learned_interface_hierarchy(
+        point, VAE_CANDIDATE, seed=seed, force=force
+    )
+    evaluation = evaluate_learned_interface_hierarchy(
+        point,
+        VAE_CANDIDATE,
+        "learned",
+        seed=seed,
+        episodes=eval_episodes,
+        force=force,
+    )
+    return {
+        "manifest": str(manifest),
+        "representation": str(representation),
+        "hierarchy": str(hierarchy),
+        "evaluation": str(evaluation),
+    }

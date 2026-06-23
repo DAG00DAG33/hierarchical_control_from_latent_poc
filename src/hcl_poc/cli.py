@@ -111,6 +111,8 @@ from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.rl_rerun import (
     audit_rl_rerun_state_dataset,
     collect_rl_rerun_state_dataset,
+    ensure_rl_rerun_action_aliases,
+    train_rl_rerun_supervised_point,
 )
 from hcl_poc.train import (
     diagnose_hierarchy,
@@ -235,6 +237,24 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 seed=args.seed,
                 recompute_dino=args.recompute_dino,
                 warm_start_replay=args.warm_start_replay,
+            )
+        )
+    elif args.rl_rerun_command == "ensure-action-aliases":
+        console.print(
+            ensure_rl_rerun_action_aliases(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+            )
+        )
+    elif args.rl_rerun_command == "train-supervised":
+        console.print(
+            train_rl_rerun_supervised_point(
+                config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                eval_episodes=args.eval_episodes,
+                force=args.force,
             )
         )
     else:
@@ -1227,6 +1247,16 @@ def build_parser() -> argparse.ArgumentParser:
     audit_state.add_argument("--recompute-dino", action="store_true")
     audit_state.add_argument("--warm-start-replay", action="store_true")
     audit_state.set_defaults(func=rl_rerun_cmd)
+    aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
+    aliases.add_argument("--dataset")
+    aliases.set_defaults(func=rl_rerun_cmd)
+    train_supervised = rl_rerun_sub.add_parser("train-supervised")
+    train_supervised.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    train_supervised.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
+    train_supervised.add_argument("--dataset")
+    train_supervised.add_argument("--eval-episodes", type=int, default=100)
+    train_supervised.add_argument("--force", action="store_true")
+    train_supervised.set_defaults(func=rl_rerun_cmd)
 
     p = sub.add_parser("rl")
     add_config_arg(p)
