@@ -523,3 +523,40 @@ cutoff are correct in the standalone audit. The zero-residual check must compare
 executed clipped actions, because the frozen BC policy can slightly exceed the
 action box before deployment clipping. The remaining Phase D implementation
 work is the exact reset-and-replay local RL environment itself.
+
+## 2026-06-23 - RR-13: Phase D local reset audit
+
+Implemented:
+
+```text
+hcl-poc rl-rerun local-reset-audit
+```
+
+Results:
+
+| audit | sampled resets | state max error | obs-state max error | frame MSE max | gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `num_envs=1` | 8 | 0.0 | 0.0 | 5.57e-6 | pass |
+| `num_envs=16` | 128 | 6.18 | 3.35 | 0.509 | fail |
+
+Detailed audit:
+
+```text
+rl_rerun_local_reset_audit.md
+rl_rerun_local_reset_audit_numenv1.json
+rl_rerun_local_reset_audit_vector16.json
+```
+
+Diagnosis: the successful teacher corpus was collected with `num_envs=1`.
+Reset-and-replay is exact in a new single-env CUDA simulator, but the stored
+single-env reset seeds do not reproduce the same initial states inside a
+multi-env CUDA simulator. The mismatch appears immediately after vector reset,
+before replay. Directly setting the stored initial physical states into the
+vector env gives immediate equality but replay still diverges, so hidden CUDA
+state is still missing.
+
+Decision: do not run high-throughput local PPO on the current single-env corpus.
+Regenerate a vector-consistent local reset corpus using the same vectorized CUDA
+reset regime intended for RL. The dataset must store vector batch seed,
+`vector_num_envs`, stream index, actions, and features so exact local resets can
+reset a whole vector batch and replay each stream to a shared timestep.

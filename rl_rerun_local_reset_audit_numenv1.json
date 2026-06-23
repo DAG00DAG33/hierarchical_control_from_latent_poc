@@ -1,0 +1,19 @@
+{
+  "batches": 8,
+  "dataset": "data/rl_rerun/pusht_state_demos.h5",
+  "frame_mse_max": 5.572069767367793e-06,
+  "frame_mse_mean": 3.872072028343609e-06,
+  "gate_pass": true,
+  "local_episode_length": 10,
+  "n_demo": 1000,
+  "num_envs": 1,
+  "obs_state_max_abs_error": 0.0,
+  "previous_action_max_abs_error": 0.0,
+  "sampled_resets": 8,
+  "seed": 0,
+  "selected_episode_length_max": 99,
+  "selected_episode_length_min": 23,
+  "selected_timestep_max": 87,
+  "selected_timestep_min": 6,
+  "state_max_abs_error": 0.0
+}

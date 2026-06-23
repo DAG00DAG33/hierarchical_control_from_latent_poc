@@ -113,6 +113,7 @@ from hcl_poc.rl_rerun import (
     collect_rl_rerun_state_dataset,
     ensure_rl_rerun_action_aliases,
     run_rl_rerun_algorithm_audit,
+    run_rl_rerun_local_reset_audit,
     run_rl_rerun_throughput_benchmark,
     train_rl_rerun_supervised_point,
 )
@@ -281,6 +282,18 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 dataset_path=Path(args.dataset) if args.dataset else None,
                 n_demo=args.n_demo,
                 seed=args.seed,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "local-reset-audit":
+        console.print(
+            run_rl_rerun_local_reset_audit(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                num_envs=args.num_envs,
+                batches=args.batches,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -1305,6 +1318,14 @@ def build_parser() -> argparse.ArgumentParser:
     algorithm_audit.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
     algorithm_audit.add_argument("--output")
     algorithm_audit.set_defaults(func=rl_rerun_cmd)
+    local_reset_audit = rl_rerun_sub.add_parser("local-reset-audit")
+    local_reset_audit.add_argument("--dataset")
+    local_reset_audit.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
+    local_reset_audit.add_argument("--seed", type=int, default=0)
+    local_reset_audit.add_argument("--num-envs", type=int, default=16)
+    local_reset_audit.add_argument("--batches", type=int, default=8)
+    local_reset_audit.add_argument("--output")
+    local_reset_audit.set_defaults(func=rl_rerun_cmd)
 
     p = sub.add_parser("rl")
     add_config_arg(p)

@@ -822,3 +822,148 @@ def run_rl_rerun_algorithm_audit(
     ensure_dir(out_path.parent)
     write_json(out_path, result)
     return out_path
+
+
+@torch.inference_mode()
+def run_rl_rerun_local_reset_audit(
+    config: Config,
+    dataset_path: Path | None = None,
+    n_demo: int = 1000,
+    seed: int = 0,
+    num_envs: int = 16,
+    batches: int = 8,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+
+    path = dataset_path or _state_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if num_envs <= 0 or batches <= 0:
+        raise ValueError("num_envs and batches must be positive")
+
+    horizon = 10
+    rng = np.random.default_rng(seed)
+    device = default_device()
+    dino = _phase4_dino_from_config(config, device)
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+    max_state_errors: list[float] = []
+    max_obs_state_errors: list[float] = []
+    max_frame_errors: list[float] = []
+    max_previous_action_errors: list[float] = []
+    selected_timesteps: list[int] = []
+    selected_lengths: list[int] = []
+    try:
+        with h5py.File(path, "r") as h5:
+            episode_keys = sorted(key for key in h5.keys() if key.startswith("episode_"))[:n_demo]
+            lengths = {
+                key: int(h5[key].attrs["length"])
+                for key in episode_keys
+                if int(h5[key].attrs["length"]) > horizon
+            }
+            if not lengths:
+                raise ValueError("No train episode is long enough for local reset audit")
+            max_t = max(length - horizon - 1 for length in lengths.values())
+            candidates_by_t = {
+                t: [key for key, length in lengths.items() if length > t + horizon]
+                for t in range(max_t + 1)
+            }
+            for _batch in range(batches):
+                valid_t = [t for t, keys in candidates_by_t.items() if len(keys) >= num_envs]
+                if not valid_t:
+                    raise ValueError(
+                        f"No timestep has at least {num_envs} eligible trajectories"
+                    )
+                t = int(rng.choice(valid_t))
+                keys = rng.choice(candidates_by_t[t], size=num_envs, replace=False)
+                reset_seeds = [int(h5[key].attrs["reset_seed"]) for key in keys]
+                obs, _info = env.reset(seed=reset_seeds)
+                for step in range(t):
+                    replay_actions = np.stack(
+                        [np.asarray(h5[key]["executed_actions"][step], dtype=np.float32) for key in keys]
+                    )
+                    obs, _reward, _terminated, _truncated, _info = env.step(
+                        torch.from_numpy(replay_actions).to(device).float()
+                    )
+                actual_states = _to_numpy(env.unwrapped.get_state()).astype(np.float32)
+                actual_obs_state = _to_numpy(obs["state"]).astype(np.float32)
+                if actual_states.ndim == 1:
+                    actual_states = actual_states[None]
+                if actual_obs_state.ndim == 1:
+                    actual_obs_state = actual_obs_state[None]
+                expected_states = np.stack(
+                    [np.asarray(h5[key]["simulator_states"][t], dtype=np.float32) for key in keys]
+                )
+                expected_obs_state = np.stack(
+                    [np.asarray(h5[key]["observations_state"][t], dtype=np.float32) for key in keys]
+                )
+                expected_previous = np.stack(
+                    [
+                        np.asarray(h5[key]["previous_executed_actions"][t], dtype=np.float32)
+                        for key in keys
+                    ]
+                )
+                expected_frames = np.stack(
+                    [
+                        np.concatenate(
+                            [
+                                np.asarray(h5[key]["dino"][t], dtype=np.float32),
+                                np.asarray(h5[key]["proprio"][t], dtype=np.float32),
+                            ],
+                            axis=-1,
+                        )
+                        for key in keys
+                    ]
+                )
+                actual_frames = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                previous = np.stack(
+                    [
+                        np.zeros(3, dtype=np.float32)
+                        if t == 0
+                        else np.asarray(h5[key]["executed_actions"][t - 1], dtype=np.float32)
+                        for key in keys
+                    ]
+                )
+                max_state_errors.append(float(np.max(np.abs(actual_states - expected_states))))
+                max_obs_state_errors.append(
+                    float(np.max(np.abs(actual_obs_state - expected_obs_state)))
+                )
+                max_frame_errors.append(float(np.mean(np.square(actual_frames - expected_frames))))
+                max_previous_action_errors.append(
+                    float(np.max(np.abs(previous - expected_previous)))
+                )
+                selected_timesteps.append(t)
+                selected_lengths.extend(int(lengths[str(key)]) for key in keys)
+    finally:
+        env.close()
+
+    result = {
+        "dataset": str(path),
+        "n_demo": n_demo,
+        "seed": seed,
+        "num_envs": num_envs,
+        "batches": batches,
+        "local_episode_length": horizon,
+        "sampled_resets": int(num_envs * batches),
+        "state_max_abs_error": float(max(max_state_errors)),
+        "obs_state_max_abs_error": float(max(max_obs_state_errors)),
+        "frame_mse_max": float(max(max_frame_errors)),
+        "frame_mse_mean": float(np.mean(max_frame_errors)),
+        "previous_action_max_abs_error": float(max(max_previous_action_errors)),
+        "selected_timestep_min": int(min(selected_timesteps)),
+        "selected_timestep_max": int(max(selected_timesteps)),
+        "selected_episode_length_min": int(min(selected_lengths)),
+        "selected_episode_length_max": int(max(selected_lengths)),
+        "gate_pass": bool(
+            max(max_state_errors) == 0.0
+            and max(max_obs_state_errors) == 0.0
+            and max(max_previous_action_errors) == 0.0
+            and max(max_frame_errors) < 1e-4
+        ),
+    }
+    out_path = output_path or (_state_audit_result_dir(config) / "local_reset_audit.json")
+    ensure_dir(out_path.parent)
+    write_json(out_path, result)
+    return out_path
