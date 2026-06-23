@@ -1840,7 +1840,7 @@ def train_rl_rerun_local_r1(
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
-    from hcl_poc.low_level_rl import ResidualActorCritic, _load_frozen
+    from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
     from hcl_poc.utils import set_seed
 
     path = dataset_path or _vector_dataset_path(config)
@@ -2296,6 +2296,413 @@ def train_rl_rerun_local_r2(
     )
 
 
+def train_rl_rerun_local_r3(
+    config: Config,
+    dataset_path: Path | None = None,
+    n_demo: int = 500,
+    seed: int = 0,
+    run_name: str = "local_r3_direct_last_layer",
+    total_steps: int = 32_768,
+    bc_weight: float = 1.0,
+    terminal_weight: float = 1.0,
+    learning_rate: float | None = None,
+    num_minibatches: int | None = None,
+    checkpoint_every_updates: int = 5,
+    force: bool = False,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import DirectLowActorCritic, _load_frozen
+    from hcl_poc.utils import set_seed
+
+    path = dataset_path or _vector_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+    if checkpoint_every_updates <= 0:
+        raise ValueError("checkpoint_every_updates must be positive")
+
+    artifact = ensure_dir(
+        _rl_rerun_artifact_dir(config)
+        / "local_r3"
+        / f"n{n_demo}"
+        / f"seed{seed}"
+        / run_name
+    )
+    result_dir = ensure_dir(
+        _state_audit_result_dir(config)
+        / "local_r3"
+        / f"n{n_demo}"
+        / f"seed{seed}"
+        / run_name
+    )
+    latest = artifact / "latest.pt"
+    history_path = result_dir / "history.json"
+    if force:
+        latest.unlink(missing_ok=True)
+        history_path.unlink(missing_ok=True)
+
+    device = default_device()
+    set_seed(seed + 190_000)
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    horizon = int(frozen.horizon_steps)
+    if horizon != 10:
+        raise ValueError(f"Expected 10-step local horizon, got {horizon}")
+
+    with h5py.File(path, "r") as h5_meta:
+        meta = h5_meta["meta"].attrs
+        num_envs = int(meta["num_envs"])
+        max_steps = int(meta["max_steps"])
+        batch_keys = sorted(key for key in h5_meta.keys() if key.startswith("batch_"))
+    rollout_steps = horizon
+    batch_size = num_envs * rollout_steps
+    minibatches = int(
+        num_minibatches
+        if num_minibatches is not None
+        else config.get("low_level_rl.num_minibatches", 8)
+    )
+    if batch_size % minibatches:
+        raise ValueError("RL batch size must divide num_minibatches")
+    minibatch_size = batch_size // minibatches
+    if minibatch_size < 4096:
+        raise ValueError(
+            f"minibatch size {minibatch_size} is below the Phase D minimum of 4096"
+        )
+
+    dino = _phase4_dino_from_config(config, device)
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+    h5 = h5py.File(path, "r")
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    condition_dim = _local_condition_dim(frozen)
+    agent = DirectLowActorCritic(
+        frozen.low_model,
+        frozen.action_norm.mean,
+        frozen.action_norm.std,
+        condition_dim,
+        width=int(config.get("low_level_rl.residual_width", 256)),
+        depth=int(config.get("low_level_rl.residual_depth", 2)),
+        initial_logstd=float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
+    ).to(device)
+    trainable = [parameter for parameter in agent.parameters() if parameter.requires_grad]
+    resolved_learning_rate = float(
+        learning_rate
+        if learning_rate is not None
+        else config.get("low_level_rl.direct_learning_rate", 3e-5)
+    )
+    gamma = float(config.get("low_level_rl.gamma", 0.99))
+    gae_lambda = float(config.get("low_level_rl.gae_lambda", 0.95))
+    clip_coef = float(config.get("low_level_rl.clip_coef", 0.2))
+    ent_coef = float(config.get("low_level_rl.entropy_coef", 0.0))
+    value_coef = float(config.get("low_level_rl.value_coef", 1.0))
+    update_epochs = int(config.get("low_level_rl.update_epochs", 4))
+    max_grad_norm = float(config.get("low_level_rl.max_grad_norm", 1.0))
+    optimizer = torch.optim.Adam(trainable, lr=resolved_learning_rate, eps=1e-5)
+    recipe = {
+        "method": "r3_direct_last_layer_local_mode_a",
+        "dataset": str(path),
+        "n_demo": n_demo,
+        "seed": seed,
+        "run_name": run_name,
+        "family_dir": "local_r3",
+        "num_envs": num_envs,
+        "rollout_steps": rollout_steps,
+        "horizon": horizon,
+        "bc_weight": bc_weight,
+        "terminal_weight": terminal_weight,
+        "learning_rate": resolved_learning_rate,
+        "minibatches": minibatches,
+        "minibatch_size": minibatch_size,
+        "update_epochs": update_epochs,
+        "gamma": gamma,
+        "gae_lambda": gae_lambda,
+        "clip_coef": clip_coef,
+        "entropy_coef": ent_coef,
+        "value_coef": value_coef,
+        "max_grad_norm": max_grad_norm,
+        "actor_critic_width": int(config.get("low_level_rl.residual_width", 256)),
+        "actor_critic_depth": int(config.get("low_level_rl.residual_depth", 2)),
+        "initial_logstd": float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
+        "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
+        "reward": "latent_progress_minus_terminal_distance_plus_bc_regularization_in_loss",
+        "disallowed_training_signals": [
+            "mani_skill_reward",
+            "task_success",
+            "object_pose",
+            "task_progress",
+        ],
+    }
+    global_step = 0
+    history: list[dict[str, Any]] = []
+    if latest.exists() and not force:
+        checkpoint = torch.load(latest, map_location=device, weights_only=False)
+        if checkpoint["recipe"] != recipe:
+            raise ValueError(f"Existing run {run_name} has a different recipe")
+        agent.load_state_dict(checkpoint["agent"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        global_step = int(checkpoint["global_step"])
+        history = list(checkpoint["history"])
+    if global_step >= total_steps:
+        return latest
+
+    rng = np.random.default_rng(seed + 193_000)
+    current_obs: dict[str, Any]
+    current_frames: np.ndarray
+    current_z: np.ndarray
+    goal_z: np.ndarray
+    previous_action: np.ndarray
+    local_step = 0
+
+    @torch.inference_mode()
+    def reset_local_episode() -> None:
+        nonlocal current_obs, current_frames, current_z, goal_z, previous_action, local_step
+        group = h5[str(rng.choice(batch_keys))]
+        current_t = int(rng.integers(0, max_steps - horizon + 1))
+        current_obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
+        for replay_step in range(current_t):
+            replay_action = torch.from_numpy(
+                np.asarray(group["executed_actions"][replay_step], dtype=np.float32)
+            ).to(device)
+            current_obs, _reward, _terminated, _truncated, _info = env.step(replay_action)
+        current_frames = _phase4_frame_inputs(
+            current_obs, dino, int(config.get("dino.batch_size", 64))
+        )
+        current_z = _encode_rerun_frames(frozen, current_frames, device)
+        goal_frame = np.concatenate(
+            [
+                np.asarray(group["dino"][current_t + horizon], dtype=np.float32),
+                np.asarray(group["proprio"][current_t + horizon], dtype=np.float32),
+            ],
+            axis=-1,
+        )
+        goal_z = _encode_rerun_frames(frozen, goal_frame, device)
+        previous_action = frozen.action_norm.transform(
+            np.asarray(group["previous_executed_actions"][current_t], dtype=np.float32)
+        )
+        local_step = 0
+
+    @torch.inference_mode()
+    def condition_and_bc() -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
+        distance = np.mean(np.square(current_z - goal_z), axis=-1).astype(np.float32)
+        remaining = np.full(
+            (num_envs, 1),
+            max(horizon - local_step, 1) / horizon,
+            dtype=np.float32,
+        )
+        condition_np = _low_condition_array(
+            frozen.frame_norm.transform(current_frames),
+            current_z,
+            goal_z,
+            previous_action,
+            remaining,
+            frozen.conditioning,
+        )
+        condition = torch.from_numpy(condition_np).to(device).float()
+        normalized_base = frozen.low_model(condition)
+        base_action = torch.from_numpy(
+            frozen.action_norm.inverse(normalized_base.cpu().numpy().astype(np.float32))
+        ).to(device)
+        return condition, base_action, distance
+
+    @torch.inference_mode()
+    def local_step_env(action: torch.Tensor, previous_distance: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        nonlocal current_obs, current_frames, current_z, previous_action, local_step
+        next_obs, _env_reward, _terminated, _truncated, info = env.step(action)
+        next_frames = _phase4_frame_inputs(next_obs, dino, int(config.get("dino.batch_size", 64)))
+        next_z = _encode_rerun_frames(frozen, next_frames, device)
+        next_distance = np.mean(np.square(next_z - goal_z), axis=-1).astype(np.float32)
+        segment_end = local_step == horizon - 1
+        reward = previous_distance - next_distance
+        if segment_end:
+            reward -= terminal_weight * next_distance
+        current_obs = next_obs
+        current_frames = next_frames
+        current_z = next_z
+        previous_action = frozen.action_norm.transform(action.cpu().numpy().astype(np.float32))
+        local_step += 1
+        done = np.full(num_envs, segment_end, dtype=np.bool_)
+        metrics = {
+            "next_distance": next_distance,
+            "segment_end": segment_end,
+            "success": _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_)))
+            .reshape(-1)
+            .astype(np.bool_),
+        }
+        if segment_end:
+            reset_local_episode()
+        return reward.astype(np.float32), done, metrics
+
+    reset_local_episode()
+    condition_buf = torch.zeros((rollout_steps, num_envs, condition_dim), device=device)
+    raw_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
+    base_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
+    logprob_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    reward_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    done_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    value_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    next_done = torch.zeros(num_envs, device=device)
+    try:
+        with trange(global_step, total_steps, initial=global_step, total=total_steps, desc=run_name) as progress:
+            while global_step < total_steps:
+                distance_values: list[float] = []
+                terminal_distances: list[float] = []
+                action_delta_values: list[float] = []
+                reward_values: list[float] = []
+                saturation_count = 0
+                success_count = 0
+                agent.eval()
+                for step in range(rollout_steps):
+                    condition, base_action, distance = condition_and_bc()
+                    condition_buf[step] = condition
+                    base_action_buf[step] = base_action
+                    done_buf[step] = next_done
+                    with torch.no_grad():
+                        raw_action, logprob, _entropy, value = agent.get_action_and_value(condition)
+                    action = torch.clamp(raw_action, action_low, action_high)
+                    raw_action_buf[step] = raw_action
+                    logprob_buf[step] = logprob
+                    value_buf[step] = value
+                    reward, done, metrics = local_step_env(action, distance)
+                    reward_buf[step] = torch.from_numpy(reward).to(device)
+                    next_done = torch.from_numpy(done.astype(np.float32)).to(device)
+                    distance_values.extend(distance.tolist())
+                    reward_values.extend(reward.tolist())
+                    action_delta_values.extend(
+                        torch.linalg.vector_norm(action - base_action, dim=-1).cpu().tolist()
+                    )
+                    success_count += int(metrics["success"].sum())
+                    if metrics["segment_end"]:
+                        terminal_distances.extend(metrics["next_distance"].tolist())
+                    saturation_count += int(torch.any(raw_action != action, dim=-1).sum().cpu())
+                    global_step += num_envs
+                    progress.update(min(num_envs, total_steps - progress.n))
+                    if global_step >= total_steps and step == rollout_steps - 1:
+                        break
+
+                with torch.no_grad():
+                    next_condition, _base, _distance = condition_and_bc()
+                    next_value = agent.critic(next_condition).flatten()
+                    advantages = torch.zeros_like(reward_buf)
+                    last_gae = torch.zeros(num_envs, device=device)
+                    for step in reversed(range(rollout_steps)):
+                        if step == rollout_steps - 1:
+                            next_nonterminal = 1.0 - next_done
+                            following_value = next_value
+                        else:
+                            next_nonterminal = 1.0 - done_buf[step + 1]
+                            following_value = value_buf[step + 1]
+                        delta = (
+                            reward_buf[step]
+                            + gamma * following_value * next_nonterminal
+                            - value_buf[step]
+                        )
+                        last_gae = delta + gamma * gae_lambda * next_nonterminal * last_gae
+                        advantages[step] = last_gae
+                    returns = advantages + value_buf
+
+                flat_condition = condition_buf.flatten(0, 1)
+                flat_raw_action = raw_action_buf.flatten(0, 1)
+                flat_base_action = base_action_buf.flatten(0, 1)
+                flat_logprob = logprob_buf.flatten()
+                flat_advantages = advantages.flatten()
+                flat_returns = returns.flatten()
+                flat_values = value_buf.flatten()
+                indices = np.arange(batch_size)
+                clipfracs: list[float] = []
+                policy_losses: list[float] = []
+                value_losses: list[float] = []
+                entropies: list[float] = []
+                bc_losses: list[float] = []
+                approx_kl = torch.tensor(0.0, device=device)
+                agent.train()
+                for _epoch in range(update_epochs):
+                    np.random.shuffle(indices)
+                    for start in range(0, batch_size, minibatch_size):
+                        mb = indices[start : start + minibatch_size]
+                        _new_action, new_logprob, entropy, new_value = agent.get_action_and_value(
+                            flat_condition[mb],
+                            flat_raw_action[mb],
+                        )
+                        mean_action = agent.mean_action(flat_condition[mb])
+                        bc_loss = torch.mean((mean_action - flat_base_action[mb]).square())
+                        logratio = new_logprob - flat_logprob[mb]
+                        ratio = logratio.exp()
+                        with torch.no_grad():
+                            approx_kl = ((ratio - 1.0) - logratio).mean()
+                            clipfracs.append(
+                                float(((ratio - 1.0).abs() > clip_coef).float().mean().item())
+                            )
+                        mb_adv = flat_advantages[mb]
+                        mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                        pg_loss = torch.max(
+                            -mb_adv * ratio,
+                            -mb_adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef),
+                        ).mean()
+                        value_loss = 0.5 * (new_value - flat_returns[mb]).square().mean()
+                        entropy_loss = entropy.mean()
+                        loss = (
+                            pg_loss
+                            - ent_coef * entropy_loss
+                            + value_coef * value_loss
+                            + bc_weight * bc_loss
+                        )
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        nn.utils.clip_grad_norm_(trainable, max_grad_norm)
+                        optimizer.step()
+                        policy_losses.append(float(pg_loss.detach().cpu()))
+                        value_losses.append(float(value_loss.detach().cpu()))
+                        entropies.append(float(entropy_loss.detach().cpu()))
+                        bc_losses.append(float(bc_loss.detach().cpu()))
+
+                explained_variance = float(
+                    1.0
+                    - torch.var(flat_returns - flat_values).item()
+                    / max(torch.var(flat_returns).item(), 1e-8)
+                )
+                update_metrics = {
+                    "global_step": int(global_step),
+                    "mean_return": float(torch.mean(returns).detach().cpu()),
+                    "mean_reward": float(np.mean(reward_values)),
+                    "mean_distance": float(np.mean(distance_values)),
+                    "mean_terminal_distance": float(np.mean(terminal_distances))
+                    if terminal_distances
+                    else None,
+                    "mean_action_delta_l2": float(np.mean(action_delta_values)),
+                    "action_saturation_rate": float(saturation_count / batch_size),
+                    "task_success_diagnostic_rate": float(success_count / batch_size),
+                    "policy_loss": float(np.mean(policy_losses)),
+                    "value_loss": float(np.mean(value_losses)),
+                    "bc_loss": float(np.mean(bc_losses)),
+                    "entropy": float(np.mean(entropies)),
+                    "approx_kl": float(approx_kl.detach().cpu()),
+                    "clip_fraction": float(np.mean(clipfracs)),
+                    "explained_variance": explained_variance,
+                    "batch_size": int(batch_size),
+                    "minibatch_size": int(minibatch_size),
+                }
+                history.append(update_metrics)
+                write_json(history_path, {"recipe": recipe, "history": history})
+                checkpoint_state = {
+                    "agent": agent.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "global_step": global_step,
+                    "history": history,
+                    "recipe": recipe,
+                    "condition_dim": condition_dim,
+                }
+                torch.save(checkpoint_state, latest)
+                if len(history) % checkpoint_every_updates == 0 or global_step >= total_steps:
+                    checkpoint_dir = ensure_dir(artifact / "checkpoints")
+                    torch.save(checkpoint_state, checkpoint_dir / f"step_{global_step:09d}.pt")
+    finally:
+        h5.close()
+        env.close()
+    return latest
+
+
 @torch.inference_mode()
 def evaluate_rl_rerun_local_r1(
     config: Config,
@@ -2309,7 +2716,7 @@ def evaluate_rl_rerun_local_r1(
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
-    from hcl_poc.low_level_rl import ResidualActorCritic, _load_frozen
+    from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
 
     path = dataset_path or _vector_dataset_path(config)
     if not path.exists():
@@ -2327,25 +2734,40 @@ def evaluate_rl_rerun_local_r1(
     horizon = int(frozen.horizon_steps)
     dino = _phase4_dino_from_config(config, device)
     condition_dim = int(checkpoint["condition_dim"])
+    method = str(recipe.get("method", ""))
+    is_direct = method.startswith("r3_direct")
     base_policy = str(recipe.get("base_policy", "deterministic"))
     flow_model: FlowModel | None = None
     flow_checkpoint: dict[str, Any] | None = None
-    if base_policy == "flow":
+    if is_direct:
+        base_policy = "deterministic"
+    elif base_policy == "flow":
         flow_path = recipe.get("flow_checkpoint")
         if not flow_path:
             raise ValueError("R2 checkpoint is missing flow_checkpoint")
         flow_model, flow_checkpoint = _load_low_flow_base(Path(flow_path), device)
     elif base_policy != "deterministic":
         raise ValueError(f"Unknown residual base policy: {base_policy}")
-    agent = ResidualActorCritic(
-        condition_dim,
-        width=int(config.get("low_level_rl.residual_width", 256)),
-        depth=int(config.get("low_level_rl.residual_depth", 2)),
-        initial_logstd=float(config.get("low_level_rl.initial_logstd", -2.3)),
-    ).to(device)
+    if is_direct:
+        agent = DirectLowActorCritic(
+            frozen.low_model,
+            frozen.action_norm.mean,
+            frozen.action_norm.std,
+            condition_dim,
+            width=int(recipe["actor_critic_width"]),
+            depth=int(recipe["actor_critic_depth"]),
+            initial_logstd=float(recipe["initial_logstd"]),
+        ).to(device)
+    else:
+        agent = ResidualActorCritic(
+            condition_dim,
+            width=int(config.get("low_level_rl.residual_width", 256)),
+            depth=int(config.get("low_level_rl.residual_depth", 2)),
+            initial_logstd=float(config.get("low_level_rl.initial_logstd", -2.3)),
+        ).to(device)
     agent.load_state_dict(checkpoint["agent"])
     agent.eval()
-    alpha = float(recipe["alpha"])
+    alpha = float(recipe.get("alpha", 0.0))
 
     with h5py.File(path, "r") as h5:
         meta = h5["meta"].attrs
@@ -2367,7 +2789,7 @@ def evaluate_rl_rerun_local_r1(
 
     initial_distances: list[np.ndarray] = []
     final_distances: list[np.ndarray] = []
-    residual_norms: list[np.ndarray] = []
+    action_delta_norms: list[np.ndarray] = []
     saturation_rates: list[float] = []
     chosen_batches: list[str] = []
     chosen_timesteps: list[int] = []
@@ -2435,13 +2857,27 @@ def evaluate_rl_rerun_local_r1(
                             condition_t,
                             frozen,
                         )
-                    raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
-                        condition_t,
-                        deterministic=True,
-                    )
-                    residual = alpha * torch.tanh(raw_action)
-                    residual_norms.append(torch.linalg.vector_norm(residual, dim=-1).cpu().numpy())
-                    unclipped = base_action + residual
+                    if is_direct:
+                        raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
+                            condition_t,
+                            deterministic=True,
+                        )
+                        unclipped = raw_action
+                        action_delta_norms.append(
+                            torch.linalg.vector_norm(unclipped - base_action, dim=-1)
+                            .cpu()
+                            .numpy()
+                        )
+                    else:
+                        raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
+                            condition_t,
+                            deterministic=True,
+                        )
+                        residual = alpha * torch.tanh(raw_action)
+                        action_delta_norms.append(
+                            torch.linalg.vector_norm(residual, dim=-1).cpu().numpy()
+                        )
+                        unclipped = base_action + residual
                     action = torch.clamp(unclipped, action_low, action_high)
                     saturation_count += int(torch.any(unclipped != action, dim=-1).sum().cpu())
                     obs, _reward, _terminated, _truncated, _info = env.step(action)
@@ -2465,7 +2901,7 @@ def evaluate_rl_rerun_local_r1(
 
     initial = np.concatenate(initial_distances)
     final = np.concatenate(final_distances)
-    residual = np.concatenate(residual_norms)
+    action_delta = np.concatenate(action_delta_norms)
     result = {
         "checkpoint": str(checkpoint_path),
         "dataset": str(path),
@@ -2485,7 +2921,8 @@ def evaluate_rl_rerun_local_r1(
         "final_distance_mean": float(np.mean(final)),
         "distance_reduction_mean": float(np.mean(initial - final)),
         "distance_reduction_fraction": float(np.mean(final < initial)),
-        "mean_residual_norm": float(np.mean(residual)),
+        "mean_residual_norm": float(np.mean(action_delta)),
+        "mean_action_delta_l2": float(np.mean(action_delta)),
         "action_saturation_rate": float(np.mean(saturation_rates)),
         "recipe": recipe,
     }
@@ -2503,6 +2940,29 @@ def evaluate_rl_rerun_local_r1(
 
 @torch.inference_mode()
 def evaluate_rl_rerun_local_r2(
+    config: Config,
+    checkpoint_path: Path,
+    dataset_path: Path | None = None,
+    n_demo: int = 500,
+    seed: int = 0,
+    episodes: int = 4,
+    manifest_path: Path | None = None,
+    output_path: Path | None = None,
+) -> Path:
+    return evaluate_rl_rerun_local_r1(
+        config,
+        checkpoint_path=checkpoint_path,
+        dataset_path=dataset_path,
+        n_demo=n_demo,
+        seed=seed,
+        episodes=episodes,
+        manifest_path=manifest_path,
+        output_path=output_path,
+    )
+
+
+@torch.inference_mode()
+def evaluate_rl_rerun_local_r3(
     config: Config,
     checkpoint_path: Path,
     dataset_path: Path | None = None,
@@ -2551,26 +3011,41 @@ def evaluate_rl_rerun_closed_loop_r1(
     recipe = checkpoint["recipe"]
     if int(recipe["n_demo"]) != n_demo or int(recipe["seed"]) != seed:
         raise ValueError("Residual checkpoint does not match n_demo/seed")
+    method = str(recipe.get("method", ""))
+    is_direct = method.startswith("r3_direct")
     base_policy = str(recipe.get("base_policy", "deterministic"))
     flow_model: FlowModel | None = None
     flow_checkpoint: dict[str, Any] | None = None
-    if base_policy == "flow":
+    if is_direct:
+        base_policy = "deterministic"
+    elif base_policy == "flow":
         flow_path = recipe.get("flow_checkpoint")
         if not flow_path:
             raise ValueError("R2 checkpoint is missing flow_checkpoint")
         flow_model, flow_checkpoint = _load_low_flow_base(Path(flow_path), device)
     elif base_policy != "deterministic":
         raise ValueError(f"Unknown residual base policy: {base_policy}")
-    agent = ResidualActorCritic(
-        int(checkpoint["condition_dim"]),
-        width=int(recipe["actor_critic_width"]),
-        depth=int(recipe["actor_critic_depth"]),
-        initial_logstd=float(recipe["initial_logstd"]),
-    ).to(device)
+    if is_direct:
+        agent = DirectLowActorCritic(
+            frozen.low_model,
+            frozen.action_norm.mean,
+            frozen.action_norm.std,
+            int(checkpoint["condition_dim"]),
+            width=int(recipe["actor_critic_width"]),
+            depth=int(recipe["actor_critic_depth"]),
+            initial_logstd=float(recipe["initial_logstd"]),
+        ).to(device)
+    else:
+        agent = ResidualActorCritic(
+            int(checkpoint["condition_dim"]),
+            width=int(recipe["actor_critic_width"]),
+            depth=int(recipe["actor_critic_depth"]),
+            initial_logstd=float(recipe["initial_logstd"]),
+        ).to(device)
     agent.load_state_dict(checkpoint["agent"])
     agent.eval()
     dino = _phase4_dino_from_config(config, device)
-    alpha = float(recipe["alpha"])
+    alpha = float(recipe.get("alpha", 0.0))
     max_steps = int(config.get("env_max_episode_steps", 100))
 
     def rollout(use_residual: bool) -> dict[str, Any]:
@@ -2673,13 +3148,25 @@ def evaluate_rl_rerun_closed_loop_r1(
                             condition,
                             frozen,
                         )
-                    if use_residual:
-                        raw_residual, _logprob, _entropy, _value = (
-                            agent.get_action_and_value(
-                                condition, deterministic=True
-                            )
+                    if use_residual and is_direct:
+                        raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
+                            condition,
+                            deterministic=True,
+                        )
+                        unclipped = raw_action
+                        residual_norms.extend(
+                            torch.linalg.vector_norm(unclipped - base_action, dim=-1)
+                            .cpu()
+                            .numpy()[active]
+                            .tolist()
+                        )
+                    elif use_residual:
+                        raw_residual, _logprob, _entropy, _value = agent.get_action_and_value(
+                            condition,
+                            deterministic=True,
                         )
                         residual = alpha * torch.tanh(raw_residual)
+                        unclipped = base_action + residual
                         residual_norms.extend(
                             torch.linalg.vector_norm(residual, dim=-1)
                             .cpu()
@@ -2687,8 +3174,7 @@ def evaluate_rl_rerun_closed_loop_r1(
                             .tolist()
                         )
                     else:
-                        residual = torch.zeros_like(base_action)
-                    unclipped = base_action + residual
+                        unclipped = base_action
                     active_tensor = torch.from_numpy(active).to(device)
                     saturated_actions += int(
                         torch.any(unclipped != torch.clamp(
@@ -2778,6 +3264,29 @@ def evaluate_rl_rerun_closed_loop_r1(
 
 @torch.inference_mode()
 def evaluate_rl_rerun_closed_loop_r2(
+    config: Config,
+    checkpoint_path: Path,
+    n_demo: int = 500,
+    seed: int = 0,
+    episodes: int = 100,
+    eval_seed_start: int = 10_000,
+    num_envs: int = 64,
+    output_path: Path | None = None,
+) -> Path:
+    return evaluate_rl_rerun_closed_loop_r1(
+        config,
+        checkpoint_path=checkpoint_path,
+        n_demo=n_demo,
+        seed=seed,
+        episodes=episodes,
+        eval_seed_start=eval_seed_start,
+        num_envs=num_envs,
+        output_path=output_path,
+    )
+
+
+@torch.inference_mode()
+def evaluate_rl_rerun_closed_loop_r3(
     config: Config,
     checkpoint_path: Path,
     n_demo: int = 500,
