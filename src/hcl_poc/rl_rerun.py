@@ -658,3 +658,167 @@ def run_rl_rerun_throughput_benchmark(
                 writer.writeheader()
                 writer.writerows(rows)
     return out_path
+
+
+def _finite_horizon_gae_returns(
+    rewards: np.ndarray,
+    values: np.ndarray,
+    terminated_after_step: np.ndarray,
+    gamma: float,
+    gae_lambda: float,
+    next_value: float,
+) -> np.ndarray:
+    if rewards.shape != values.shape or rewards.shape != terminated_after_step.shape:
+        raise ValueError("rewards, values, and terminated_after_step must have equal shape")
+    advantages = np.zeros_like(rewards, dtype=np.float64)
+    last_gae = 0.0
+    for step in reversed(range(len(rewards))):
+        next_nonterminal = 0.0 if bool(terminated_after_step[step]) else 1.0
+        following_value = next_value if step == len(rewards) - 1 else float(values[step + 1])
+        delta = (
+            float(rewards[step])
+            + gamma * following_value * next_nonterminal
+            - float(values[step])
+        )
+        last_gae = delta + gamma * gae_lambda * next_nonterminal * last_gae
+        advantages[step] = last_gae
+    return advantages + values
+
+
+@torch.inference_mode()
+def run_rl_rerun_algorithm_audit(
+    config: Config,
+    dataset_path: Path | None = None,
+    n_demo: int = 1000,
+    seed: int = 0,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import _load_frozen
+
+    path = dataset_path or _state_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    device = default_device()
+    rerun_config = _rerun_base_config(config, path)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+
+    rewards = np.arange(1, 11, dtype=np.float64)
+    values = np.zeros(10, dtype=np.float64)
+    terminated_after = np.zeros(10, dtype=bool)
+    terminated_after[-1] = True
+    returns = _finite_horizon_gae_returns(
+        rewards, values, terminated_after, gamma=1.0, gae_lambda=1.0, next_value=999.0
+    )
+    expected_returns = np.array([55, 54, 52, 49, 45, 40, 34, 27, 19, 10], dtype=np.float64)
+    gae_max_abs_error = float(np.max(np.abs(returns - expected_returns)))
+    no_bootstrap_last_return = float(returns[-1])
+
+    leaking_returns = _finite_horizon_gae_returns(
+        rewards,
+        values,
+        np.zeros(10, dtype=bool),
+        gamma=1.0,
+        gae_lambda=1.0,
+        next_value=999.0,
+    )
+    bootstrap_sensitivity = float(leaking_returns[-1] - returns[-1])
+
+    with h5py.File(path, "r") as h5:
+        episode_keys = sorted(key for key in h5.keys() if key.startswith("episode_"))
+        if not episode_keys:
+            raise ValueError(f"No episodes found in {path}")
+        selected_key = None
+        selected_t = 0
+        horizon = int(frozen.horizon_steps)
+        for key in episode_keys:
+            if len(h5[key]["executed_actions"]) > horizon:
+                selected_key = key
+                selected_t = min(5, len(h5[key]["executed_actions"]) - horizon - 1)
+                break
+        if selected_key is None:
+            raise ValueError("No episode is long enough for a 10-step local audit")
+        group = h5[selected_key]
+        dino = np.asarray(group["dino"], dtype=np.float32)
+        proprio = np.asarray(group["proprio"], dtype=np.float32)
+        previous_actions = np.asarray(group["previous_executed_actions"], dtype=np.float32)
+        frame_t = np.concatenate([dino[selected_t], proprio[selected_t]], axis=-1)[None]
+        frame_goal = np.concatenate(
+            [dino[selected_t + horizon], proprio[selected_t + horizon]], axis=-1
+        )[None]
+        previous = frozen.action_norm.transform(previous_actions[selected_t : selected_t + 1])
+
+    norm_frame_t = frozen.frame_norm.transform(frame_t)
+    z_t = frozen.goal_norm.transform(
+        frozen.encoder(
+            torch.from_numpy(frozen.representation_frame_norm.transform(frame_t))
+            .to(device)
+            .float()
+        )
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    goal = frozen.goal_norm.transform(
+        frozen.encoder(
+            torch.from_numpy(frozen.representation_frame_norm.transform(frame_goal))
+            .to(device)
+            .float()
+        )
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    condition = _low_condition_array(
+        norm_frame_t,
+        z_t,
+        goal,
+        previous,
+        np.ones((1, 1), dtype=np.float32),
+        frozen.conditioning,
+    )
+    normalized_base = frozen.low_model(torch.from_numpy(condition).to(device).float())
+    base_action = frozen.action_norm.inverse(normalized_base.cpu().numpy().astype(np.float32))
+    clipped_base_action = np.clip(base_action, -1.0, 1.0)
+    zero_residual_action = np.clip(
+        base_action + 0.1 * np.tanh(np.zeros_like(base_action)), -1.0, 1.0
+    )
+    zero_residual_max_abs = float(np.max(np.abs(clipped_base_action - zero_residual_action)))
+    unclipped_action_box_overshoot = float(np.max(np.abs(base_action - clipped_base_action)))
+
+    result = {
+        "dataset": str(path),
+        "n_demo": n_demo,
+        "seed": seed,
+        "horizon_steps": int(frozen.horizon_steps),
+        "update_period": int(frozen.update_period),
+        "local_episode_length": int(frozen.horizon_steps),
+        "selected_episode": selected_key,
+        "selected_timestep": selected_t,
+        "gae_unit": {
+            "rewards": rewards.tolist(),
+            "expected_returns": expected_returns.tolist(),
+            "computed_returns": returns.tolist(),
+            "max_abs_error": gae_max_abs_error,
+            "next_value_used_for_terminal_test": 999.0,
+            "terminal_last_return": no_bootstrap_last_return,
+            "bootstrap_sensitivity_if_not_terminal": bootstrap_sensitivity,
+        },
+        "checks": {
+            "horizon_is_10": int(frozen.horizon_steps) == 10,
+            "update_period_is_10": int(frozen.update_period) == 10,
+            "gae_matches_hand_computed_returns": gae_max_abs_error < 1e-9,
+            "terminal_step_does_not_bootstrap": abs(no_bootstrap_last_return - 10.0) < 1e-9,
+            "nonterminal_would_bootstrap": bootstrap_sensitivity > 900.0,
+            "zero_residual_matches_frozen_policy": zero_residual_max_abs < 1e-9,
+        },
+        "zero_residual_max_abs_action_error": zero_residual_max_abs,
+        "unclipped_frozen_action_box_overshoot": unclipped_action_box_overshoot,
+        "gate_pass": False,
+    }
+    result["gate_pass"] = bool(all(result["checks"].values()))
+    out_path = output_path or (_state_audit_result_dir(config) / "algorithm_audit.json")
+    ensure_dir(out_path.parent)
+    write_json(out_path, result)
+    return out_path

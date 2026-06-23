@@ -1,0 +1,63 @@
+{
+  "checks": {
+    "gae_matches_hand_computed_returns": true,
+    "horizon_is_10": true,
+    "nonterminal_would_bootstrap": true,
+    "terminal_step_does_not_bootstrap": true,
+    "update_period_is_10": true,
+    "zero_residual_matches_frozen_policy": true
+  },
+  "dataset": "data/rl_rerun/pusht_state_demos.h5",
+  "gae_unit": {
+    "bootstrap_sensitivity_if_not_terminal": 999.0,
+    "computed_returns": [
+      55.0,
+      54.0,
+      52.0,
+      49.0,
+      45.0,
+      40.0,
+      34.0,
+      27.0,
+      19.0,
+      10.0
+    ],
+    "expected_returns": [
+      55.0,
+      54.0,
+      52.0,
+      49.0,
+      45.0,
+      40.0,
+      34.0,
+      27.0,
+      19.0,
+      10.0
+    ],
+    "max_abs_error": 0.0,
+    "next_value_used_for_terminal_test": 999.0,
+    "rewards": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0
+    ],
+    "terminal_last_return": 10.0
+  },
+  "gate_pass": true,
+  "horizon_steps": 10,
+  "local_episode_length": 10,
+  "n_demo": 1000,
+  "seed": 0,
+  "selected_episode": "episode_000000",
+  "selected_timestep": 5,
+  "unclipped_frozen_action_box_overshoot": 0.013393640518188477,
+  "update_period": 10,
+  "zero_residual_max_abs_action_error": 0.0
+}

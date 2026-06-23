@@ -484,3 +484,42 @@ Phase C decision for development: use `512 x 64` or `1024 x 32` as the first
 serious GPU-parallel settings. Treat any smaller setting as exploratory. Before
 expensive RL, run the Phase D correctness checks for local 10-step episodes and
 GAE value leakage.
+
+## 2026-06-23 - RR-12: Phase D algorithm audit
+
+Implemented:
+
+```text
+hcl-poc rl-rerun algorithm-audit
+```
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml algorithm-audit --n-demo 1000 --seed 0 --output results/rl_rerun/algorithm_audit.json
+```
+
+Tracked deliverables:
+
+```text
+rl_rerun_algorithm_audit.md
+rl_rerun_algorithm_audit.json
+```
+
+Result: pass.
+
+| check | value |
+| --- | ---: |
+| horizon steps | 10 |
+| update period | 10 |
+| GAE hand-computed max error | 0.0 |
+| terminal last return with `next_value=999` | 10.0 |
+| nonterminal bootstrap sensitivity | 999.0 |
+| zero residual executed-action error | 0.0 |
+| unclipped frozen action-box overshoot | 0.0134 |
+
+Interpretation: the local 10-step episode semantics and no-bootstrap terminal
+cutoff are correct in the standalone audit. The zero-residual check must compare
+executed clipped actions, because the frozen BC policy can slightly exceed the
+action box before deployment clipping. The remaining Phase D implementation
+work is the exact reset-and-replay local RL environment itself.

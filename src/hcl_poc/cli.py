@@ -112,6 +112,7 @@ from hcl_poc.rl_rerun import (
     audit_rl_rerun_state_dataset,
     collect_rl_rerun_state_dataset,
     ensure_rl_rerun_action_aliases,
+    run_rl_rerun_algorithm_audit,
     run_rl_rerun_throughput_benchmark,
     train_rl_rerun_supervised_point,
 )
@@ -268,6 +269,16 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 rollout_lens=[
                     int(item.strip()) for item in args.rollout_lens.split(",") if item.strip()
                 ],
+                n_demo=args.n_demo,
+                seed=args.seed,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "algorithm-audit":
+        console.print(
+            run_rl_rerun_algorithm_audit(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
                 n_demo=args.n_demo,
                 seed=args.seed,
                 output_path=Path(args.output) if args.output else None,
@@ -1288,6 +1299,12 @@ def build_parser() -> argparse.ArgumentParser:
     throughput.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
     throughput.add_argument("--output")
     throughput.set_defaults(func=rl_rerun_cmd)
+    algorithm_audit = rl_rerun_sub.add_parser("algorithm-audit")
+    algorithm_audit.add_argument("--dataset")
+    algorithm_audit.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
+    algorithm_audit.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    algorithm_audit.add_argument("--output")
+    algorithm_audit.set_defaults(func=rl_rerun_cmd)
 
     p = sub.add_parser("rl")
     add_config_arg(p)
