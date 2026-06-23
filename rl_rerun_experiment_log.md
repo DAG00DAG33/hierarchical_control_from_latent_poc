@@ -357,3 +357,78 @@ Completed `n=500` supervised rerun summary:
 Interpretation: the regenerated `n=500` supervised hierarchy is stable across
 three seeds but only moderately successful. It is suitable as a low-data matched
 baseline for Phase B, not as a strong final system.
+
+## 2026-06-23 - RR-09: Phase B `n=1000, seed=1` supervised rerun
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-supervised --n-demo 1000 --seed 1 --eval-episodes 100 --force
+```
+
+Evaluation result:
+
+| metric | value |
+| --- | ---: |
+| episodes | 100 |
+| success | 0.48 |
+| final reward | 0.598 |
+| max reward | 0.613 |
+| teacher action MAE | 0.147 |
+| action saturation rate | 0.045 |
+| offline oracle action MAE | 0.0477 |
+| offline predicted action MAE | 0.0487 |
+| offline normalized goal L2 | 22.47 |
+| representation reconstruction MSE | 0.0586 |
+| representation active dimensions | 512 |
+
+Interim `n=1000` seed summary:
+
+| seed | success | final reward | max reward | teacher action MAE |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.46 | 0.577 | 0.598 | 0.155 |
+| 1 | 0.48 | 0.598 | 0.613 | 0.147 |
+
+Interpretation: the first two `n=1000` rerun seeds are consistent and clearly
+above the `n=500` band. Complete `seed=2` before Phase B gate judgment.
+
+## 2026-06-23 - RR-10: Phase B `n=1000, seed=2` supervised rerun and gate
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-supervised --n-demo 1000 --seed 2 --eval-episodes 100 --force
+```
+
+Evaluation result:
+
+| metric | value |
+| --- | ---: |
+| episodes | 100 |
+| success | 0.43 |
+| final reward | 0.563 |
+| max reward | 0.582 |
+| teacher action MAE | 0.153 |
+| action saturation rate | 0.046 |
+| offline oracle action MAE | 0.0470 |
+| offline predicted action MAE | 0.0482 |
+| offline normalized goal L2 | 20.63 |
+| representation reconstruction MSE | 0.0640 |
+| representation active dimensions | 512 |
+
+Completed `n=1000` supervised rerun summary:
+
+| seed | success | final reward | max reward | teacher action MAE |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.46 | 0.577 | 0.598 | 0.155 |
+| 1 | 0.48 | 0.598 | 0.613 | 0.147 |
+| 2 | 0.43 | 0.563 | 0.582 | 0.153 |
+| mean | 0.457 | 0.580 | 0.598 | 0.152 |
+| sample SD | 0.025 | 0.018 | 0.016 | 0.004 |
+
+Phase B supervised gate decision: pass for proceeding to local-reset low-level
+RL development. The regenerated state/replay corpus produces a reproducible
+VAE-512 learned-interface hierarchy, and `n=1000` improves clearly over `n=500`
+in online success, final reward, max reward, and teacher-action MAE. This is not
+a final system result; it is the matched supervised baseline that the exact
+local-reset RL methods must compare against.
