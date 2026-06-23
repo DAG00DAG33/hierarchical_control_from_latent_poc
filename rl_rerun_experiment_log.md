@@ -1375,3 +1375,44 @@ and max reward, while keeping deterministic action drift near `0.005`. This
 still does not reach the original `+10` point full-hierarchy gate, but it is a
 meaningful positive signal and suggests direct last-layer tuning is more useful
 than residual R1 or residual-flow R2 for this setup.
+
+## 2026-06-23 - RR-32: N=1000 R3 smoke screen
+
+The rerun plan asks for checking both `N=500` and `N=1000`. Before launching a
+full `4096 x 10` R3 run at `N=1000`, screened the two R3 variants that were
+most informative at `N=500` on the cheap 512-env local manifest.
+
+Commands:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml local-mode-a-audit \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5 \
+  --n-demo 1000 --seed 0 --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n512_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_mode_a_audit_n512_val_b1_n1000_seed0_manifest.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 \
+  --n-demo 1000 --seed 0 --run-name smoke_10k_lr1e5_bc1 \
+  --steps 10240 --bc-weight 1.0 --terminal-weight 1.0 \
+  --learning-rate 0.00001 --num-minibatches 1 --checkpoint-every-updates 1 --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 \
+  --n-demo 1000 --seed 0 --run-name smoke_10k_lr3e5_bc1 \
+  --steps 10240 --bc-weight 1.0 --terminal-weight 1.0 \
+  --learning-rate 0.00003 --num-minibatches 1 --checkpoint-every-updates 1 --force
+```
+
+Held-out 512-env local results:
+
+| policy | final distance | mean reduction | reduction fraction | action delta | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `N=1000` frozen deterministic low level | 1.1175 | 0.3906 | 0.8359 | 0.0000 | 0.0152 |
+| `N=1000` R3, `lr=1e-5`, 10k | 1.1249 | 0.3832 | 0.8184 | 0.0011 | 0.0141 |
+| `N=1000` R3, `lr=3e-5`, 10k | 1.1193 | 0.3888 | 0.8223 | 0.0029 | 0.0137 |
+
+Both `N=1000` R3 smokes are locally worse than the frozen `N=1000` low level.
+Decision: do not spend a full 4096-env 1M-transition run on these exact
+`N=1000` R3 settings. The positive low-level RL signal currently exists only
+for `N=500`, lower-LR direct last-layer tuning.
