@@ -112,6 +112,7 @@ from hcl_poc.rl_rerun import (
     audit_rl_rerun_state_dataset,
     collect_rl_rerun_state_dataset,
     ensure_rl_rerun_action_aliases,
+    run_rl_rerun_throughput_benchmark,
     train_rl_rerun_supervised_point,
 )
 from hcl_poc.train import (
@@ -255,6 +256,21 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 dataset_path=Path(args.dataset) if args.dataset else None,
                 eval_episodes=args.eval_episodes,
                 force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "throughput-benchmark":
+        console.print(
+            run_rl_rerun_throughput_benchmark(
+                config,
+                num_envs_values=[
+                    int(item.strip()) for item in args.num_envs.split(",") if item.strip()
+                ],
+                rollout_lens=[
+                    int(item.strip()) for item in args.rollout_lens.split(",") if item.strip()
+                ],
+                n_demo=args.n_demo,
+                seed=args.seed,
+                output_path=Path(args.output) if args.output else None,
             )
         )
     else:
@@ -1257,6 +1273,21 @@ def build_parser() -> argparse.ArgumentParser:
     train_supervised.add_argument("--eval-episodes", type=int, default=100)
     train_supervised.add_argument("--force", action="store_true")
     train_supervised.set_defaults(func=rl_rerun_cmd)
+    throughput = rl_rerun_sub.add_parser("throughput-benchmark")
+    throughput.add_argument(
+        "--num-envs",
+        default="128,256,512,1024,2048,4096,8192,16384",
+        help="Comma-separated num_envs values to test.",
+    )
+    throughput.add_argument(
+        "--rollout-lens",
+        default="10,16,32,64",
+        help="Comma-separated rollout lengths to test.",
+    )
+    throughput.add_argument("--n-demo", type=int, choices=[500, 1000], default=1000)
+    throughput.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
+    throughput.add_argument("--output")
+    throughput.set_defaults(func=rl_rerun_cmd)
 
     p = sub.add_parser("rl")
     add_config_arg(p)

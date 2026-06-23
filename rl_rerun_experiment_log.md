@@ -432,3 +432,55 @@ VAE-512 learned-interface hierarchy, and `n=1000` improves clearly over `n=500`
 in online success, final reward, max reward, and teacher-action MAE. This is not
 a final system result; it is the matched supervised baseline that the exact
 local-reset RL methods must compare against.
+
+## 2026-06-23 - RR-11: Phase C bounded throughput benchmark
+
+Implemented:
+
+```text
+hcl-poc rl-rerun throughput-benchmark
+```
+
+The command writes a CSV with simulator-only, render, render+DINO, and full
+DINO+VAE+high+low policy throughput. It catches failed points and records the
+crash/error in the row so the sweep can identify the largest stable setting.
+
+Smoke command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml throughput-benchmark --num-envs 128 --rollout-lens 10 --n-demo 1000 --seed 0 --output results/rl_rerun/rl_rerun_throughput_benchmark_smoke.csv
+```
+
+Bounded sweep command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml throughput-benchmark --num-envs 128,256,512,1024 --rollout-lens 10,32,64 --n-demo 1000 --seed 0 --output results/rl_rerun/rl_rerun_throughput_benchmark.csv
+```
+
+Tracked CSV deliverable:
+
+```text
+rl_rerun_throughput_benchmark.csv
+```
+
+Selected results:
+
+| num envs | rollout len | batch | sim-only steps/s | render steps/s | DINO steps/s | full-stack steps/s | PPO update wall-clock |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 64 | 8192 | 8965 | 5184 | 395 | 387 | 21.2 s |
+| 256 | 64 | 16384 | 16798 | 7258 | 410 | 391 | 41.9 s |
+| 512 | 64 | 32768 | 30249 | 8896 | 416 | 407 | 80.6 s |
+| 1024 | 32 | 32768 | 46747 | 10168 | 427 | 417 | 78.5 s |
+| 1024 | 64 | 65536 | 44151 | 10150 | 429 | 420 | 155.9 s |
+
+No tested point crashed or produced NaNs. The effective-batch requirement is met
+at `512 x 64` and `1024 x 32`. The limiting stage is DINO/full-stack inference:
+sim-only throughput scales to tens of thousands of steps/s, while the full stack
+stays near 400 env-steps/s. Larger sweeps can still be run to find a memory
+limit, but they will not materially improve wall-clock throughput unless the
+visual feature pipeline is optimized or cached for local-reset RL.
+
+Phase C decision for development: use `512 x 64` or `1024 x 32` as the first
+serious GPU-parallel settings. Treat any smaller setting as exploratory. Before
+expensive RL, run the Phase D correctness checks for local 10-step episodes and
+GAE value leakage.

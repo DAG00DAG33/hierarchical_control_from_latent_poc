@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
 import subprocess
 import copy
+import time
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +95,65 @@ def _make_state_data_env(config: Config):
         num_envs=1,
         reconfiguration_freq=config.get("rl.collect_reconfiguration_freq", 1),
     )
+
+
+def _make_benchmark_env(config: Config, num_envs: int, obs_mode: str):
+    from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
+
+    base = gym.make(
+        config.get("env_id"),
+        obs_mode=obs_mode,
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        sim_backend=_rl_backend(config),
+        num_envs=num_envs,
+        reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+    )
+    return ManiSkillVectorEnv(
+        base,
+        num_envs,
+        ignore_terminations=True,
+        record_metrics=False,
+    )
+
+
+def _parse_int_list(text: str) -> list[int]:
+    return [int(item.strip()) for item in text.split(",") if item.strip()]
+
+
+def _gpu_utilization_percent() -> int | None:
+    try:
+        output = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except Exception:
+        return None
+    if not output:
+        return None
+    return int(output.splitlines()[0].strip())
+
+
+def _cuda_memory_mib() -> tuple[float | None, float | None]:
+    if not torch.cuda.is_available():
+        return None, None
+    torch.cuda.synchronize()
+    return (
+        float(torch.cuda.max_memory_allocated() / 2**20),
+        float(torch.cuda.max_memory_reserved() / 2**20),
+    )
+
+
+def _safe_close(env: Any | None) -> None:
+    if env is not None:
+        env.close()
 
 
 @torch.inference_mode()
@@ -420,3 +481,180 @@ def train_rl_rerun_supervised_point(
         "hierarchy": str(hierarchy),
         "evaluation": str(evaluation),
     }
+
+
+@torch.inference_mode()
+def run_rl_rerun_throughput_benchmark(
+    config: Config,
+    num_envs_values: list[int] | None = None,
+    rollout_lens: list[int] | None = None,
+    n_demo: int = 1000,
+    seed: int = 0,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import _load_frozen
+
+    env_values = num_envs_values or [128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    lens = rollout_lens or [10, 16, 32, 64]
+    if any(value <= 0 for value in env_values):
+        raise ValueError("num_envs values must be positive")
+    if any(value <= 0 for value in lens):
+        raise ValueError("rollout_lens values must be positive")
+
+    out_path = output_path or (_state_audit_result_dir(config) / "rl_rerun_throughput_benchmark.csv")
+    ensure_dir(out_path.parent)
+    device = default_device()
+    rerun_config = _rerun_base_config(config)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    dino = _phase4_dino_from_config(config, device)
+
+    fieldnames = [
+        "num_envs",
+        "rollout_len",
+        "effective_batch",
+        "sim_only_steps_per_sec",
+        "sim_render_steps_per_sec",
+        "sim_render_dino_steps_per_sec",
+        "full_stack_steps_per_sec",
+        "wall_clock_per_ppo_update_sec",
+        "gpu_memory_allocated_mib",
+        "gpu_memory_reserved_mib",
+        "gpu_utilization_percent",
+        "crashed",
+        "nan_detected",
+        "error",
+    ]
+    rows: list[dict[str, Any]] = []
+
+    def timed_stage(num_envs: int, rollout_len: int, stage: str) -> tuple[float, bool]:
+        obs_mode = "state" if stage == "sim_only" else "rgb+state"
+        env = None
+        try:
+            env = _make_benchmark_env(config, num_envs, obs_mode)
+            obs, _info = env.reset(seed=[7_000_000 + i for i in range(num_envs)])
+            low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+            high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+            action = torch.zeros((num_envs, 3), device=device, dtype=torch.float32)
+            previous = np.repeat(
+                frozen.action_norm.transform(np.zeros((1, 3), dtype=np.float32)),
+                num_envs,
+                axis=0,
+            )
+            held_goal = np.zeros((num_envs, frozen.goal_dim), dtype=np.float32)
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            start = time.perf_counter()
+            nan_detected = False
+            for step in range(rollout_len):
+                if stage in {"sim_render_dino", "full_stack"}:
+                    frames = _phase4_frame_inputs(
+                        obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    if not np.isfinite(frames).all():
+                        nan_detected = True
+                    if stage == "full_stack":
+                        normalized_frames = frozen.frame_norm.transform(frames)
+                        z = frozen.goal_norm.transform(
+                            frozen.encoder(
+                                torch.from_numpy(
+                                    frozen.representation_frame_norm.transform(frames)
+                                )
+                                .to(device)
+                                .float()
+                            )
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32)
+                        )
+                        high_condition = np.concatenate([normalized_frames, previous], axis=-1)
+                        held_goal = (
+                            frozen.high_model(
+                                torch.from_numpy(high_condition).to(device).float()
+                            )
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32)
+                        )
+                        remaining = np.full(
+                            (num_envs, 1),
+                            max(frozen.update_period - step % frozen.update_period, 1)
+                            / frozen.horizon_steps,
+                            dtype=np.float32,
+                        )
+                        condition = _low_condition_array(
+                            normalized_frames,
+                            z,
+                            held_goal,
+                            previous,
+                            remaining,
+                            frozen.conditioning,
+                        )
+                        normalized_action = frozen.low_model(
+                            torch.from_numpy(condition).to(device).float()
+                        )
+                        action_np = frozen.action_norm.inverse(
+                            normalized_action.cpu().numpy().astype(np.float32)
+                        )
+                        action = torch.clamp(
+                            torch.from_numpy(action_np).to(device).float(), low, high
+                        )
+                        previous = frozen.action_norm.transform(action.cpu().numpy())
+                obs, _reward, _terminated, _truncated, _info = env.step(action)
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            elapsed = time.perf_counter() - start
+            return num_envs * rollout_len / elapsed, nan_detected
+        finally:
+            _safe_close(env)
+
+    for num_envs in env_values:
+        for rollout_len in lens:
+            row: dict[str, Any] = {
+                "num_envs": num_envs,
+                "rollout_len": rollout_len,
+                "effective_batch": num_envs * rollout_len,
+                "sim_only_steps_per_sec": "",
+                "sim_render_steps_per_sec": "",
+                "sim_render_dino_steps_per_sec": "",
+                "full_stack_steps_per_sec": "",
+                "wall_clock_per_ppo_update_sec": "",
+                "gpu_memory_allocated_mib": "",
+                "gpu_memory_reserved_mib": "",
+                "gpu_utilization_percent": "",
+                "crashed": False,
+                "nan_detected": False,
+                "error": "",
+            }
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+            try:
+                for stage, key in [
+                    ("sim_only", "sim_only_steps_per_sec"),
+                    ("sim_render", "sim_render_steps_per_sec"),
+                    ("sim_render_dino", "sim_render_dino_steps_per_sec"),
+                    ("full_stack", "full_stack_steps_per_sec"),
+                ]:
+                    steps_per_sec, nan_detected = timed_stage(num_envs, rollout_len, stage)
+                    row[key] = f"{steps_per_sec:.3f}"
+                    row["nan_detected"] = bool(row["nan_detected"]) or nan_detected
+                full_sps = float(row["full_stack_steps_per_sec"])
+                row["wall_clock_per_ppo_update_sec"] = f"{num_envs * rollout_len / full_sps:.3f}"
+                allocated, reserved = _cuda_memory_mib()
+                row["gpu_memory_allocated_mib"] = (
+                    f"{allocated:.1f}" if allocated is not None else ""
+                )
+                row["gpu_memory_reserved_mib"] = f"{reserved:.1f}" if reserved is not None else ""
+                util = _gpu_utilization_percent()
+                row["gpu_utilization_percent"] = util if util is not None else ""
+            except Exception as exc:
+                row["crashed"] = True
+                row["error"] = f"{type(exc).__name__}: {exc}"
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            rows.append(row)
+            with out_path.open("w", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+    return out_path
