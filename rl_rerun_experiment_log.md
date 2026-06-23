@@ -560,3 +560,68 @@ Regenerate a vector-consistent local reset corpus using the same vectorized CUDA
 reset regime intended for RL. The dataset must store vector batch seed,
 `vector_num_envs`, stream index, actions, and features so exact local resets can
 reset a whole vector batch and replay each stream to a shared timestep.
+
+## 2026-06-23 - RR-14: Vector-consistent reset corpus
+
+Implemented:
+
+```text
+hcl-poc rl-rerun collect-vector-data
+hcl-poc rl-rerun audit-vector-data
+```
+
+The new corpus stores full vector CUDA batches with `batch_seed`, stream-wise
+actions, simulator states, DINO features, proprioception, and success flags.
+The local reset rule is: recreate the same vector env size, reset with the
+stored vector `batch_seed`, and replay all streams in that batch to a shared
+timestep. Streams from different vector batches must not be mixed in one reset.
+
+Detailed spec:
+
+```text
+rl_rerun_vector_dataset_spec.md
+```
+
+Pilot collection:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml collect-vector-data --num-envs 16 --batches 2 --max-steps 60 --seed-start 9600000 --output data/rl_rerun/pusht_vector_state_demos_pilot.h5 --force
+```
+
+Pilot audit:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-vector-data --dataset data/rl_rerun/pusht_vector_state_demos_pilot.h5 --batches 4 --seed 0 --horizon 10 --output results/rl_rerun/vector_state_audit_pilot.json
+```
+
+Development-scale collection:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml collect-vector-data --num-envs 512 --batches 1 --max-steps 60 --seed-start 9700000 --output data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --force
+```
+
+Development-scale audit:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-vector-data --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 --batches 4 --seed 1 --horizon 10 --output results/rl_rerun/vector_state_audit_n512_b1.json
+```
+
+Results:
+
+| corpus | size | streams | successful streams | current state error | goal state error | frame MSE | gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| pilot `16 x 2 x 60` | 46 MB | 32 | 20 | 0.0 | 0.0 | 0.0 | pass |
+| dev `512 x 1 x 60` | 0.72 GB | 512 | 388 | 0.0 | 0.0 | 0.0 | pass |
+
+Tracked audit outputs:
+
+```text
+rl_rerun_vector_state_audit_pilot.json
+rl_rerun_vector_state_audit_n512_b1.json
+```
+
+Interpretation: the vector-consistent collection fixes the hidden-state problem
+found in RR-13. The `512 x 60` corpus is exact for current state and local
+Mode-A future goal replay at `t+10`, matching the first serious parallelism
+setting from the throughput gate. The next implementation step is to build the
+Mode-A local PPO environment on top of this vector batch reset rule.

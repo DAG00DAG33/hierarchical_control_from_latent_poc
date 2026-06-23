@@ -46,6 +46,18 @@ def _rgb_and_state(obs: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     return rgb.astype(np.uint8), state.astype(np.float32)
 
 
+def _vector_rgb_and_state(obs: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    rgb = _to_numpy(obs["sensor_data"]["base_camera"]["rgb"])
+    state = _to_numpy(obs["state"])
+    if rgb.ndim != 4:
+        raise ValueError(f"Expected vector RGB observation with 4 dims, got {rgb.shape}")
+    if state.ndim != 2:
+        raise ValueError(f"Expected vector state observation with 2 dims, got {state.shape}")
+    if rgb.shape[-1] == 4:
+        rgb = rgb[..., :3]
+    return rgb.astype(np.uint8), state.astype(np.float32)
+
+
 def _git_metadata() -> dict[str, Any]:
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -66,6 +78,14 @@ def _git_metadata() -> dict[str, Any]:
 
 def _state_dataset_path(config: Config) -> Path:
     return config.path_value("paths.incremental_data_dir").parent / "rl_rerun" / "pusht_state_demos.h5"
+
+
+def _vector_dataset_path(config: Config) -> Path:
+    return (
+        config.path_value("paths.incremental_data_dir").parent
+        / "rl_rerun"
+        / "pusht_vector_state_demos.h5"
+    )
 
 
 def _state_audit_result_dir(config: Config) -> Path:
@@ -964,6 +984,302 @@ def run_rl_rerun_local_reset_audit(
         ),
     }
     out_path = output_path or (_state_audit_result_dir(config) / "local_reset_audit.json")
+    ensure_dir(out_path.parent)
+    write_json(out_path, result)
+    return out_path
+
+
+@torch.inference_mode()
+def collect_rl_rerun_vector_dataset(
+    config: Config,
+    output_path: Path | None = None,
+    num_envs: int = 16,
+    batches: int = 2,
+    max_steps: int = 60,
+    seed_start: int = 9_500_000,
+    checkpoint_path: Path | None = None,
+    store_dino: bool = True,
+    force: bool = False,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+
+    if num_envs <= 0 or batches <= 0 or max_steps <= 10:
+        raise ValueError("num_envs and batches must be positive; max_steps must exceed 10")
+    out_path = output_path or _vector_dataset_path(config)
+    if out_path.exists() and not force:
+        with h5py.File(out_path, "r") as h5:
+            existing = len([key for key in h5.keys() if key.startswith("batch_")])
+        if existing >= batches:
+            return out_path
+    ensure_dir(out_path.parent)
+    tmp_path = out_path.with_suffix(".tmp.h5")
+    tmp_path.unlink(missing_ok=True)
+
+    device = default_device()
+    teacher_path = checkpoint_path or _rl_paths(config).best
+    teacher = load_ppo_agent(teacher_path, device)
+    dino = _phase4_dino_from_config(config, device) if store_dino else None
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+
+    try:
+        with h5py.File(tmp_path, "w") as h5:
+            meta = h5.create_group("meta")
+            meta.attrs["source"] = "vector_consistent_privileged_ppo"
+            meta.attrs["checkpoint"] = str(teacher_path)
+            meta.attrs["num_envs"] = int(num_envs)
+            meta.attrs["batches"] = int(batches)
+            meta.attrs["max_steps"] = int(max_steps)
+            meta.attrs["seed_start"] = int(seed_start)
+            meta.attrs["sim_backend"] = _rl_backend(config)
+            meta.attrs["control_mode"] = config.get("control_mode")
+            meta.attrs["obs_mode"] = "rgb+state"
+            meta.attrs["store_dino"] = bool(store_dino)
+            meta.attrs["dino_model"] = config.get("dino.model_name")
+            meta.attrs["dino_feature_type"] = config.get("dino.feature_type", "cls")
+            meta.attrs.update(_git_metadata())
+            for batch_index in trange(batches, desc="collect vector PPO batches"):
+                batch_seed = int(seed_start + batch_index)
+                obs, _info = env.reset(seed=batch_seed)
+
+                states: list[np.ndarray] = []
+                obs_states: list[np.ndarray] = []
+                proprios: list[np.ndarray] = []
+                dinos: list[np.ndarray] = []
+                raw_actions: list[np.ndarray] = []
+                executed_actions: list[np.ndarray] = []
+                previous_actions: list[np.ndarray] = []
+                rewards: list[np.ndarray] = []
+                terminated_flags: list[np.ndarray] = []
+                truncated_flags: list[np.ndarray] = []
+                success_flags: list[np.ndarray] = []
+                success_once = np.zeros(num_envs, dtype=np.bool_)
+                previous = np.zeros((num_envs, 3), dtype=np.float32)
+
+                def store_observation(current_obs: dict[str, Any]) -> None:
+                    rgb, state = _vector_rgb_and_state(current_obs)
+                    states.append(
+                        _to_numpy(env.unwrapped.get_state()).astype(np.float32).copy()
+                    )
+                    obs_states.append(state.astype(np.float32).copy())
+                    proprios.append(state[:, :21].astype(np.float32).copy())
+                    if dino is not None:
+                        features = [dino.encode_batch(chunk) for chunk in batched(rgb, int(config.get("dino.batch_size", 64)))]
+                        dinos.append(np.concatenate(features, axis=0).astype(np.float32))
+
+                store_observation(obs)
+                for _step in range(max_steps):
+                    state_t = torch.from_numpy(obs_states[-1]).to(device).float()
+                    action_t, _logprob, _entropy, _value = teacher.get_action_and_value(
+                        state_t,
+                        deterministic=True,
+                    )
+                    raw_action = action_t.detach().cpu().numpy().astype(np.float32)
+                    executed = torch.clamp(action_t, action_low, action_high)
+                    executed_np = executed.detach().cpu().numpy().astype(np.float32)
+                    next_obs, reward, terminated, truncated, info = env.step(executed)
+                    success = _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_))).reshape(-1).astype(np.bool_)
+                    success_once |= success
+
+                    raw_actions.append(raw_action)
+                    executed_actions.append(executed_np)
+                    previous_actions.append(previous.copy())
+                    rewards.append(_to_numpy(reward).reshape(-1).astype(np.float32))
+                    terminated_flags.append(
+                        _to_numpy(terminated).reshape(-1).astype(np.bool_)
+                    )
+                    truncated_flags.append(_to_numpy(truncated).reshape(-1).astype(np.bool_))
+                    success_flags.append(success)
+                    previous = executed_np
+                    obs = next_obs
+                    store_observation(obs)
+
+                group = h5.create_group(f"batch_{batch_index:06d}")
+                group.attrs["batch_seed"] = batch_seed
+                group.attrs["num_envs"] = int(num_envs)
+                group.attrs["max_steps"] = int(max_steps)
+                group.attrs["success_count"] = int(success_once.sum())
+                group.create_dataset("simulator_states", data=np.stack(states), compression="gzip")
+                group.create_dataset("observations_state", data=np.stack(obs_states), compression="gzip")
+                group.create_dataset("proprio", data=np.stack(proprios), compression="gzip")
+                if dinos:
+                    group.create_dataset("dino", data=np.stack(dinos), compression="gzip")
+                group.create_dataset("raw_actions", data=np.stack(raw_actions), compression="gzip")
+                group.create_dataset(
+                    "executed_actions", data=np.stack(executed_actions), compression="gzip"
+                )
+                group.create_dataset(
+                    "previous_executed_actions",
+                    data=np.stack(previous_actions),
+                    compression="gzip",
+                )
+                group.create_dataset("rewards", data=np.stack(rewards), compression="gzip")
+                group.create_dataset(
+                    "terminated", data=np.stack(terminated_flags), compression="gzip"
+                )
+                group.create_dataset(
+                    "truncated", data=np.stack(truncated_flags), compression="gzip"
+                )
+                group.create_dataset("success", data=np.stack(success_flags), compression="gzip")
+                group.create_dataset("success_once", data=success_once, compression="gzip")
+    finally:
+        env.close()
+    tmp_path.replace(out_path)
+    return out_path
+
+
+@torch.inference_mode()
+def audit_rl_rerun_vector_dataset(
+    config: Config,
+    dataset_path: Path | None = None,
+    batches: int = 4,
+    seed: int = 0,
+    horizon: int = 10,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+
+    path = dataset_path or _vector_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if batches <= 0 or horizon <= 0:
+        raise ValueError("batches and horizon must be positive")
+
+    rng = np.random.default_rng(seed)
+    device = default_device()
+    with h5py.File(path, "r") as h5:
+        meta = h5["meta"].attrs
+        num_envs = int(meta["num_envs"])
+        max_steps = int(meta["max_steps"])
+        store_dino = bool(meta["store_dino"])
+        batch_keys = sorted(key for key in h5.keys() if key.startswith("batch_"))
+    dino = _phase4_dino_from_config(config, device) if store_dino else None
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+
+    current_state_errors: list[float] = []
+    current_obs_errors: list[float] = []
+    current_frame_errors: list[float] = []
+    goal_state_errors: list[float] = []
+    goal_obs_errors: list[float] = []
+    goal_frame_errors: list[float] = []
+    previous_action_errors: list[float] = []
+    chosen_timesteps: list[int] = []
+    chosen_batches: list[str] = []
+
+    try:
+        with h5py.File(path, "r") as h5:
+            for _ in range(batches):
+                key = str(rng.choice(batch_keys))
+                group = h5[key]
+                t = int(rng.integers(0, max_steps - horizon + 1))
+                obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
+                for step in range(t):
+                    action = torch.from_numpy(
+                        np.asarray(group["executed_actions"][step], dtype=np.float32)
+                    ).to(device)
+                    obs, _reward, _terminated, _truncated, _info = env.step(action)
+
+                actual_state = _to_numpy(env.unwrapped.get_state()).astype(np.float32)
+                actual_obs_state = _to_numpy(obs["state"]).astype(np.float32)
+                expected_state = np.asarray(group["simulator_states"][t], dtype=np.float32)
+                expected_obs_state = np.asarray(group["observations_state"][t], dtype=np.float32)
+                current_state_errors.append(float(np.max(np.abs(actual_state - expected_state))))
+                current_obs_errors.append(
+                    float(np.max(np.abs(actual_obs_state - expected_obs_state)))
+                )
+                previous = (
+                    np.zeros((num_envs, 3), dtype=np.float32)
+                    if t == 0
+                    else np.asarray(group["executed_actions"][t - 1], dtype=np.float32)
+                )
+                expected_previous = np.asarray(
+                    group["previous_executed_actions"][t], dtype=np.float32
+                )
+                previous_action_errors.append(float(np.max(np.abs(previous - expected_previous))))
+                if dino is not None and "dino" in group:
+                    expected_frame = np.concatenate(
+                        [
+                            np.asarray(group["dino"][t], dtype=np.float32),
+                            np.asarray(group["proprio"][t], dtype=np.float32),
+                        ],
+                        axis=-1,
+                    )
+                    actual_frame = _phase4_frame_inputs(
+                        obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    current_frame_errors.append(
+                        float(np.mean(np.square(actual_frame - expected_frame)))
+                    )
+
+                for step in range(t, t + horizon):
+                    action = torch.from_numpy(
+                        np.asarray(group["executed_actions"][step], dtype=np.float32)
+                    ).to(device)
+                    obs, _reward, _terminated, _truncated, _info = env.step(action)
+                actual_goal_state = _to_numpy(env.unwrapped.get_state()).astype(np.float32)
+                actual_goal_obs_state = _to_numpy(obs["state"]).astype(np.float32)
+                expected_goal_state = np.asarray(
+                    group["simulator_states"][t + horizon], dtype=np.float32
+                )
+                expected_goal_obs_state = np.asarray(
+                    group["observations_state"][t + horizon], dtype=np.float32
+                )
+                goal_state_errors.append(
+                    float(np.max(np.abs(actual_goal_state - expected_goal_state)))
+                )
+                goal_obs_errors.append(
+                    float(np.max(np.abs(actual_goal_obs_state - expected_goal_obs_state)))
+                )
+                if dino is not None and "dino" in group:
+                    expected_goal_frame = np.concatenate(
+                        [
+                            np.asarray(group["dino"][t + horizon], dtype=np.float32),
+                            np.asarray(group["proprio"][t + horizon], dtype=np.float32),
+                        ],
+                        axis=-1,
+                    )
+                    actual_goal_frame = _phase4_frame_inputs(
+                        obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    goal_frame_errors.append(
+                        float(np.mean(np.square(actual_goal_frame - expected_goal_frame)))
+                    )
+                chosen_timesteps.append(t)
+                chosen_batches.append(key)
+    finally:
+        env.close()
+
+    result = {
+        "dataset": str(path),
+        "seed": seed,
+        "audited_batches": batches,
+        "num_envs": num_envs,
+        "horizon": horizon,
+        "max_steps": max_steps,
+        "chosen_timestep_min": int(min(chosen_timesteps)),
+        "chosen_timestep_max": int(max(chosen_timesteps)),
+        "chosen_batches": chosen_batches,
+        "current_state_max_abs_error": float(max(current_state_errors)),
+        "current_obs_state_max_abs_error": float(max(current_obs_errors)),
+        "current_frame_mse_max": float(max(current_frame_errors)) if current_frame_errors else None,
+        "current_frame_mse_mean": float(np.mean(current_frame_errors)) if current_frame_errors else None,
+        "goal_state_max_abs_error": float(max(goal_state_errors)),
+        "goal_obs_state_max_abs_error": float(max(goal_obs_errors)),
+        "goal_frame_mse_max": float(max(goal_frame_errors)) if goal_frame_errors else None,
+        "goal_frame_mse_mean": float(np.mean(goal_frame_errors)) if goal_frame_errors else None,
+        "previous_action_max_abs_error": float(max(previous_action_errors)),
+        "gate_pass": bool(
+            max(current_state_errors) == 0.0
+            and max(current_obs_errors) == 0.0
+            and max(goal_state_errors) == 0.0
+            and max(goal_obs_errors) == 0.0
+            and max(previous_action_errors) == 0.0
+            and (not current_frame_errors or max(current_frame_errors) < 1e-4)
+            and (not goal_frame_errors or max(goal_frame_errors) < 1e-4)
+        ),
+    }
+    out_path = output_path or (_state_audit_result_dir(config) / "vector_state_audit.json")
     ensure_dir(out_path.parent)
     write_json(out_path, result)
     return out_path

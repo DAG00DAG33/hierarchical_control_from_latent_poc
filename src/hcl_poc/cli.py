@@ -110,7 +110,9 @@ from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.rl_rerun import (
     audit_rl_rerun_state_dataset,
+    audit_rl_rerun_vector_dataset,
     collect_rl_rerun_state_dataset,
+    collect_rl_rerun_vector_dataset,
     ensure_rl_rerun_action_aliases,
     run_rl_rerun_algorithm_audit,
     run_rl_rerun_local_reset_audit,
@@ -230,6 +232,20 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 force=args.force,
             )
         )
+    elif args.rl_rerun_command == "collect-vector-data":
+        console.print(
+            collect_rl_rerun_vector_dataset(
+                config,
+                output_path=Path(args.output) if args.output else None,
+                num_envs=args.num_envs,
+                batches=args.batches,
+                max_steps=args.max_steps,
+                seed_start=args.seed_start,
+                checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+                store_dino=not args.no_store_dino,
+                force=args.force,
+            )
+        )
     elif args.rl_rerun_command == "audit-state-data":
         console.print(
             audit_rl_rerun_state_dataset(
@@ -240,6 +256,17 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 seed=args.seed,
                 recompute_dino=args.recompute_dino,
                 warm_start_replay=args.warm_start_replay,
+            )
+        )
+    elif args.rl_rerun_command == "audit-vector-data":
+        console.print(
+            audit_rl_rerun_vector_dataset(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                batches=args.batches,
+                seed=args.seed,
+                horizon=args.horizon,
+                output_path=Path(args.output) if args.output else None,
             )
         )
     elif args.rl_rerun_command == "ensure-action-aliases":
@@ -1279,6 +1306,16 @@ def build_parser() -> argparse.ArgumentParser:
     collect_state.add_argument("--store-rgb", action="store_true")
     collect_state.add_argument("--force", action="store_true")
     collect_state.set_defaults(func=rl_rerun_cmd)
+    collect_vector = rl_rerun_sub.add_parser("collect-vector-data")
+    collect_vector.add_argument("--output")
+    collect_vector.add_argument("--num-envs", type=int, default=16)
+    collect_vector.add_argument("--batches", type=int, default=2)
+    collect_vector.add_argument("--max-steps", type=int, default=60)
+    collect_vector.add_argument("--seed-start", type=int, default=9_500_000)
+    collect_vector.add_argument("--checkpoint")
+    collect_vector.add_argument("--no-store-dino", action="store_true")
+    collect_vector.add_argument("--force", action="store_true")
+    collect_vector.set_defaults(func=rl_rerun_cmd)
     audit_state = rl_rerun_sub.add_parser("audit-state-data")
     audit_state.add_argument("--dataset")
     audit_state.add_argument("--samples", type=int, default=100)
@@ -1287,6 +1324,13 @@ def build_parser() -> argparse.ArgumentParser:
     audit_state.add_argument("--recompute-dino", action="store_true")
     audit_state.add_argument("--warm-start-replay", action="store_true")
     audit_state.set_defaults(func=rl_rerun_cmd)
+    audit_vector = rl_rerun_sub.add_parser("audit-vector-data")
+    audit_vector.add_argument("--dataset")
+    audit_vector.add_argument("--batches", type=int, default=4)
+    audit_vector.add_argument("--seed", type=int, default=0)
+    audit_vector.add_argument("--horizon", type=int, default=10)
+    audit_vector.add_argument("--output")
+    audit_vector.set_defaults(func=rl_rerun_cmd)
     aliases = rl_rerun_sub.add_parser("ensure-action-aliases")
     aliases.add_argument("--dataset")
     aliases.set_defaults(func=rl_rerun_cmd)
