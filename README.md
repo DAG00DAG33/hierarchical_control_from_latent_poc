@@ -237,6 +237,8 @@ not the final result of this repository:
 - [LEARNED_INTERFACE_FINAL_RESULTS.md](LEARNED_INTERFACE_FINAL_RESULTS.md):
   candidate-selection development results for VAE and effect interfaces.
 - [pre_rl_summary.md](pre_rl_summary.md): explicit TCP endpoint interface.
+- [rl_rerun_final_results.md](rl_rerun_final_results.md): exact-reset
+  low-level RL rerun with R1/R2/R3 comparisons.
 - [FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md): earlier
   AE hierarchy and flat-policy studies.
 - [INCREMENTAL_EXPERIMENT_LOG.md](INCREMENTAL_EXPERIMENT_LOG.md): complete
