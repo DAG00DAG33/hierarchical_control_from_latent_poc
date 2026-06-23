@@ -102,6 +102,7 @@ from hcl_poc.learned_interface import (
 from hcl_poc.low_level_rl import (
     audit_low_level_rl,
     evaluate_residual_rl,
+    train_direct_low_rl,
     train_residual_rl,
 )
 from hcl_poc.report import build_report
@@ -151,6 +152,27 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 alpha=args.alpha,
                 terminal_weight=args.terminal_weight,
                 task_reward_weight=args.task_reward_weight,
+                task_progress_weight=args.task_progress_weight,
+                force=args.force,
+            )
+        )
+    elif args.low_level_rl_command == "train-r3":
+        run_config = config
+        if args.no_segment_terminate_gae:
+            raw = copy.deepcopy(config.raw)
+            raw.setdefault("low_level_rl", {})["segment_terminates_gae"] = False
+            run_config = type(config)(raw=raw, path=config.path)
+        console.print(
+            train_direct_low_rl(
+                run_config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                run_name=args.run_name,
+                total_steps=args.steps,
+                bc_weight=args.bc_weight,
+                terminal_weight=args.terminal_weight,
+                task_reward_weight=args.task_reward_weight,
+                task_progress_weight=args.task_progress_weight,
                 force=args.force,
             )
         )
@@ -1102,9 +1124,22 @@ def build_parser() -> argparse.ArgumentParser:
     train_r1.add_argument("--alpha", type=float, default=0.1)
     train_r1.add_argument("--terminal-weight", type=float, default=1.0)
     train_r1.add_argument("--task-reward-weight", type=float, default=0.0)
+    train_r1.add_argument("--task-progress-weight", type=float, default=0.0)
     train_r1.add_argument("--no-segment-terminate-gae", action="store_true")
     train_r1.add_argument("--force", action="store_true")
     train_r1.set_defaults(func=low_level_rl_cmd)
+    train_r3 = low_level_rl_sub.add_parser("train-r3")
+    train_r3.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    train_r3.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
+    train_r3.add_argument("--run-name", required=True)
+    train_r3.add_argument("--steps", type=int, required=True)
+    train_r3.add_argument("--bc-weight", type=float, default=1.0)
+    train_r3.add_argument("--terminal-weight", type=float, default=1.0)
+    train_r3.add_argument("--task-reward-weight", type=float, default=0.0)
+    train_r3.add_argument("--task-progress-weight", type=float, default=0.0)
+    train_r3.add_argument("--no-segment-terminate-gae", action="store_true")
+    train_r3.add_argument("--force", action="store_true")
+    train_r3.set_defaults(func=low_level_rl_cmd)
     low_eval = low_level_rl_sub.add_parser("eval")
     low_eval.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
     low_eval.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)

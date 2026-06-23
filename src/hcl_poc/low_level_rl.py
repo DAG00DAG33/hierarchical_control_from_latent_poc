@@ -263,6 +263,7 @@ class HierarchyRollout:
         self.previous_action: np.ndarray
         self.held_goal: np.ndarray
         self.countdown: np.ndarray
+        self.previous_env_reward: np.ndarray
         self.reset()
 
     def reset(self) -> None:
@@ -277,6 +278,7 @@ class HierarchyRollout:
         self.previous_action = np.repeat(self.zero_previous[None], self.num_envs, axis=0)
         self.held_goal = np.zeros((self.num_envs, self.frozen.goal_dim), dtype=np.float32)
         self.countdown = np.zeros(self.num_envs, dtype=np.int32)
+        self.previous_env_reward = np.zeros(self.num_envs, dtype=np.float32)
 
     @torch.inference_mode()
     def condition(
@@ -318,22 +320,28 @@ class HierarchyRollout:
         previous_distance: np.ndarray,
         terminal_weight: float,
         task_reward_weight: float,
+        task_progress_weight: float,
         residual_penalty: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         next_obs, env_reward, terminated, truncated, info = self.env.step(executed_action)
         done = torch.logical_or(terminated, truncated).detach().cpu().numpy().reshape(-1)
+        env_reward_np = env_reward.detach().cpu().numpy().reshape(-1).astype(np.float32)
         next_frames = _phase4_frame_inputs(
             next_obs, self.dino, int(self.config.get("dino.batch_size", 64))
         )
         next_latent = _encode_frames(self.frozen, next_frames, self.device)
         next_distance = np.mean(np.square(next_latent - self.held_goal), axis=-1).astype(np.float32)
         segment_end = self.countdown == 1
+        env_progress = env_reward_np - self.previous_env_reward
         reward = previous_distance - next_distance
         reward -= residual_penalty
         reward -= terminal_weight * next_distance * segment_end.astype(np.float32)
-        reward += task_reward_weight * env_reward.detach().cpu().numpy().reshape(-1)
+        reward += task_reward_weight * env_reward_np
+        reward += task_progress_weight * env_progress
         # Auto-reset observations do not belong to the previous held goal.
-        reward[done] = task_reward_weight * env_reward.detach().cpu().numpy().reshape(-1)[done]
+        reward[done] = (
+            task_reward_weight * env_reward_np[done] + task_progress_weight * env_progress[done]
+        )
         self.obs = next_obs
         self.frames = next_frames
         self.normalized_frames = self.frozen.frame_norm.transform(next_frames)
@@ -343,14 +351,17 @@ class HierarchyRollout:
             clipped.cpu().numpy().astype(np.float32)
         )
         self.countdown -= 1
+        self.previous_env_reward = env_reward_np
         if np.any(done):
             self.previous_action[done] = self.zero_previous
             self.countdown[done] = 0
+            self.previous_env_reward[done] = 0.0
         metrics = {
             "next_distance": next_distance,
             "segment_end": segment_end,
             "done": done,
-            "env_reward": env_reward.detach().cpu().numpy().reshape(-1),
+            "env_reward": env_reward_np,
+            "env_progress": env_progress,
             "info": info,
         }
         return reward.astype(np.float32), done.astype(np.float32), metrics
@@ -435,7 +446,7 @@ def audit_low_level_rl(config: Config, n_demo: int, seed: int) -> Path:
 
 def _save_checkpoint(
     path: Path,
-    agent: ResidualActorCritic,
+    agent: ResidualActorCritic | DirectLowActorCritic,
     optimizer: torch.optim.Optimizer,
     global_step: int,
     recipe: dict[str, Any],
@@ -561,6 +572,7 @@ def evaluate_residual_rl(
             distance,
             terminal_weight=0.0,
             task_reward_weight=0.0,
+            task_progress_weight=0.0,
             residual_penalty=np.zeros(num_envs, dtype=np.float32),
         )
         segment_end = metrics["segment_end"]
@@ -624,6 +636,7 @@ def train_residual_rl(
     alpha: float,
     terminal_weight: float,
     task_reward_weight: float = 0.0,
+    task_progress_weight: float = 0.0,
     force: bool = False,
 ) -> Path:
     if n_demo not in {500, 1000}:
@@ -662,6 +675,7 @@ def train_residual_rl(
         "alpha": alpha,
         "terminal_weight": terminal_weight,
         "task_reward_weight": task_reward_weight,
+        "task_progress_weight": task_progress_weight,
         "residual_penalty_weight": float(config.get("low_level_rl.residual_penalty_weight", 0.01)),
         "segment_terminates_gae": bool(config.get("low_level_rl.segment_terminates_gae", True)),
         "rollout_mode": "full_hierarchy_segment_reward",
@@ -738,7 +752,7 @@ def train_residual_rl(
                     residual_penalty_weight * torch.mean(residual.square(), dim=-1).cpu().numpy()
                 )
                 reward, done, metrics = rollout.step(
-                    action, distance, terminal_weight, task_reward_weight, penalty
+                    action, distance, terminal_weight, task_reward_weight, task_progress_weight, penalty
                 )
                 reward_buf[step] = torch.from_numpy(reward).to(device)
                 # Each held goal defines a local 10-step MDP. Do not carry
@@ -827,6 +841,272 @@ def train_residual_rl(
                 "action_saturation_rate": saturation_count / batch_size,
                 "policy_loss": float(policy_loss.detach().cpu()),
                 "value_loss": float(value_loss.detach().cpu()),
+                "clip_fraction": float(np.mean(clip_fractions)),
+                "elapsed_s": timer.elapsed(),
+            }
+            history.append(row)
+            score = -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
+            if score > best_score:
+                best_score = score
+                _save_checkpoint(
+                    best_train_latent,
+                    agent,
+                    optimizer,
+                    global_step,
+                    recipe,
+                    history,
+                )
+            if global_step >= next_checkpoint or global_step >= total_steps:
+                _save_checkpoint(latest, agent, optimizer, global_step, recipe, history)
+                _save_checkpoint(
+                    artifact / f"step_{global_step:09d}.pt",
+                    agent,
+                    optimizer,
+                    global_step,
+                    recipe,
+                    history,
+                )
+                write_json(
+                    result / "train_metrics.json",
+                    {"recipe": recipe, "latest": row, "history": history},
+                )
+                next_checkpoint += checkpoint_every
+    finally:
+        progress.close()
+        rollout.close()
+    return latest
+
+
+def train_direct_low_rl(
+    config: Config,
+    n_demo: int,
+    seed: int,
+    run_name: str,
+    total_steps: int,
+    bc_weight: float,
+    terminal_weight: float,
+    task_reward_weight: float = 0.0,
+    task_progress_weight: float = 0.0,
+    force: bool = False,
+) -> Path:
+    if n_demo not in {500, 1000}:
+        raise ValueError("Low-level RL currently supports N_demo in {500, 1000}")
+    artifact, result = _paths(config, n_demo, seed, run_name)
+    latest = artifact / "latest.pt"
+    best_train_latent = artifact / "best_train_latent.pt"
+    if force:
+        latest.unlink(missing_ok=True)
+        best_train_latent.unlink(missing_ok=True)
+    device = default_device()
+    set_seed(seed + 60_000)
+    frozen = _load_frozen(config, n_demo, seed, device)
+    if any(
+        parameter.requires_grad
+        for module in (frozen.encoder, frozen.high_model, frozen.low_model)
+        for parameter in module.parameters()
+    ):
+        raise RuntimeError("Frozen hierarchy unexpectedly has trainable parameters")
+    condition_dim = frozen.frame_dim + frozen.goal_dim + 4
+    width = int(config.get("low_level_rl.residual_width", 256))
+    depth = int(config.get("low_level_rl.residual_depth", 2))
+    agent = DirectLowActorCritic(
+        frozen.low_model,
+        frozen.action_norm.mean,
+        frozen.action_norm.std,
+        condition_dim,
+        width=width,
+        depth=depth,
+        initial_logstd=float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
+    ).to(device)
+    trainable = [parameter for parameter in agent.parameters() if parameter.requires_grad]
+    optimizer = torch.optim.Adam(
+        trainable,
+        lr=float(config.get("low_level_rl.direct_learning_rate", 3e-5)),
+        eps=1e-5,
+    )
+    recipe = {
+        "method": "r3_direct_last_layer",
+        "n_demo": n_demo,
+        "seed": seed,
+        "bc_weight": bc_weight,
+        "terminal_weight": terminal_weight,
+        "task_reward_weight": task_reward_weight,
+        "task_progress_weight": task_progress_weight,
+        "segment_terminates_gae": bool(config.get("low_level_rl.segment_terminates_gae", True)),
+        "rollout_mode": "full_hierarchy_segment_reward",
+        "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
+        "frozen_hierarchy": str(frozen.checkpoint_path),
+    }
+    global_step = 0
+    history: list[dict[str, Any]] = []
+    best_score = -math.inf
+    if latest.exists() and not force:
+        checkpoint = torch.load(latest, map_location=device, weights_only=False)
+        if checkpoint["recipe"] != recipe:
+            raise ValueError(f"Existing run {run_name} has a different recipe")
+        agent.load_state_dict(checkpoint["agent"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        global_step = int(checkpoint["global_step"])
+        history = list(checkpoint["history"])
+    if global_step >= total_steps:
+        return latest
+    num_envs = int(config.get("low_level_rl.num_envs", 32))
+    rollout_steps = int(config.get("low_level_rl.rollout_steps", 32))
+    batch_size = num_envs * rollout_steps
+    minibatches = int(config.get("low_level_rl.num_minibatches", 8))
+    if batch_size % minibatches:
+        raise ValueError("RL batch size must divide num_minibatches")
+    minibatch_size = batch_size // minibatches
+    rollout = HierarchyRollout(
+        config,
+        frozen,
+        num_envs,
+        int(config.get("low_level_rl.train_seed_start", 3_000_000)) + seed * 100_000,
+        device,
+    )
+    condition_buf = torch.zeros((rollout_steps, num_envs, condition_dim), device=device)
+    raw_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
+    base_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
+    logprob_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    reward_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    done_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    value_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    next_done = torch.zeros(num_envs, device=device)
+    gamma = float(config.get("low_level_rl.gamma", 0.99))
+    gae_lambda = float(config.get("low_level_rl.gae_lambda", 0.95))
+    clip_coef = float(config.get("low_level_rl.clip_coef", 0.2))
+    ent_coef = float(config.get("low_level_rl.entropy_coef", 0.0))
+    value_coef = float(config.get("low_level_rl.value_coef", 0.5))
+    update_epochs = int(config.get("low_level_rl.update_epochs", 4))
+    max_grad_norm = float(config.get("low_level_rl.max_grad_norm", 0.5))
+    checkpoint_every = int(config.get("low_level_rl.checkpoint_every_steps", 25_000))
+    next_checkpoint = ((global_step // checkpoint_every) + 1) * checkpoint_every
+    timer = Timer()
+    progress = trange(
+        global_step, total_steps, initial=global_step, total=total_steps, desc=run_name
+    )
+    try:
+        while global_step < total_steps:
+            agent.eval()
+            distance_values: list[float] = []
+            terminal_distances: list[float] = []
+            delta_values: list[float] = []
+            saturation_count = 0
+            for step in range(rollout_steps):
+                condition, base_action, distance, _replan = rollout.condition()
+                condition_buf[step] = condition
+                base_action_buf[step] = base_action
+                done_buf[step] = next_done
+                with torch.no_grad():
+                    raw_action, logprob, _entropy, value = agent.get_action_and_value(condition)
+                action = torch.clamp(raw_action, rollout.action_low, rollout.action_high)
+                raw_action_buf[step] = raw_action
+                logprob_buf[step] = logprob
+                value_buf[step] = value
+                reward, done, metrics = rollout.step(
+                    action,
+                    distance,
+                    terminal_weight,
+                    task_reward_weight,
+                    task_progress_weight,
+                    np.zeros(num_envs, dtype=np.float32),
+                )
+                reward_buf[step] = torch.from_numpy(reward).to(device)
+                local_done = done.astype(bool)
+                if bool(config.get("low_level_rl.segment_terminates_gae", True)):
+                    local_done = np.logical_or(local_done, metrics["segment_end"])
+                next_done = torch.from_numpy(local_done.astype(np.float32)).to(device)
+                distance_values.extend(distance.tolist())
+                terminal_distances.extend(metrics["next_distance"][metrics["segment_end"]].tolist())
+                delta_values.extend(torch.linalg.vector_norm(raw_action - base_action, dim=-1).cpu().tolist())
+                saturation_count += int(torch.any(raw_action != action, dim=-1).sum().cpu())
+                global_step += num_envs
+                progress.update(min(num_envs, total_steps - progress.n))
+            with torch.no_grad():
+                next_condition, _base, _distance, _replan = rollout.condition()
+                next_value = agent.critic(next_condition).flatten()
+                advantages = torch.zeros_like(reward_buf)
+                last_gae = torch.zeros(num_envs, device=device)
+                for step in reversed(range(rollout_steps)):
+                    if step == rollout_steps - 1:
+                        next_nonterminal = 1.0 - next_done
+                        following_value = next_value
+                    else:
+                        next_nonterminal = 1.0 - done_buf[step + 1]
+                        following_value = value_buf[step + 1]
+                    delta = (
+                        reward_buf[step]
+                        + gamma * following_value * next_nonterminal
+                        - value_buf[step]
+                    )
+                    last_gae = delta + gamma * gae_lambda * next_nonterminal * last_gae
+                    advantages[step] = last_gae
+                returns = advantages + value_buf
+            flat_condition = condition_buf.flatten(0, 1)
+            flat_action = raw_action_buf.flatten(0, 1)
+            flat_base_action = base_action_buf.flatten(0, 1)
+            flat_logprob = logprob_buf.flatten()
+            flat_advantage = advantages.flatten()
+            flat_return = returns.flatten()
+            flat_value = value_buf.flatten()
+            indices = np.arange(batch_size)
+            clip_fractions: list[float] = []
+            bc_losses: list[float] = []
+            agent.train()
+            for _epoch in range(update_epochs):
+                np.random.shuffle(indices)
+                for start in range(0, batch_size, minibatch_size):
+                    selected = indices[start : start + minibatch_size]
+                    _action, new_logprob, entropy, new_value = agent.get_action_and_value(
+                        flat_condition[selected], raw_action=flat_action[selected]
+                    )
+                    mean_action = agent.mean_action(flat_condition[selected])
+                    bc_loss = torch.mean((mean_action - flat_base_action[selected]).square())
+                    log_ratio = new_logprob - flat_logprob[selected]
+                    ratio = log_ratio.exp()
+                    advantage = flat_advantage[selected]
+                    advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+                    policy_loss = torch.maximum(
+                        -advantage * ratio,
+                        -advantage * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef),
+                    ).mean()
+                    value_prediction = new_value.flatten()
+                    value_clipped = flat_value[selected] + torch.clamp(
+                        value_prediction - flat_value[selected], -clip_coef, clip_coef
+                    )
+                    value_loss = (
+                        0.5
+                        * torch.maximum(
+                            (value_prediction - flat_return[selected]).square(),
+                            (value_clipped - flat_return[selected]).square(),
+                        ).mean()
+                    )
+                    loss = (
+                        policy_loss
+                        + value_coef * value_loss
+                        - ent_coef * entropy.mean()
+                        + bc_weight * bc_loss
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(trainable, max_grad_norm)
+                    optimizer.step()
+                    clip_fractions.append(
+                        float(((ratio - 1).abs() > clip_coef).float().mean().detach().cpu())
+                    )
+                    bc_losses.append(float(bc_loss.detach().cpu()))
+            row = {
+                "global_step": global_step,
+                "mean_reward": float(reward_buf.mean().cpu()),
+                "mean_latent_distance": float(np.mean(distance_values)),
+                "mean_terminal_distance": float(np.mean(terminal_distances))
+                if terminal_distances
+                else None,
+                "mean_direct_delta_l2": float(np.mean(delta_values)),
+                "action_saturation_rate": saturation_count / batch_size,
+                "policy_loss": float(policy_loss.detach().cpu()),
+                "value_loss": float(value_loss.detach().cpu()),
+                "bc_loss": float(np.mean(bc_losses)),
                 "clip_fraction": float(np.mean(clip_fractions)),
                 "elapsed_s": timer.elapsed(),
             }

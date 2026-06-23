@@ -106,3 +106,87 @@ model code, but the executable CLI was not kept because the R1 gate failed and
 the plan explicitly treats R2-R4 as follow-ons only after R1 stability. The
 next serious branch should add stricter BC regularization and/or a physical
 progress reward before running direct fine-tuning.
+
+## 2026-06-23 - RL-04: R3 direct low-level fine-tuning scaffold
+
+R1 did not produce a reliable improvement, so the next branch is a conservative
+R3 variant: initialize from the deterministic BC low level, train only the final
+low-policy linear layer plus policy log-standard-deviation and critic, and add
+a BC action penalty against the frozen low-level action on every PPO minibatch.
+The high level, VAE, DINO, normalizers, and all earlier low-level layers remain
+frozen.
+
+Implemented:
+
+```text
+hcl-poc low-level-rl train-r3
+```
+
+Key defaults:
+
+| setting | value |
+| --- | --- |
+| trainable scope | low-policy final layer + logstd + critic |
+| optimizer LR | 3e-5 |
+| PPO rollout | 32 envs x 32 steps |
+| GAE boundary | held-goal segment ends |
+| reward | latent progress + terminal latent distance + optional task reward |
+| regularizer | `bc_weight * ||mean_action - frozen_bc_action||^2` |
+
+Smoke command:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r3 --n-demo 500 --seed 0 --run-name r3_bc1_terminal_smoke --steps 2048 --bc-weight 1.0 --terminal-weight 1.0 --force
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval --n-demo 500 --seed 0 --run-name r3_bc1_terminal_smoke --episodes 20 --seed-start 3200000 --force
+```
+
+Smoke result: checkpoint creation and direct-checkpoint evaluation both work.
+The 20-episode eval is too small for a decision, but deterministic action drift
+from frozen BC is low (`residual_l2_mean=0.0044`) and action saturation is
+similar to the frozen hierarchy (`0.043`).
+
+## 2026-06-23 - RL-05: R3 50k development sweep
+
+The first direct R3 attempts used the same exploration scale as the residual
+adapter (`initial_logstd=-2.3`, action std about `0.10`). This was too much for
+direct raw-action sampling: training rollouts had sampled action deltas around
+`0.16` L2 from frozen BC, even though deterministic checkpoints stayed close.
+Direct R3 now uses a separate lower exploration scale:
+
+```text
+low_level_rl.direct_initial_logstd = -4.0
+```
+
+Development runs at `N_demo=500`, seed 0:
+
+| run | checkpoint | eval eps | success | final latent MSE | goal reach | deterministic action drift | decision |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| frozen_reference | none | 100 | 0.38 | 1.530 | 0.595 | 0.000 | reference |
+| r3_bc1_terminal_50k | latest | 100 | 0.28 | 1.613 | 0.561 | 0.027 | reject |
+| r3_bc1_terminal_50k | best_train_latent | 100 | 0.29 | 1.718 | 0.544 | 0.017 | reject |
+| r3_bc1_task01_50k | latest | 100 | 0.25 | 1.658 | 0.555 | 0.021 | reject |
+| r3_bc1_lownoise_50k | latest | 100 | 0.28 | 1.670 | 0.553 | 0.014 | reject |
+| r3_bc1_lownoise_progress1_50k | latest | 100 | 0.29 | 1.508 | 0.592 | 0.013 | reject latest |
+| r3_bc1_lownoise_progress1_50k | best_train_latent at 5,120 steps | 100 | 0.40 | 1.622 | 0.587 | 0.0056 | promising |
+
+The task-progress reward is:
+
+```text
+r_task_progress = env_dense_reward_t+1 - env_dense_reward_t
+```
+
+It is used as an additional shaping term, not a replacement for the latent
+goal-reaching reward. The best selected progress checkpoint was then evaluated
+on the larger 300-episode development bank:
+
+| policy | checkpoint | eval eps | success | final latent MSE | goal reach | max reward | action drift |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen_reference_300 | none | 300 | 0.313 | 1.576 | 0.578 | 0.494 | 0.000 |
+| r3_bc1_lownoise_progress1_50k_best300 | best_train_latent at 5,120 steps | 300 | 0.390 | 1.597 | 0.588 | 0.547 | 0.0056 |
+
+Interpretation: the best low-noise R3 checkpoint improves task success and max
+reward for seed 0 while keeping the deterministic policy very close to BC. The
+latent goal metric is not clearly better than frozen, so this should be treated
+as a task-performance signal from mild low-level adaptation rather than proof
+that the latent reachability objective alone improved. Next step: repeat this
+same recipe for seeds 1 and 2 before doing longer or final-budget evaluations.

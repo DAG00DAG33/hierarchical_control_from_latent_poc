@@ -37,7 +37,9 @@ low_level_rl:
   residual_width: 256
   residual_depth: 2
   initial_logstd: -2.3
+  direct_initial_logstd: -4.0
   learning_rate: 0.0001
+  direct_learning_rate: 0.00003
   gamma: 0.99
   gae_lambda: 0.95
   clip_coef: 0.2
