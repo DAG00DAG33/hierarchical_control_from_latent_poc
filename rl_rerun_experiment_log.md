@@ -191,3 +191,96 @@ result root   = results/rl_rerun/vae512_scaling/n<N>
 It then writes the nested train/validation manifest, trains the VAE-512
 representation and deterministic high/low hierarchy from scratch, and evaluates
 the frozen learned-goal hierarchy.
+
+## 2026-06-23 - RR-05: Phase B first supervised rerun checkpoint
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-supervised --n-demo 500 --seed 0 --eval-episodes 100 --force
+```
+
+Artifacts:
+
+```text
+artifacts/rl_rerun/vae512_scaling/n500/learned_interface/vae512_w2048_b1e6/seed0/
+results/rl_rerun/vae512_scaling/n500/learned_interface/vae512_w2048_b1e6/seed0/learned_hierarchy_eval_100.json
+```
+
+Dataset split:
+
+| item | value |
+| --- | ---: |
+| train trajectories | 500 |
+| train transitions | 22518 |
+| validation trajectories | 200 |
+| validation transitions | 9005 |
+| equivalent behavior seconds | 1125.9 |
+
+Evaluation result:
+
+| metric | value |
+| --- | ---: |
+| episodes | 100 |
+| success | 0.24 |
+| final reward | 0.404 |
+| max reward | 0.432 |
+| teacher action MAE | 0.192 |
+| action saturation rate | 0.043 |
+| offline oracle action MAE | 0.0609 |
+| offline predicted action MAE | 0.0622 |
+| offline normalized goal L2 | 21.35 |
+| representation reconstruction MSE | 0.108 |
+
+Gate interpretation: this is close enough to the previous `n=500` learned
+hierarchy reference to continue Phase B, but it is not a strong result. The next
+check is the matched `n=1000, seed=0` rerun; if that does not recover expected
+performance, inspect whether the regenerated teacher corpus distribution differs
+from the older successful-data corpus before starting low-level RL.
+
+## 2026-06-23 - RR-06: Phase B `n=1000, seed=0` supervised rerun
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-supervised --n-demo 1000 --seed 0 --eval-episodes 100 --force
+```
+
+Artifacts:
+
+```text
+artifacts/rl_rerun/vae512_scaling/n1000/learned_interface/vae512_w2048_b1e6/seed0/
+results/rl_rerun/vae512_scaling/n1000/learned_interface/vae512_w2048_b1e6/seed0/learned_hierarchy_eval_100.json
+```
+
+Dataset split:
+
+| item | value |
+| --- | ---: |
+| train trajectories | 1000 |
+| train transitions | 44020 |
+| validation trajectories | 200 |
+| validation transitions | 9005 |
+| equivalent behavior seconds | 2201.0 |
+
+Evaluation result:
+
+| metric | value |
+| --- | ---: |
+| episodes | 100 |
+| success | 0.46 |
+| final reward | 0.577 |
+| max reward | 0.598 |
+| teacher action MAE | 0.155 |
+| action saturation rate | 0.049 |
+| offline oracle action MAE | 0.0477 |
+| offline predicted action MAE | 0.0487 |
+| offline normalized goal L2 | 23.15 |
+| representation reconstruction MSE | 0.0569 |
+| representation active dimensions | 350 |
+
+Interpretation: increasing the regenerated teacher corpus from 500 to 1000
+trajectories gives a clear gain in online success and offline reconstruction /
+action prediction. This argues against an obvious data-format regression in the
+new corpus. Phase B should continue with additional supervised seeds before the
+local-reset RL variants are treated as comparable.
