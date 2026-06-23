@@ -627,6 +627,156 @@ def evaluate_residual_rl(
     return output
 
 
+@torch.inference_mode()
+def record_low_level_rl_videos(
+    config: Config,
+    n_demo: int,
+    seed: int,
+    run_name: str,
+    episodes: int,
+    seed_start: int,
+    checkpoint_path: Path | None = None,
+    force: bool = False,
+) -> list[Path]:
+    import imageio.v2 as imageio
+
+    device = default_device()
+    frozen = _load_frozen(config, n_demo, seed, device)
+    artifact, result = _paths(config, n_demo, seed, run_name)
+    checkpoint_path = checkpoint_path or artifact / "latest.pt"
+    residual_agent: ResidualActorCritic | None = None
+    direct_agent: DirectLowActorCritic | None = None
+    alpha = 0.0
+    global_step = 0
+    if checkpoint_path.exists():
+        raw_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        method = str(raw_checkpoint.get("recipe", {}).get("method", "r1_residual_deterministic"))
+        if method == "r3_direct_last_layer":
+            direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
+        else:
+            residual_agent, checkpoint = _load_residual(checkpoint_path, device)
+            alpha = float(checkpoint["recipe"]["alpha"])
+        global_step = int(checkpoint["global_step"])
+    output_dir = ensure_dir(result / "videos")
+    dino = _phase4_dino_from_config(config, device)
+    zero_previous = frozen.action_norm.transform(np.zeros((1, 3), dtype=np.float32))
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    control_freq = int(config.get("control_freq", 20))
+    paths: list[Path] = []
+
+    def render_frame(env: gym.Env) -> np.ndarray:
+        rendered = env.render()
+        frame = (
+            rendered.detach().cpu().numpy()
+            if isinstance(rendered, torch.Tensor)
+            else np.asarray(rendered)
+        )
+        if frame.ndim == 4:
+            frame = frame[0]
+        return frame.astype(np.uint8)
+
+    for episode_index in trange(episodes, desc=f"record low RL {run_name}"):
+        rollout_seed = seed_start + episode_index
+        existing = sorted(output_dir.glob(f"seed{rollout_seed}_*.mp4"))
+        if existing and not force:
+            paths.append(existing[0])
+            continue
+        env = gym.make(
+            config.get("env_id"),
+            obs_mode="rgb+state",
+            control_mode=config.get("control_mode"),
+            reward_mode="normalized_dense",
+            render_mode="rgb_array",
+            sim_backend=_rl_backend(config),
+            num_envs=1,
+            reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+        )
+        action_low_np = np.asarray(env.action_space.low, dtype=np.float32)
+        action_high_np = np.asarray(env.action_space.high, dtype=np.float32)
+        if action_low_np.ndim == 2:
+            action_low_np = action_low_np[0]
+            action_high_np = action_high_np[0]
+        action_low = torch.as_tensor(action_low_np, device=device)
+        action_high = torch.as_tensor(action_high_np, device=device)
+        previous_action = zero_previous.copy()
+        held_goal = np.zeros((1, frozen.goal_dim), dtype=np.float32)
+        countdown = 0
+        frames_out: list[np.ndarray] = []
+        success = False
+        final_reward = 0.0
+        max_reward = -float("inf")
+        try:
+            obs, _info = env.reset(seed=[rollout_seed])
+            frames_out.append(render_frame(env))
+            for _step in range(max_steps):
+                frames = _phase4_frame_inputs(
+                    obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                normalized_frames = frozen.frame_norm.transform(frames)
+                current_latent = _encode_frames(frozen, frames, device)
+                if countdown <= 0:
+                    high_condition = np.concatenate([normalized_frames, previous_action], axis=-1)
+                    held_goal = (
+                        frozen.high_model(
+                            torch.from_numpy(high_condition).to(device).float()
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                    countdown = frozen.update_period
+                remaining = np.asarray(
+                    [[max(countdown, 1) / frozen.horizon_steps]], dtype=np.float32
+                )
+                condition_np = _low_condition_array(
+                    normalized_frames,
+                    current_latent,
+                    held_goal,
+                    previous_action,
+                    remaining,
+                    frozen.conditioning,
+                )
+                condition = torch.from_numpy(condition_np).to(device).float()
+                normalized_base = frozen.low_model(condition)
+                base_action = torch.from_numpy(
+                    frozen.action_norm.inverse(normalized_base.cpu().numpy())
+                ).to(device)
+                if direct_agent is not None:
+                    unclipped = direct_agent.get_action_and_value(
+                        condition, deterministic=True
+                    )[0]
+                else:
+                    raw_residual = (
+                        residual_agent.get_action_and_value(condition, deterministic=True)[0]
+                        if residual_agent is not None
+                        else torch.zeros_like(base_action)
+                    )
+                    unclipped = base_action + alpha * torch.tanh(raw_residual)
+                action = torch.clamp(unclipped, action_low, action_high)
+                obs, reward, terminated, truncated, info = env.step(action)
+                previous_action = frozen.action_norm.transform(
+                    action.cpu().numpy().astype(np.float32)
+                )
+                countdown -= 1
+                frames_out.append(render_frame(env))
+                final_reward = float(np.asarray(reward.cpu()).reshape(-1)[0])
+                max_reward = max(max_reward, final_reward)
+                if "success" in info:
+                    success = success or bool(np.asarray(info["success"].cpu()).reshape(-1)[0])
+                if bool(
+                    np.asarray(torch.logical_or(terminated, truncated).cpu()).reshape(-1)[0]
+                ):
+                    break
+        finally:
+            env.close()
+        path = output_dir / (
+            f"seed{rollout_seed}_step{global_step}_success{int(success)}_"
+            f"final{final_reward:.3f}_max{max_reward:.3f}.mp4"
+        )
+        imageio.mimsave(path, frames_out, fps=control_freq, macro_block_size=1)
+        paths.append(path)
+    return paths
+
+
 def train_residual_rl(
     config: Config,
     n_demo: int,

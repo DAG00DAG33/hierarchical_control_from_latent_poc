@@ -68,6 +68,30 @@ Both RL variants degrade the stronger N=1000 hierarchy.
 
 ![Low-level RL task-progress summary](docs/results/low_level_rl/low_level_rl_task_progress_summary.png)
 
+## Flow RL Decision
+
+R2/R4 flow-policy RL was intentionally not run. The plan says R2-R4 should only
+be interpreted after R1 is stable, and R1 did not pass the N=500 gate or the
+N=1000 confirmation. R3 direct deterministic tuning also failed confirmation.
+Running direct flow actor-critic after those failures would add a new algorithm
+without a gated reason to expect a reliable final method.
+
+## Videos
+
+Matched before/after failure videos were recorded for N=500 seed 0 on reset
+seeds `3200000` and `3200001`:
+
+```text
+results/incremental/low_level_rl/n500/seed0/frozen_reference_videos/videos/
+results/incremental/low_level_rl/n500/seed0/r1_a005_progress1_50k_videos/videos/
+```
+
+The after-RL videos use:
+
+```text
+artifacts/incremental/low_level_rl/n500/seed0/r1_a005_progress1_50k/best_train_latent.pt
+```
+
 ## Decision
 
 Low-level PPO fine-tuning is not a robust positive result for this hierarchy.

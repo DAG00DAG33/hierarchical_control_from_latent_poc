@@ -269,3 +269,36 @@ and gives a small N=500 mean improvement, but it still does not confirm at
 `N_demo=1000`. The best current conclusion is a useful negative/limited result:
 low-level PPO can slightly adapt weak hierarchies when heavily constrained, but
 the effect is not robust enough to use as the final method.
+
+## 2026-06-23 - RL-09: Final scope and video artifacts
+
+R2/R4 flow-policy RL was not run after the deterministic gates failed:
+
+- The plan states that R2-R4 should only be interpreted after R1 is stable.
+- R1 did not pass the N=500 success gate and degraded the N=1000 confirmation.
+- R3 also degraded the N=1000 confirmation.
+- Implementing direct flow actor-critic would add algorithmic complexity for a
+  branch that the plan gates no longer support.
+
+Added:
+
+```text
+hcl-poc low-level-rl video
+```
+
+Recorded matched before/after videos for N=500 seed 0 on reset seeds
+`3200000` and `3200001`:
+
+```text
+results/incremental/low_level_rl/n500/seed0/frozen_reference_videos/videos/
+results/incremental/low_level_rl/n500/seed0/r1_a005_progress1_50k_videos/videos/
+```
+
+The selected after-RL checkpoint is:
+
+```text
+artifacts/incremental/low_level_rl/n500/seed0/r1_a005_progress1_50k/best_train_latent.pt
+```
+
+Both recorded seeds are failures for both frozen and R1, which makes them useful
+failure videos rather than cherry-picked successes.
