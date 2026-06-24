@@ -1886,3 +1886,48 @@ policy seeds, and oracle branch generation is an expensive privileged
 diagnostic rather than the deployable learned high-level model. It does,
 however, show that the local branch-oracle interface is not obviously worse
 than the learned-goal deployment for the selected R3 checkpoints.
+
+## 2026-06-24 - RR-43: State-dict branch-copy parity audit
+
+The replay oracle is correct but slow. To see whether the faster
+`--oracle-copy-mode state_dict` path can be trusted, ran two small paired audits
+comparing a replay branch against a state-dict branch on the same student
+trajectory.
+
+Tracked result copies:
+
+```text
+rl_rerun_oracle_replay_vs_state_dict_branch_audit_seed51000_e4.json
+rl_rerun_oracle_replay_vs_state_dict_same_actions_audit_seed51100_e4.json
+```
+
+First audit: copy the same current student state into the state-dict branch,
+then let each branch roll the deterministic teacher independently for 10 steps.
+
+| metric | mean | median | max |
+| --- | ---: | ---: | ---: |
+| current flat-state error | 1.19e-7 | 1.19e-7 | 1.19e-7 |
+| current observation-state error | 2.31e-7 | 1.19e-7 | 4.77e-7 |
+| current DINO-frame MSE | 3.25e-7 | 4.05e-18 | 6.62e-6 |
+| current teacher-action L2 error | 6.34e-7 | 5.50e-7 | 1.76e-6 |
+| future flat-state error after 10 steps | 0.296 | 0.155 | 1.571 |
+| future DINO-frame MSE after 10 steps | 0.065 | 0.044 | 0.246 |
+| future encoded-goal L2 after 10 steps | 9.589 | 8.474 | 20.128 |
+
+Second audit: roll both branches using the exact same teacher actions from the
+replay branch. This removes the tiny teacher-action mismatch as an explanation.
+
+| metric | mean | median | max |
+| --- | ---: | ---: | ---: |
+| future flat-state error, same actions | 0.106 | 0.002 | 1.119 |
+| future DINO-frame MSE, same actions | 0.032 | 0.005 | 0.480 |
+| future encoded-goal L2, same actions | 5.188 | 3.136 | 28.326 |
+| future reward error, same actions | 9.03e-4 | 4.28e-5 | 9.16e-3 |
+
+Conclusion: `set_state_dict(get_state_dict())` is good enough to reproduce the
+flat current state and immediate teacher action, but it is not enough to
+reproduce a 10-step branch rollout in this contact task. The likely missing
+state is internal simulator/contact/controller state that is not exposed in the
+flat equality check. Keep replay mode as the trusted oracle path; do not use
+state-dict mode for final branch-oracle claims unless a stronger parity method
+is implemented.

@@ -1,0 +1,33 @@
+{
+  "episodes": 4,
+  "metrics": {
+    "future_flat_state_error_same_actions": {
+      "max": 1.1193618774414062,
+      "mean": 0.10637146300561856,
+      "median": 0.002251092344522476
+    },
+    "future_frame_mse_same_actions": {
+      "max": 0.4802030324935913,
+      "mean": 0.03225742763477975,
+      "median": 0.0052411535289138556
+    },
+    "future_goal_l2_same_actions": {
+      "max": 28.325767517089844,
+      "mean": 5.188171905126688,
+      "median": 3.136131525039673
+    },
+    "future_obs_state_error_same_actions": {
+      "max": 0.4490043520927429,
+      "mean": 0.02674568901097195,
+      "median": 0.0013779252767562866
+    },
+    "future_reward_error_same_actions": {
+      "max": 0.009158872067928314,
+      "mean": 0.0009031804381973214,
+      "median": 4.284083843231201e-05
+    }
+  },
+  "num_envs": 4,
+  "replan_count": 36,
+  "seed_start": 51100
+}

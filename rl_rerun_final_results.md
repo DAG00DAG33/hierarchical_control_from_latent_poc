@@ -218,8 +218,12 @@ resetting to the same seed and replaying the executed student action history.
 
 A faster `state_dict` copy mode was tested, but a 4-episode comparison changed
 the policy-result outcome despite only `1.19e-7` flat simulator-state error.
-Use replay mode for primary oracle evidence until state-dict copying passes a
-stronger controller/internal-state parity audit.
+A follow-up parity audit showed current-state, observation, and teacher-action
+errors near `1e-6`, but after the 10-step branch rollout the encoded future
+goal differed substantially from replay mode. Even when both branches used the
+same teacher actions, future encoded-goal L2 error averaged `5.19`. Use replay
+mode for primary oracle evidence unless a stronger simulator/internal-state
+copy method is implemented.
 
 Bounded 100-episode replay-oracle diagnostic:
 

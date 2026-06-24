@@ -52,6 +52,7 @@ evaluation was not pursued.
 | Final multi-seed 500-episode evaluation | stopped after near-zero two-seed result | two serious R3 seeds evaluated on fresh 500-episode banks; seed2 failed cheap screen |
 | Disturbed/recovery evaluation | fail at final budget | 500-episode disturbed mean success delta `-0.014`, recovery delta `-0.015`; 100-episode diagnostic was optimistic |
 | Branch-oracle evaluation | bounded diagnostic only | 100-episode replay-oracle checks for two selected R3 seeds: deltas `+0.01` and `+0.02`, mean `+0.015`; replay state error `0.0`; no 500-episode gate claim |
+| Fast state-dict branch copy | fail for oracle use | current state/action parity is near `1e-6`, but 10-step same-action branch rollout still has mean future-goal L2 error `5.19`; replay remains the trusted oracle path |
 | RL wall-clock and GPU telemetry | implemented for future runs | R1/R2/R3 history writers now record update/run wall time, sample rates, and peak CUDA memory; verified by `telemetry_smoke_1update` |
 
 ## Main Quantitative Result
