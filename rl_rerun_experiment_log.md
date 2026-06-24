@@ -1981,3 +1981,57 @@ positive with replay-oracle goals (`+0.015`). This supports the idea that part
 of the deployment issue is high-level goal quality or compounding goal error,
 not only low-level action quality. The evidence is still bounded to 100
 episodes and two policy seeds, so it is diagnostic rather than a final gate.
+
+## 2026-06-24 - RR-45: Learned-versus-oracle goal mismatch audit
+
+Added `scripts/rl_rerun_goal_mismatch_audit.py` to quantify how different the
+learned high-level goal is from the replay-oracle branch goal on the same
+learner-visited states. The script rolls out the tuned R3 hierarchy with learned
+goals, recomputes a replay-oracle future latent at each replan, and records:
+
+- learned-versus-oracle latent goal distance;
+- learned and oracle goal displacement from the current latent;
+- frozen low-level action change induced by swapping learned goal for oracle
+  goal;
+- tuned R3 low-level action change induced by the same swap;
+- replay state error.
+
+Commands:
+
+```text
+uv run python scripts/rl_rerun_goal_mismatch_audit.py \
+  --config configs/pusht_incremental.yaml \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 20 --eval-seed-start 50000 --num-envs 4 \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/goal_mismatch_step_000409600_20_seed50000.json
+
+uv run python scripts/rl_rerun_goal_mismatch_audit.py \
+  --config configs/pusht_incremental.yaml \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000614400.pt \
+  --n-demo 500 --seed 1 --episodes 20 --eval-seed-start 50000 --num-envs 4 \
+  --output results/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/goal_mismatch_step_000614400_20_seed50000.json
+```
+
+Tracked result copies:
+
+```text
+rl_rerun_local_r3_n500_seed0_409k_goal_mismatch_20_seed50000.json
+rl_rerun_local_r3_n500_seed1_614k_goal_mismatch_20_seed50000.json
+```
+
+Goal mismatch results:
+
+| policy seed | replans | learned-oracle goal L2 mean | goal L2 p90 | oracle displacement mean | learned displacement mean | tuned action L2 learned-vs-oracle | replay error max |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 162 | 24.37 | 34.26 | 26.73 | 26.82 | 0.032 | 0.0 |
+| 1 | 146 | 25.66 | 36.78 | 27.59 | 28.32 | 0.035 | 0.0 |
+| mean | 154 | 25.02 | 35.52 | 27.16 | 27.57 | 0.033 | 0.0 |
+
+Interpretation: learned high-level goals and replay-oracle goals are far apart
+in normalized latent space on learner-visited states. However, swapping the
+goal changes the low-level action only weakly (`~0.033` L2 on average). This
+adds nuance to RR-44: the learned high-level can be wrong in latent space, but
+the current low-level interface also appears relatively insensitive to large
+goal changes. Improving the learned interface likely requires both better
+goal prediction and a low-level/controller formulation with stronger useful
+goal sensitivity.

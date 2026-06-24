@@ -249,6 +249,21 @@ than replay-oracle deployment:
 This matched-bank comparison suggests that the learned high-level goal quality
 or its compounding errors are part of the remaining deployment bottleneck.
 
+A direct goal-mismatch audit on 20 learned-goal episodes per selected R3 seed
+supports that diagnosis but adds an important caveat:
+
+| Metric | Mean across seeds |
+| --- | ---: |
+| Learned-vs-oracle future latent L2 | 25.02 |
+| Oracle goal displacement from current latent | 27.16 |
+| Learned goal displacement from current latent | 27.57 |
+| Tuned low-level action L2 from swapping learned goal to oracle goal | 0.033 |
+
+The learned and oracle goals are far apart in latent space, but the low-level
+action changes only weakly. The remaining bottleneck is therefore not just
+high-level prediction error; the low-level interface may also be too insensitive
+to the future-goal input.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -263,6 +278,7 @@ or its compounding errors are part of the remaining deployment bottleneck.
 | Disturbed/recovery gate | Fail | 500-episode disturbed mean success delta `-0.014`, recovery delta `-0.015`; 100-episode diagnostic was optimistic |
 | Branch-oracle diagnostic | Bounded only | 100-episode replay-oracle seed results are `+0.01` and `+0.02`; exact replay error `0.0`; no final-budget gate claim |
 | Matched learned-vs-oracle goal check | Diagnostic only | same 100 eval seeds: tuned learned-goal success `0.330`, tuned replay-oracle success `0.380` |
+| Learned-vs-oracle goal mismatch | Diagnostic only | learned and oracle future latents differ by mean L2 `25.02`, but tuned action changes only `0.033` L2 |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 
