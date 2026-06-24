@@ -238,7 +238,9 @@ not the final result of this repository:
   candidate-selection development results for VAE and effect interfaces.
 - [pre_rl_summary.md](pre_rl_summary.md): explicit TCP endpoint interface.
 - [rl_rerun_final_results.md](rl_rerun_final_results.md): exact-reset
-  low-level RL rerun with R1/R2/R3 comparisons. The strict completion audit is
+  low-level RL rerun with R1/R2/R3 comparisons. The best R3 setting averaged
+  no fresh-bank deployment gain across two 500-episode checks (`-0.002` success
+  delta). The strict completion audit is
   [rl_rerun_completion_audit.md](rl_rerun_completion_audit.md).
 - [FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md): earlier
   AE hierarchy and flat-policy studies.
