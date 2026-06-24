@@ -56,6 +56,7 @@ evaluation was not pursued.
 | Learned-vs-oracle goal mismatch | diagnostic only | 20-episode audits show mean future-goal L2 `25.02`, but tuned low-level action changes only `0.033` L2 when swapping learned goals for oracle goals |
 | Goal sensitivity | diagnostic only | tuned action response is `0.00117` L2 per unit latent-goal L2, essentially identical to frozen `0.00118`; R3 did not make the low-level more goal-sensitive |
 | Same-state valid-goal sensitivity | diagnostic only | same-trajectory `k=9/10/11` future latents differ by mean L2 `~16`, but frozen/R3 actions change only `~0.0085` L2; RR-48 sensitivity hinge does not improve this metric |
+| Wide-horizon valid-goal sensitivity | diagnostic only | same-trajectory `k=2/5/10/20` future latents differ by mean L2 `~24-27`, but frozen/R3 actions change only `~0.016-0.022` L2; weak sensitivity is not just a `k±1` artifact |
 | Fast state-dict branch copy | fail for oracle use | current state/action parity is near `1e-6`, but 10-step same-action branch rollout still has mean future-goal L2 error `5.19`; replay remains the trusted oracle path |
 | RL wall-clock telemetry | partial, retrospectively recovered where logs exist | `rl_rerun_recovered_wallclock.csv` recovers raw-log wall-clock for R2/R3 serious runs; R1 raw logs are missing and old histories have no timing fields |
 | RL GPU-memory telemetry | implemented for future runs | R1/R2/R3 history writers now record peak CUDA memory; verified by `telemetry_smoke_1update`, but old serious runs do not contain retrospective memory traces |
@@ -150,4 +151,7 @@ Additional diagnostic conclusion:
    reach the action-sensitivity margin and worsened the cheap local metric, so
    that exact setting should not be promoted to a serious run. RR-49 then
    confirmed on same-state `k=9/10/11` valid goals that the hinge did not
-   improve the actual nearby-goal sensitivity bottleneck.
+   improve the actual nearby-goal sensitivity bottleneck. RR-50 widened the
+   same-state goal horizons to `k=2/5/10/20` and found the same weak-sensitivity
+   pattern, so the next attempt should change the low-level formulation rather
+   than continue small final-layer R3 tweaks.

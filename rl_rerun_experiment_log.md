@@ -2203,3 +2203,46 @@ a strong control interface. The RR-48 random-swap hinge did not transfer to
 same-state `k±1` sensitivity. A more serious learned-interface attempt should
 change the low-level formulation or training data, not just add this hinge to
 the current final-layer R3 update.
+
+## 2026-06-24 - RR-50: Wide-horizon same-state goal sensitivity
+
+Ran the same valid-goal diagnostic with a wider same-state horizon set:
+
+```text
+uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --samples 2048 --batch-size 512 \
+  --horizons 2,5,10,20 --reference-horizon 10 \
+  --policy r3_lr1e5_409k=artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --policy r3_sensitivity_w10=artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt \
+  --output results/rl_rerun/valid_goal_sensitivity_seed0_2048_wide.json
+```
+
+Tracked compact summary:
+
+```text
+rl_rerun_valid_goal_sensitivity_seed0_2048_wide.json
+```
+
+Results:
+
+| goal pair | mean goal L2 | frozen action L2 | R3 lr=1e-5 action L2 | sensitivity-hinge action L2 |
+| --- | ---: | ---: | ---: | ---: |
+| `k=2` vs `k=10` | 26.52 | 0.02097 | 0.02083 | 0.02097 |
+| `k=5` vs `k=10` | 24.33 | 0.01585 | 0.01575 | 0.01585 |
+| `k=20` vs `k=10` | 23.53 | 0.01774 | 0.01764 | 0.01774 |
+| `k=2` vs `k=20` | n/a | 0.02228 | 0.02214 | 0.02227 |
+
+The wider horizons produce slightly larger action changes than the local
+`k=9/10/11` check, but the action response is still tiny relative to the
+latent-goal changes: roughly `6e-4` to `8e-4` action-L2 per goal-L2. The tuned
+R3 checkpoint remains marginally *less* sensitive than frozen, and the RR-48
+hinge smoke remains effectively identical to frozen.
+
+Interpretation: weak goal sensitivity is not just a `k±1` local-horizon
+artifact. The current low-level interface behaves mostly like a current-state
+policy even when same-trajectory goals are moved from `0.10s` to `1.00s` into
+the future. The next experiment should change the low-level architecture or
+supervised/RL data objective more substantially, rather than continuing this
+final-layer R3 family.
