@@ -13,8 +13,9 @@ requirements.
 The original plan asks for 3 policy seeds and 500 clean plus 500 disturbed
 episodes per final seed. During execution this was reduced because runtime was
 large. After the two 100-episode development-bank R3 signals, one selected
-checkpoint was evaluated on a fresh 500-episode clean bank. That fresh bank was
-negative, so a full multi-seed positive evaluation was not pursued.
+checkpoint per serious R3 seed was evaluated on a fresh 500-episode clean bank.
+The two fresh-bank deltas averaged to approximately zero, so a full positive
+evaluation was not pursued.
 
 ## Required Deliverables
 
@@ -24,7 +25,7 @@ negative, so a full multi-seed positive evaluation was not pursued.
 | `rl_rerun_state_load_audit.md` | done | full dataset reset-and-replay audit summarized |
 | `rl_rerun_throughput_benchmark.csv` | done | throughput benchmark exported at repo root |
 | `rl_rerun_algorithm_audit.md` | done | Phase D algorithm audit documented |
-| `rl_rerun_experiment_log.md` | done | chronological log through RR-35 |
+| `rl_rerun_experiment_log.md` | done | chronological log through RR-38 |
 | `rl_rerun_final_results.md` | done | compact final result report |
 | `rl_rerun_learning_curves.png` | done | summary plot exported |
 | `rl_rerun_failure_videos/` | done | paired frozen/tuned videos for the best R3 seed0 checkpoint |
@@ -46,8 +47,8 @@ negative, so a full multi-seed positive evaluation was not pursued.
 | Direct deterministic fine-tuning tested | pass | R3 `lr=3e-5` and `lr=1e-5` serious N=500 runs |
 | N=1000 checked | partial | cheap exact-reset R3 screen failed; full 4096-env N=1000 run skipped |
 | R4 direct-flow tested | skipped by plan condition | R2 did not establish a stable flow base; final report documents this |
-| Fresh 500-episode clean evaluation | fail for selected R3 seed0 | frozen `0.306`, tuned `0.282`, delta `-0.024` on seeds `20000-20499` |
-| Final multi-seed 500-episode evaluation | stopped after negative fresh bank | two serious R3 seeds evaluated on 100 dev episodes; selected seed0 failed fresh 500-bank eval; seed2 failed cheap screen |
+| Fresh 500-episode clean evaluation | no robust gain | seed0 delta `-0.024`, seed1 delta `+0.020`, mean delta `-0.002` on seeds `20000-20499` |
+| Final multi-seed 500-episode evaluation | stopped after near-zero two-seed result | two serious R3 seeds evaluated on fresh 500-episode banks; seed2 failed cheap screen |
 | Disturbed/recovery/branch-oracle evaluations | not run | omitted under runtime reduction; no final gate claim is made |
 | RL wall-clock and GPU telemetry | implemented for future runs | R1/R2/R3 history writers now record update/run wall time, sample rates, and peak CUDA memory; verified by `telemetry_smoke_1update` |
 
@@ -66,15 +67,17 @@ Fresh-bank check:
 | Policy seed | Selected checkpoint | Eval seeds | Frozen success | Tuned success | Delta | Episodes |
 | ---: | ---: | --- | ---: | ---: | ---: | ---: |
 | 0 | 409600 | `20000-20499` | 0.306 | 0.282 | -0.024 | 500 |
+| 1 | 614400 | `20000-20499` | 0.296 | 0.316 | +0.020 | 500 |
+| mean | n/a | `20000-20499` | 0.301 | 0.299 | -0.002 | 500 each |
 
-The fresh-bank result is negative for the selected method.
+The fresh-bank result is mixed and averages to no improvement.
 
 ## Negative/Positive Claim Status
 
 Strong positive claim: **not supported**.
 
-Reason: R3 improves two 100-episode development banks, but the selected seed0
-checkpoint loses `2.4` percentage points on a fresh 500-episode bank.
+Reason: R3 improves two 100-episode development banks, but the two selected
+checkpoints average `-0.2` percentage points on fresh 500-episode banks.
 
 Strong negative claim: **not supported**.
 
@@ -87,8 +90,8 @@ Supported conclusion:
 > Exact local resets and large vector batches invalidate the earlier weak RL
 > run as a definitive negative. Residual R1/R2 did not solve the problem. A
 > small direct update to the deterministic low-level final layer gives better
-> local latent reaching and small development-bank positives, but the selected
-> checkpoint does not improve fresh closed-loop deployment.
+> local latent reaching and small development-bank positives, but it does not
+> improve fresh closed-loop deployment on average across the two serious seeds.
 
 ## Remaining Work For A Final Claim
 
@@ -97,8 +100,9 @@ Supported conclusion:
 2. Re-run any serious RL point whose final report needs wall-clock and GPU
    memory, because telemetry is now implemented but old histories do not contain
    retrospective measurements.
-3. Decide whether to spend a full run on seed2 despite its failed cheap local
-   screen, or explicitly stop at two-seed development evidence.
+3. Decide whether a new method is needed before spending a full run on seed2,
+   since seed2 already failed the cheap local screen and the two fresh-bank
+   seeds average to no gain.
 4. If pursuing a negative claim, run the omitted disturbed, recovery-state, and
    branch-oracle evaluations.
 5. If pursuing N=1000, design a new R3/R2 setting because the current cheap

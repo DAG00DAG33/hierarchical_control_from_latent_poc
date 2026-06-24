@@ -1634,3 +1634,37 @@ last-layer low-level RL can improve local latent reaching and produced positive
 development-bank results, but there is no current evidence that it improves
 fresh closed-loop deployment. Do not claim a positive RL result from the
 100-episode development bank.
+
+## 2026-06-24 - RR-38: Fresh 500-episode R3 seed1 evaluation
+
+After seed0 failed the fresh 500-episode bank, ran the same fresh-bank check for
+the other development-positive R3 policy seed. This uses the seed1 local-selected
+checkpoint `614400` and the same `eval_seed_start=20000`/500-episode protocol.
+
+Command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000614400.pt \
+  --n-demo 500 --seed 1 --episodes 500 --eval-seed-start 20000 --num-envs 64 \
+  --output results/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/closed_loop_step_000614400_500_seed20000.json
+```
+
+Fresh 500-episode results:
+
+| policy seed | checkpoint | frozen success | tuned success | success delta | final reward delta | max reward delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.306 | 0.282 | -0.024 | -0.0097 | -0.0154 |
+| 1 | 614400 | 0.296 | 0.316 | +0.020 | +0.0171 | +0.0148 |
+
+Tracked seed1 result copy:
+
+```text
+rl_rerun_local_r3_n500_seed1_614k_closed_loop_500_seed20000.json
+```
+
+Interpretation: fresh-bank evidence is mixed and near zero. Averaged over the
+two serious policy seeds, frozen success is `0.301`, tuned success is `0.299`,
+and the mean success delta is `-0.002`. The low-level RL update still cannot be
+claimed as improving deployment, even though seed1 alone is positive on the
+fresh bank.
