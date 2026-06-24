@@ -208,6 +208,32 @@ The promising R3 variants were smoke-tested at `N=1000` before launching a full
 The full `N=1000` R3 run was skipped because the cheap exact-reset screen
 failed.
 
+### Branch-Oracle Diagnostic
+
+The R1/R2/R3 closed-loop evaluator now supports `--goal-source oracle`. In this
+mode the high-level latent goal is generated online by rolling the deterministic
+privileged teacher for `10` steps from the student's current state. The trusted
+mode is `--oracle-copy-mode replay`, which recreates the branch state by
+resetting to the same seed and replaying the executed student action history.
+
+A faster `state_dict` copy mode was tested, but a 4-episode comparison changed
+the policy-result outcome despite only `1.19e-7` flat simulator-state error.
+Use replay mode for primary oracle evidence until state-dict copying passes a
+stronger controller/internal-state parity audit.
+
+Bounded 20-episode replay-oracle diagnostic:
+
+| Policy seed | Checkpoint | Frozen success | Tuned success | Delta | Max replay error |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.60 | 0.45 | -0.15 | 0.0 |
+| 1 | 614400 | 0.30 | 0.55 | +0.25 | 0.0 |
+| mean | n/a | 0.45 | 0.50 | +0.05 | 0.0 |
+
+This is not a final 500-episode oracle gate. It is useful evidence that the
+replay branch-oracle path is wired and exact at the current-state level, but
+the performance signal is mixed and too small-budget to change the final RL
+rerun conclusion.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -220,6 +246,7 @@ failed.
 | R2 flow gate | Fail | flow base weak; residual degrades deployment |
 | R3 direct tuning | No robust fresh deployment gain | fresh 500-bank deltas are `-0.024` and `+0.020`, mean `-0.002`; earlier `+0.04`/`+0.01` were development-bank results |
 | Disturbed/recovery gate | Fail | 500-episode disturbed mean success delta `-0.014`, recovery delta `-0.015`; 100-episode diagnostic was optimistic |
+| Branch-oracle diagnostic | Bounded only | 20-episode replay-oracle seed results are `-0.15` and `+0.25`; exact replay error `0.0`; no final-budget gate claim |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 

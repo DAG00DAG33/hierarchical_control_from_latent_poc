@@ -1775,3 +1775,69 @@ Interpretation: the 100-episode disturbed positive was not stable. At the
 for the tuned low level. The final RL rerun conclusion is now consistently
 negative/neutral for deployment: no clean improvement and no disturbed recovery
 improvement at 500 episodes.
+
+## 2026-06-24 - RR-41: Bounded branch-oracle replay diagnostic
+
+Added `--goal-source oracle` to the R1/R2/R3 closed-loop evaluators. In oracle
+mode the high-level goal is generated online by rolling the deterministic
+privileged teacher forward for the learned-interface horizon (`10` simulator
+steps) from the student's current state. The trusted default branch construction
+is `--oracle-copy-mode replay`: reset a paired branch env to the same seed and
+replay the exact executed student action history before rolling the teacher.
+This is slower, but it verifies exact current-state parity at every replan.
+
+Also added `--oracle-copy-mode state_dict` as a faster diagnostic. A 4-episode
+comparison showed that `state_dict` branch construction is not equivalent to
+the replay branch at the policy-result level, even though the flat simulator
+state differs by only `1.19e-7`. This suggests controller/internal state or
+wrapper state is not fully captured by the flat state equality metric. The
+state-dict path should therefore not be used for a primary oracle result until
+it passes a stronger parity audit.
+
+Replay-smoke command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 4 --eval-seed-start 50000 --num-envs 4 \
+  --goal-source oracle --oracle-copy-mode replay \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/oracle_replay_smoke_step_000409600_4_seed50000.json
+```
+
+Bounded diagnostic commands:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 20 --eval-seed-start 50000 --num-envs 4 \
+  --goal-source oracle --oracle-copy-mode replay \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/oracle_replay_step_000409600_20_seed50000.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000614400.pt \
+  --n-demo 500 --seed 1 --episodes 20 --eval-seed-start 50000 --num-envs 4 \
+  --goal-source oracle --oracle-copy-mode replay \
+  --output results/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/oracle_replay_step_000614400_20_seed50000.json
+```
+
+Tracked result copies:
+
+```text
+rl_rerun_local_r3_n500_seed0_409k_oracle_replay_20_seed50000.json
+rl_rerun_local_r3_n500_seed1_614k_oracle_replay_20_seed50000.json
+```
+
+Replay-oracle results:
+
+| policy seed | checkpoint | frozen success | tuned success | success delta | final reward delta | max replay error | mean branch latency/replan |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.60 | 0.45 | -0.15 | -0.099 | 0.0 | 0.566 s |
+| 1 | 614400 | 0.30 | 0.55 | +0.25 | +0.172 | 0.0 | 0.459 s |
+| mean | n/a | 0.45 | 0.50 | +0.05 | +0.037 | 0.0 | 0.512 s |
+
+Interpretation: this is a bounded diagnostic, not the omitted 500-episode
+oracle gate. It proves the replay-oracle code path can produce exact current
+branch parity and gives mixed deployment evidence: one selected R3 seed gets
+worse and one improves. The result does not overturn the fresh clean/disturbed
+500-episode conclusion, but it narrows the remaining gap from "oracle not run"
+to "small replay-oracle diagnostic run; full-budget oracle gate still omitted."

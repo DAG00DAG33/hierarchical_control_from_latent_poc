@@ -3050,10 +3050,14 @@ def evaluate_rl_rerun_closed_loop_r1(
     eval_seed_start: int = 10_000,
     num_envs: int = 64,
     disturbed: bool = False,
+    goal_source: str = "learned",
+    oracle_copy_mode: str = "replay",
     output_path: Path | None = None,
 ) -> Path:
+    from hcl_poc.incremental import _clone_mani_state_dict
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.incremental import _pre_rl_phase_d_schedule, PRE_RL_PHASE_D_PERTURBATIONS
+    from hcl_poc.incremental import _phase7_obs_state_tensor
     from hcl_poc.learned_interface import _low_condition_array
     from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
 
@@ -3061,6 +3065,10 @@ def evaluate_rl_rerun_closed_loop_r1(
         raise FileNotFoundError(checkpoint_path)
     if episodes <= 0 or num_envs <= 0:
         raise ValueError("episodes and num_envs must be positive")
+    if goal_source not in {"learned", "oracle"}:
+        raise ValueError("goal_source must be 'learned' or 'oracle'")
+    if oracle_copy_mode not in {"replay", "state_dict"}:
+        raise ValueError("oracle_copy_mode must be 'replay' or 'state_dict'")
 
     device = default_device()
     rerun_config = _rerun_base_config(config)
@@ -3103,6 +3111,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     agent.load_state_dict(checkpoint["agent"])
     agent.eval()
     dino = _phase4_dino_from_config(config, device)
+    teacher = load_ppo_agent(_rl_paths(config).best, device) if goal_source == "oracle" else None
     alpha = float(recipe.get("alpha", 0.0))
     max_steps = int(config.get("env_max_episode_steps", 100))
     disturbance_rng = np.random.default_rng(eval_seed_start + 10_000)
@@ -3128,6 +3137,9 @@ def evaluate_rl_rerun_closed_loop_r1(
         residual_norms: list[float] = []
         recovered: list[float] = []
         recovery_times: list[int] = []
+        replay_errors: list[float] = []
+        branch_goal_distances: list[float] = []
+        branch_latencies: list[float] = []
         saturated_actions = 0
         active_actions = 0
         high_decisions = 0
@@ -3147,6 +3159,20 @@ def evaluate_rl_rerun_closed_loop_r1(
                 sim_backend=_rl_backend(config),
                 num_envs=batch_envs,
                 reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+            )
+            branch_env = (
+                gym.make(
+                    config.get("env_id"),
+                    obs_mode="rgb+state",
+                    control_mode=config.get("control_mode"),
+                    reward_mode="normalized_dense",
+                    render_mode=None,
+                    sim_backend=_rl_backend(config),
+                    num_envs=batch_envs,
+                    reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+                )
+                if goal_source == "oracle"
+                else None
             )
             action_low = torch.as_tensor(
                 np.asarray(env.action_space.low, dtype=np.float32),
@@ -3185,8 +3211,11 @@ def evaluate_rl_rerun_closed_loop_r1(
             policy_action_history: list[np.ndarray] = []
             previous_executed = np.zeros((batch_envs, 3), dtype=np.float32)
             bias_noise = np.zeros_like(previous_executed)
+            history: list[torch.Tensor] = []
             try:
                 obs, _info = env.reset(seed=reset_seeds)
+                if branch_env is not None and oracle_copy_mode == "state_dict":
+                    branch_env.reset(seed=reset_seeds)
                 for step_index in range(max_steps):
                     if not np.any(active):
                         break
@@ -3203,6 +3232,74 @@ def evaluate_rl_rerun_closed_loop_r1(
                             torch.from_numpy(high_input).to(device).float()
                         ).cpu().numpy()
                         held_goal[replan] = predicted_goal[replan]
+                        if branch_env is not None:
+                            branch_timer = Timer()
+                            if oracle_copy_mode == "replay":
+                                branch_obs, _branch_info = branch_env.reset(seed=reset_seeds)
+                                for action_history in history:
+                                    branch_step = branch_env.step(action_history)
+                                    (
+                                        branch_obs,
+                                        _branch_reward,
+                                        _branch_term,
+                                        _branch_trunc,
+                                        _branch_info,
+                                    ) = branch_step
+                            else:
+                                branch_env.unwrapped.set_state_dict(
+                                    _clone_mani_state_dict(env.unwrapped.get_state_dict())
+                                )
+                                branch_obs = branch_env.unwrapped.get_obs()
+                            replay_error = torch.max(
+                                torch.abs(
+                                    env.unwrapped.get_state()
+                                    - branch_env.unwrapped.get_state()
+                                ),
+                                dim=1,
+                            ).values
+                            replay_errors.extend(
+                                replay_error.detach().cpu().numpy()[replan].astype(float).tolist()
+                            )
+                            for _branch_step in range(frozen.horizon_steps):
+                                if teacher is None:
+                                    raise RuntimeError("Oracle goal source requires teacher")
+                                branch_state = _phase7_obs_state_tensor(branch_obs, device)
+                                teacher_action = torch.clamp(
+                                    teacher.actor_mean(branch_state),
+                                    action_low,
+                                    action_high,
+                                )
+                                branch_step = branch_env.step(teacher_action)
+                                (
+                                    branch_obs,
+                                    _branch_reward,
+                                    branch_term,
+                                    branch_trunc,
+                                    _branch_info,
+                                ) = branch_step
+                                if bool(torch.all(torch.logical_or(branch_term, branch_trunc))):
+                                    break
+                            branch_frames = _phase4_frame_inputs(
+                                branch_obs,
+                                dino,
+                                int(config.get("dino.batch_size", 64)),
+                            )
+                            oracle_goal = _encode_rerun_frames(frozen, branch_frames, device)
+                            held_goal[replan] = oracle_goal[replan]
+                            current_goal_for_distance = _encode_rerun_frames(
+                                frozen,
+                                frames,
+                                device,
+                            )
+                            branch_goal_distances.extend(
+                                np.linalg.norm(
+                                    current_goal_for_distance[replan] - oracle_goal[replan],
+                                    axis=-1,
+                                ).tolist()
+                            )
+                            branch_latencies.append(
+                                branch_timer.elapsed() / int(np.sum(replan))
+                            )
                         countdown[replan] = frozen.update_period
                         high_decisions += int(np.sum(replan))
 
@@ -3306,6 +3403,8 @@ def evaluate_rl_rerun_closed_loop_r1(
                     action = torch.clamp(unclipped, action_low, action_high)
                     action[~active_tensor] = 0.0
                     obs, reward, terminated, truncated, info = env.step(action)
+                    if branch_env is not None:
+                        history.append(action.detach().clone())
                     executed_after_clip = action.cpu().numpy().astype(np.float32)
                     previous_action = frozen.action_norm.transform(executed_after_clip)
                     previous_executed = executed_after_clip
@@ -3341,6 +3440,8 @@ def evaluate_rl_rerun_closed_loop_r1(
                     active[done.astype(np.bool_)] = False
             finally:
                 env.close()
+                if branch_env is not None:
+                    branch_env.close()
             successes.extend(success_once.astype(float).tolist())
             final_rewards.extend(batch_final.astype(float).tolist())
             max_rewards.extend(batch_max.astype(float).tolist())
@@ -3361,6 +3462,25 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_final_reward": final_rewards,
             "episode_max_reward": max_rewards,
         }
+        if goal_source == "oracle":
+            result.update(
+                {
+                    "replay_current_state_error_mean": (
+                        float(np.mean(replay_errors)) if replay_errors else 0.0
+                    ),
+                    "replay_current_state_error_max": (
+                        float(np.max(replay_errors)) if replay_errors else 0.0
+                    ),
+                    "branch_goal_l2_mean": (
+                        float(np.mean(branch_goal_distances))
+                        if branch_goal_distances
+                        else None
+                    ),
+                    "branch_generation_latency_per_replan_s": (
+                        float(np.mean(branch_latencies)) if branch_latencies else 0.0
+                    ),
+                }
+            )
         if disturbed:
             result.update(
                 {
@@ -3386,6 +3506,8 @@ def evaluate_rl_rerun_closed_loop_r1(
         "num_envs": num_envs,
         "disturbed": disturbed,
         "disturbance_family": PRE_RL_PHASE_D_PERTURBATIONS if disturbed else None,
+        "goal_source": goal_source,
+        "oracle_copy_mode": oracle_copy_mode if goal_source == "oracle" else None,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
         "base_policy": base_policy,
@@ -3427,6 +3549,8 @@ def evaluate_rl_rerun_closed_loop_r2(
     eval_seed_start: int = 10_000,
     num_envs: int = 64,
     disturbed: bool = False,
+    goal_source: str = "learned",
+    oracle_copy_mode: str = "replay",
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -3438,6 +3562,8 @@ def evaluate_rl_rerun_closed_loop_r2(
         eval_seed_start=eval_seed_start,
         num_envs=num_envs,
         disturbed=disturbed,
+        goal_source=goal_source,
+        oracle_copy_mode=oracle_copy_mode,
         output_path=output_path,
     )
 
@@ -3452,6 +3578,8 @@ def evaluate_rl_rerun_closed_loop_r3(
     eval_seed_start: int = 10_000,
     num_envs: int = 64,
     disturbed: bool = False,
+    goal_source: str = "learned",
+    oracle_copy_mode: str = "replay",
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -3463,6 +3591,8 @@ def evaluate_rl_rerun_closed_loop_r3(
         eval_seed_start=eval_seed_start,
         num_envs=num_envs,
         disturbed=disturbed,
+        goal_source=goal_source,
+        oracle_copy_mode=oracle_copy_mode,
         output_path=output_path,
     )
 
