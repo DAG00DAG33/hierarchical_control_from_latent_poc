@@ -1,0 +1,76 @@
+{
+  "block_ranges": {
+    "goal": [
+      6549,
+      7061
+    ],
+    "observation": [
+      0,
+      6549
+    ],
+    "previous_action": [
+      7061,
+      7064
+    ],
+    "remaining": [
+      7064,
+      7065
+    ]
+  },
+  "condition_dim": 7065,
+  "experiment": "rl_rerun_condition_block_sensitivity_seed0_2048",
+  "interpretation": "Actions are dominated by the current observation block: shuffling observation features changes actions by about 0.805 L2, roughly 16-17x the goal-block shuffle effect. R3 and the sensitivity-hinge smoke remain almost identical to frozen.",
+  "samples": 2048,
+  "script": "scripts/rl_rerun_condition_block_sensitivity.py",
+  "shuffle_action_l2_mean": {
+    "frozen": {
+      "goal": 0.04980383614133643,
+      "observation": 0.8059364859755078,
+      "previous_action": 0.07051828313302622,
+      "remaining": 0.0
+    },
+    "r3_lr1e5_409k": {
+      "goal": 0.047455959529486336,
+      "observation": 0.8042708912489616,
+      "previous_action": 0.07125514530574151,
+      "remaining": 0.0
+    },
+    "r3_sensitivity_w10": {
+      "goal": 0.048059854018902115,
+      "observation": 0.8050838994186051,
+      "previous_action": 0.0721131971477007,
+      "remaining": 0.0
+    }
+  },
+  "shuffle_observation_to_goal_ratio": {
+    "frozen": 16.18221704224492,
+    "r3_lr1e5_409k": 16.94773215467775,
+    "r3_sensitivity_w10": 16.75169256864498
+  },
+  "shuffle_previous_action_to_goal_ratio": {
+    "frozen": 1.415920712069348,
+    "r3_lr1e5_409k": 1.5015004651095034,
+    "r3_sensitivity_w10": 1.5004872282662016
+  },
+  "source_result": "results/rl_rerun/condition_block_sensitivity_seed0_2048.json",
+  "zero_action_l2_mean": {
+    "frozen": {
+      "goal": 0.03721607395993942,
+      "observation": 0.45990903165420605,
+      "previous_action": 0.04871326241516272,
+      "remaining": 0.002376820298920279
+    },
+    "r3_lr1e5_409k": {
+      "goal": 0.03695534037910875,
+      "observation": 0.456824165058606,
+      "previous_action": 0.04850217017627756,
+      "remaining": 0.002366297768890746
+    },
+    "r3_sensitivity_w10": {
+      "goal": 0.037195786023744404,
+      "observation": 0.4599986779512619,
+      "previous_action": 0.04871928471118281,
+      "remaining": 0.002376862401654023
+    }
+  }
+}

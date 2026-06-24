@@ -2246,3 +2246,67 @@ policy even when same-trajectory goals are moved from `0.10s` to `1.00s` into
 the future. The next experiment should change the low-level architecture or
 supervised/RL data objective more substantially, rather than continuing this
 final-layer R3 family.
+
+## 2026-06-24 - RR-51: Condition-block sensitivity diagnostic
+
+Added a simulator-free block-sensitivity diagnostic:
+
+```text
+scripts/rl_rerun_condition_block_sensitivity.py
+```
+
+The low-level condition layout for the selected VAE-512 hierarchy is:
+
+```text
+observation features: 0:6549
+future-goal features: 6549:7061
+previous action:      7061:7064
+remaining time:       7064:7065
+```
+
+The script samples teacher-corpus states at horizon `k=10`, computes the
+deterministic action, then zeroes or shuffles each condition block across the
+batch and measures action L2 changes.
+
+Command:
+
+```text
+uv run python scripts/rl_rerun_condition_block_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --samples 2048 --batch-size 512 --horizon 10 \
+  --policy r3_lr1e5_409k=artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --policy r3_sensitivity_w10=artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt \
+  --output results/rl_rerun/condition_block_sensitivity_seed0_2048.json
+```
+
+Tracked compact summary:
+
+```text
+rl_rerun_condition_block_sensitivity_seed0_2048.json
+```
+
+Mean action L2 after shuffling each block:
+
+| policy | observation | goal | previous action | remaining |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.8059 | 0.0498 | 0.0705 | 0.0000 |
+| R3 lr=1e-5 step 409600 | 0.8043 | 0.0475 | 0.0713 | 0.0000 |
+| R3 sensitivity hinge smoke | 0.8051 | 0.0481 | 0.0721 | 0.0000 |
+
+Mean action L2 after zeroing each block:
+
+| policy | observation | goal | previous action | remaining |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.4599 | 0.0372 | 0.0487 | 0.0024 |
+| R3 lr=1e-5 step 409600 | 0.4568 | 0.0370 | 0.0485 | 0.0024 |
+| R3 sensitivity hinge smoke | 0.4600 | 0.0372 | 0.0487 | 0.0024 |
+
+Interpretation: action selection is dominated by the current observation block.
+Shuffling observation features changes actions by about `0.805` L2, roughly
+`16-17x` the goal-block shuffle effect. Previous action has a comparable or
+slightly larger effect than the future-goal block. R3 and the sensitivity-hinge
+smoke remain almost identical to frozen. This explains why learned/oracle/valid
+future-goal swaps have limited effect: the low-level architecture and training
+distribution allow the policy to solve one-step imitation mostly from current
+observation and previous action.
