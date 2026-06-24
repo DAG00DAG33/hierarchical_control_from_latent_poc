@@ -25,7 +25,7 @@ evaluation was not pursued.
 | `rl_rerun_state_load_audit.md` | done | full dataset reset-and-replay audit summarized |
 | `rl_rerun_throughput_benchmark.csv` | done | throughput benchmark exported at repo root |
 | `rl_rerun_algorithm_audit.md` | done | Phase D algorithm audit documented |
-| `rl_rerun_experiment_log.md` | done | chronological log through RR-38 |
+| `rl_rerun_experiment_log.md` | done | chronological log through RR-39 |
 | `rl_rerun_final_results.md` | done | compact final result report |
 | `rl_rerun_learning_curves.png` | done | summary plot exported |
 | `rl_rerun_failure_videos/` | done | paired frozen/tuned videos for the best R3 seed0 checkpoint |
@@ -49,7 +49,8 @@ evaluation was not pursued.
 | R4 direct-flow tested | skipped by plan condition | R2 did not establish a stable flow base; final report documents this |
 | Fresh 500-episode clean evaluation | no robust gain | seed0 delta `-0.024`, seed1 delta `+0.020`, mean delta `-0.002` on seeds `20000-20499` |
 | Final multi-seed 500-episode evaluation | stopped after near-zero two-seed result | two serious R3 seeds evaluated on fresh 500-episode banks; seed2 failed cheap screen |
-| Disturbed/recovery/branch-oracle evaluations | not run | omitted under runtime reduction; no final gate claim is made |
+| Disturbed/recovery evaluation | partial positive diagnostic | 100-episode disturbed checks: success deltas `+0.01`, `+0.05`; recovery deltas `+0.02`, `+0.03` |
+| Branch-oracle evaluation | not run | omitted under runtime reduction; no final gate claim is made |
 | RL wall-clock and GPU telemetry | implemented for future runs | R1/R2/R3 history writers now record update/run wall time, sample rates, and peak CUDA memory; verified by `telemetry_smoke_1update` |
 
 ## Main Quantitative Result
@@ -72,6 +73,14 @@ Fresh-bank check:
 
 The fresh-bank result is mixed and averages to no improvement.
 
+Disturbed/recovery diagnostic:
+
+| Policy seed | Selected checkpoint | Frozen success | Tuned success | Delta | Frozen recovery | Tuned recovery | Recovery delta | Episodes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.32 | 0.33 | +0.01 | 0.29 | 0.31 | +0.02 | 100 |
+| 1 | 614400 | 0.30 | 0.35 | +0.05 | 0.29 | 0.32 | +0.03 | 100 |
+| mean | n/a | 0.31 | 0.34 | +0.03 | 0.29 | 0.315 | +0.025 | 100 each |
+
 ## Negative/Positive Claim Status
 
 Strong positive claim: **not supported**.
@@ -82,8 +91,8 @@ checkpoints average `-0.2` percentage points on fresh 500-episode banks.
 Strong negative claim: **not supported**.
 
 Reason: the plan's credible-negative conditions are mostly satisfied for local
-R1/R2/R3, but N=1000 was only screened cheaply and disturbed/recovery/branch
-oracle evaluations were not run.
+R1/R2/R3, but N=1000 was only screened cheaply, disturbed/recovery was only a
+100-episode diagnostic, and branch-oracle evaluation was not run.
 
 Supported conclusion:
 
@@ -103,7 +112,7 @@ Supported conclusion:
 3. Decide whether a new method is needed before spending a full run on seed2,
    since seed2 already failed the cheap local screen and the two fresh-bank
    seeds average to no gain.
-4. If pursuing a negative claim, run the omitted disturbed, recovery-state, and
-   branch-oracle evaluations.
+4. If pursuing a negative claim, run a final-budget disturbed/recovery
+   evaluation and the omitted branch-oracle evaluation.
 5. If pursuing N=1000, design a new R3/R2 setting because the current cheap
    R3 screen was locally worse than frozen.

@@ -345,6 +345,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 episodes=args.episodes,
                 eval_seed_start=args.eval_seed_start,
                 num_envs=args.num_envs,
+                disturbed=args.disturbed,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -401,6 +402,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 episodes=args.episodes,
                 eval_seed_start=args.eval_seed_start,
                 num_envs=args.num_envs,
+                disturbed=args.disturbed,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -444,6 +446,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 episodes=args.episodes,
                 eval_seed_start=args.eval_seed_start,
                 num_envs=args.num_envs,
+                disturbed=args.disturbed,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -1567,6 +1570,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r1.add_argument("--episodes", type=int, default=100)
     eval_closed_loop_r1.add_argument("--eval-seed-start", type=int, default=10_000)
     eval_closed_loop_r1.add_argument("--num-envs", type=int, default=64)
+    eval_closed_loop_r1.add_argument("--disturbed", action="store_true")
     eval_closed_loop_r1.add_argument("--output")
     eval_closed_loop_r1.set_defaults(func=rl_rerun_cmd)
     low_flow_base = rl_rerun_sub.add_parser("train-low-flow-base")
@@ -1605,6 +1609,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r2.add_argument("--episodes", type=int, default=100)
     eval_closed_loop_r2.add_argument("--eval-seed-start", type=int, default=10_000)
     eval_closed_loop_r2.add_argument("--num-envs", type=int, default=64)
+    eval_closed_loop_r2.add_argument("--disturbed", action="store_true")
     eval_closed_loop_r2.add_argument("--output")
     eval_closed_loop_r2.set_defaults(func=rl_rerun_cmd)
     train_local_r3 = rl_rerun_sub.add_parser("train-local-r3")
@@ -1636,6 +1641,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r3.add_argument("--episodes", type=int, default=100)
     eval_closed_loop_r3.add_argument("--eval-seed-start", type=int, default=10_000)
     eval_closed_loop_r3.add_argument("--num-envs", type=int, default=64)
+    eval_closed_loop_r3.add_argument("--disturbed", action="store_true")
     eval_closed_loop_r3.add_argument("--output")
     eval_closed_loop_r3.set_defaults(func=rl_rerun_cmd)
     record_rerun_videos = rl_rerun_sub.add_parser("record-videos")

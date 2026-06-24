@@ -3049,9 +3049,11 @@ def evaluate_rl_rerun_closed_loop_r1(
     episodes: int = 100,
     eval_seed_start: int = 10_000,
     num_envs: int = 64,
+    disturbed: bool = False,
     output_path: Path | None = None,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.incremental import _pre_rl_phase_d_schedule, PRE_RL_PHASE_D_PERTURBATIONS
     from hcl_poc.learned_interface import _low_condition_array
     from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
 
@@ -3103,12 +3105,29 @@ def evaluate_rl_rerun_closed_loop_r1(
     dino = _phase4_dino_from_config(config, device)
     alpha = float(recipe.get("alpha", 0.0))
     max_steps = int(config.get("env_max_episode_steps", 100))
+    disturbance_rng = np.random.default_rng(eval_seed_start + 10_000)
+    all_schedules = (
+        _pre_rl_phase_d_schedule(disturbance_rng, episodes, max_steps, 1, 1)
+        if disturbed
+        else [[] for _ in range(episodes)]
+    )
+    if disturbed:
+        for events in all_schedules:
+            event = events[0]
+            duration = int(event["end"] - event["start"])
+            event["start"] = int(
+                disturbance_rng.integers(15, max_steps - duration - 20)
+            )
+            event["end"] = event["start"] + duration
 
     def rollout(use_residual: bool) -> dict[str, Any]:
+        rollout_rng = np.random.default_rng(eval_seed_start + 20_000)
         successes: list[float] = []
         final_rewards: list[float] = []
         max_rewards: list[float] = []
         residual_norms: list[float] = []
+        recovered: list[float] = []
+        recovery_times: list[int] = []
         saturated_actions = 0
         active_actions = 0
         high_decisions = 0
@@ -3118,6 +3137,7 @@ def evaluate_rl_rerun_closed_loop_r1(
             reset_seeds = [
                 eval_seed_start + batch_start + index for index in range(batch_envs)
             ]
+            schedules = all_schedules[batch_start : batch_start + batch_envs]
             env = gym.make(
                 config.get("env_id"),
                 obs_mode="rgb+state",
@@ -3139,6 +3159,13 @@ def evaluate_rl_rerun_closed_loop_r1(
             if action_low.ndim == 1:
                 action_low = action_low.unsqueeze(0)
                 action_high = action_high.unsqueeze(0)
+            single_action_space = getattr(env, "single_action_space", env.action_space)
+            action_low_np = np.asarray(single_action_space.low, dtype=np.float32)
+            action_high_np = np.asarray(single_action_space.high, dtype=np.float32)
+            if action_low_np.ndim == 2:
+                action_low_np = action_low_np[0]
+                action_high_np = action_high_np[0]
+            action_range_np = action_high_np - action_low_np
             zero_previous = frozen.action_norm.transform(
                 np.zeros((1, 3), dtype=np.float32)
             )[0]
@@ -3151,11 +3178,16 @@ def evaluate_rl_rerun_closed_loop_r1(
             countdown = np.zeros(batch_envs, dtype=np.int32)
             active = np.ones(batch_envs, dtype=np.bool_)
             success_once = np.zeros(batch_envs, dtype=np.bool_)
+            recovered_batch = np.zeros(batch_envs, dtype=np.bool_)
+            recovery_time_batch = np.full(batch_envs, -1, dtype=np.int32)
             batch_final = np.zeros(batch_envs, dtype=np.float32)
             batch_max = np.full(batch_envs, -np.inf, dtype=np.float32)
+            policy_action_history: list[np.ndarray] = []
+            previous_executed = np.zeros((batch_envs, 3), dtype=np.float32)
+            bias_noise = np.zeros_like(previous_executed)
             try:
                 obs, _info = env.reset(seed=reset_seeds)
-                for _step in range(max_steps):
+                for step_index in range(max_steps):
                     if not np.any(active):
                         break
                     frames = _phase4_frame_inputs(
@@ -3231,6 +3263,39 @@ def evaluate_rl_rerun_closed_loop_r1(
                         )
                     else:
                         unclipped = base_action
+                    unclipped_np = unclipped.detach().cpu().numpy().astype(np.float32)
+                    executed_np = unclipped_np.copy()
+                    policy_action_history.append(unclipped_np.copy())
+                    if disturbed:
+                        for env_index, events in enumerate(schedules):
+                            event = events[0]
+                            if not event["start"] <= step_index < event["end"]:
+                                continue
+                            kind = int(event["kind"])
+                            if kind == 1:
+                                bias_noise[env_index] = (
+                                    0.7 * bias_noise[env_index]
+                                    + 0.3
+                                    * rollout_rng.normal(0.0, 0.01, size=3).astype(np.float32)
+                                    * action_range_np
+                                )
+                                executed_np[env_index] += (
+                                    event["bias_fraction"]
+                                    * action_range_np
+                                    * event["bias_direction"]
+                                    + bias_noise[env_index]
+                                )
+                            elif kind == 2:
+                                executed_np[env_index] = previous_executed[env_index]
+                            elif kind == 3:
+                                source_step = max(0, step_index - int(event["delay"]))
+                                executed_np[env_index] = policy_action_history[source_step][
+                                    env_index
+                                ]
+                            else:
+                                executed_np[env_index] *= float(event["scale"])
+                        executed_np = np.clip(executed_np, action_low_np, action_high_np)
+                        unclipped = torch.from_numpy(executed_np).to(device).float()
                     active_tensor = torch.from_numpy(active).to(device)
                     saturated_actions += int(
                         torch.any(unclipped != torch.clamp(
@@ -3241,9 +3306,9 @@ def evaluate_rl_rerun_closed_loop_r1(
                     action = torch.clamp(unclipped, action_low, action_high)
                     action[~active_tensor] = 0.0
                     obs, reward, terminated, truncated, info = env.step(action)
-                    previous_action = frozen.action_norm.transform(
-                        action.cpu().numpy().astype(np.float32)
-                    )
+                    executed_after_clip = action.cpu().numpy().astype(np.float32)
+                    previous_action = frozen.action_norm.transform(executed_after_clip)
+                    previous_executed = executed_after_clip
                     countdown -= 1
                     reward_np = _to_numpy(reward).reshape(-1).astype(np.float32)
                     batch_final[active] = reward_np[active]
@@ -3251,11 +3316,24 @@ def evaluate_rl_rerun_closed_loop_r1(
                         batch_max[active], reward_np[active]
                     )
                     if "success" in info:
-                        success_once |= (
+                        step_success = (
                             _to_numpy(info["success"])
                             .reshape(-1)
                             .astype(np.bool_)
                         )
+                        success_once |= step_success
+                        if disturbed:
+                            for env_index, events in enumerate(schedules):
+                                event = events[0]
+                                if (
+                                    step_index >= event["end"]
+                                    and step_success[env_index]
+                                    and not recovered_batch[env_index]
+                                ):
+                                    recovered_batch[env_index] = True
+                                    recovery_time_batch[env_index] = (
+                                        step_index - int(event["end"]) + 1
+                                    )
                     done = np.logical_or(
                         _to_numpy(terminated).reshape(-1),
                         _to_numpy(truncated).reshape(-1),
@@ -3266,8 +3344,11 @@ def evaluate_rl_rerun_closed_loop_r1(
             successes.extend(success_once.astype(float).tolist())
             final_rewards.extend(batch_final.astype(float).tolist())
             max_rewards.extend(batch_max.astype(float).tolist())
+            if disturbed:
+                recovered.extend(recovered_batch.astype(float).tolist())
+                recovery_times.extend(recovery_time_batch[recovery_time_batch >= 0].tolist())
 
-        return {
+        result = {
             "success": float(np.mean(successes)),
             "final_reward": float(np.mean(final_rewards)),
             "max_reward": float(np.mean(max_rewards)),
@@ -3280,6 +3361,18 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_final_reward": final_rewards,
             "episode_max_reward": max_rewards,
         }
+        if disturbed:
+            result.update(
+                {
+                    "recovery_success": float(np.mean(recovered)) if recovered else None,
+                    "recovery_time_mean": (
+                        float(np.mean(recovery_times)) if recovery_times else None
+                    ),
+                    "episode_recovered": recovered,
+                    "episode_recovery_time": recovery_times,
+                }
+            )
+        return result
 
     frozen_result = rollout(use_residual=False)
     residual_result = rollout(use_residual=True)
@@ -3291,6 +3384,8 @@ def evaluate_rl_rerun_closed_loop_r1(
         "episodes": episodes,
         "eval_seed_start": eval_seed_start,
         "num_envs": num_envs,
+        "disturbed": disturbed,
+        "disturbance_family": PRE_RL_PHASE_D_PERTURBATIONS if disturbed else None,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
         "base_policy": base_policy,
@@ -3305,6 +3400,10 @@ def evaluate_rl_rerun_closed_loop_r1(
         ),
         "recipe": recipe,
     }
+    if disturbed:
+        result["recovery_success_delta"] = (
+            residual_result["recovery_success"] - frozen_result["recovery_success"]
+        )
     out_path = output_path or (
         _state_audit_result_dir(config)
         / str(recipe.get("family_dir", "local_r1"))
@@ -3327,6 +3426,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     episodes: int = 100,
     eval_seed_start: int = 10_000,
     num_envs: int = 64,
+    disturbed: bool = False,
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -3337,6 +3437,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         episodes=episodes,
         eval_seed_start=eval_seed_start,
         num_envs=num_envs,
+        disturbed=disturbed,
         output_path=output_path,
     )
 
@@ -3350,6 +3451,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     episodes: int = 100,
     eval_seed_start: int = 10_000,
     num_envs: int = 64,
+    disturbed: bool = False,
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -3360,6 +3462,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         episodes=episodes,
         eval_seed_start=eval_seed_start,
         num_envs=num_envs,
+        disturbed=disturbed,
         output_path=output_path,
     )
 

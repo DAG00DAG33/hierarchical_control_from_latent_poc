@@ -1668,3 +1668,66 @@ two serious policy seeds, frozen success is `0.301`, tuned success is `0.299`,
 and the mean success delta is `-0.002`. The low-level RL update still cannot be
 claimed as improving deployment, even though seed1 alone is positive on the
 fresh bank.
+
+## 2026-06-24 - RR-39: Disturbed closed-loop R3 checks
+
+Implemented a disturbed mode for the RL rerun closed-loop evaluator. The
+disturbance schedule matches the existing pre-RL Phase D action-perturbation
+diagnostic:
+
+```text
+directional action bias
+action hold
+action delay
+action scaling
+```
+
+The evaluator applies the same deterministic perturbation schedule to the
+paired frozen and tuned rollouts and reports recovery success/time in addition
+to task success and rewards.
+
+Verification:
+
+```text
+uv run python -m py_compile src/hcl_poc/rl_rerun.py src/hcl_poc/cli.py
+uv run hcl-poc rl-rerun eval-closed-loop-r3 --help
+```
+
+Smoke result on 8 disturbed episodes passed and wrote recovery metrics.
+
+Commands:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 100 --eval-seed-start 30000 --num-envs 64 \
+  --disturbed \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/disturbed_step_000409600_100_seed30000.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000614400.pt \
+  --n-demo 500 --seed 1 --episodes 100 --eval-seed-start 30000 --num-envs 64 \
+  --disturbed \
+  --output results/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/disturbed_step_000614400_100_seed30000.json
+```
+
+Tracked result copies:
+
+```text
+rl_rerun_local_r3_n500_seed0_409k_disturbed_100_seed30000.json
+rl_rerun_local_r3_n500_seed1_614k_disturbed_100_seed30000.json
+```
+
+Disturbed results:
+
+| policy seed | checkpoint | frozen success | tuned success | success delta | frozen recovery | tuned recovery | recovery delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.32 | 0.33 | +0.01 | 0.29 | 0.31 | +0.02 |
+| 1 | 614400 | 0.30 | 0.35 | +0.05 | 0.29 | 0.32 | +0.03 |
+| mean | n/a | 0.31 | 0.34 | +0.03 | 0.29 | 0.315 | +0.025 |
+
+Interpretation: R3 has a small positive disturbed/recovery signal on the
+100-episode diagnostic bank. This does not overturn the clean fresh-bank result
+(`-0.002` mean success delta over two 500-episode checks), but it suggests the
+direct low-level update may help some recovery behavior even when it does not
+improve clean deployment.
