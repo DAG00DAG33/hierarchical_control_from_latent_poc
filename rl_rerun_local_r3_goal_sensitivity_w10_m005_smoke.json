@@ -1,0 +1,36 @@
+{
+  "baseline_reference_from_log": {
+    "r3_lr3e5_10k_distance_reduction_fraction": 0.8379,
+    "r3_lr3e5_10k_final_distance_mean": 0.602,
+    "source": "rl_rerun_experiment_log.md RR-30/RR-31"
+  },
+  "checkpoint_path": "artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt",
+  "eval_path": "results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/eval_local_1batch.json",
+  "experiment": "r3_goal_sensitivity_w10_m005_smoke",
+  "interpretation": "The first simple sensitivity hinge did not reach the 0.05 action-sensitivity margin and worsened the one-batch local metric relative to the earlier R3 10k smoke.",
+  "local_eval_1_batch": {
+    "action_saturation_rate": 0.010791015625,
+    "distance_reduction_fraction": 0.8037109375,
+    "distance_reduction_mean": 0.4669156074523926,
+    "final_distance_mean": 0.6214524507522583,
+    "mean_action_delta_l2": 0.0010652707424014807,
+    "sampled_local_episodes": 4096
+  },
+  "purpose": "cheap test of in-batch valid-goal swap hinge to increase low-level goal sensitivity",
+  "train": {
+    "bc_loss": 2.6343718199029785e-07,
+    "bc_weight": 1.0,
+    "global_step": 40960,
+    "goal_sensitivity_loss": 0.0007346885358856525,
+    "goal_sensitivity_margin": 0.05,
+    "goal_sensitivity_weight": 10.0,
+    "goal_swap_action_sensitivity_l2": 0.031907013326417655,
+    "learning_rate": 1e-05,
+    "mean_action_delta_l2": 0.029265152733113097,
+    "mean_terminal_distance": 0.6088923616389366,
+    "num_envs": 4096,
+    "rollout_steps": 10,
+    "wall_time_s": 144.2808027260471
+  },
+  "train_history_path": "results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/history.json"
+}

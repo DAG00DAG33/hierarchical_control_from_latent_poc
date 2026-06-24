@@ -424,6 +424,8 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 learning_rate=args.learning_rate,
                 num_minibatches=args.num_minibatches,
                 checkpoint_every_updates=args.checkpoint_every_updates,
+                goal_sensitivity_weight=args.goal_sensitivity_weight,
+                goal_sensitivity_margin=args.goal_sensitivity_margin,
                 force=args.force,
             )
         )
@@ -1641,6 +1643,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r3.add_argument("--learning-rate", type=float)
     train_local_r3.add_argument("--num-minibatches", type=int)
     train_local_r3.add_argument("--checkpoint-every-updates", type=int, default=5)
+    train_local_r3.add_argument("--goal-sensitivity-weight", type=float, default=0.0)
+    train_local_r3.add_argument("--goal-sensitivity-margin", type=float, default=0.05)
     train_local_r3.add_argument("--force", action="store_true")
     train_local_r3.set_defaults(func=rl_rerun_cmd)
     eval_local_r3 = rl_rerun_sub.add_parser("eval-local-r3")

@@ -2096,3 +2096,57 @@ roughly one hour per serious `4096 x 10`, 1.024M-transition PPO run. It does not
 recover GPU-memory traces for old runs, and it does not recover R1 wall-clock
 because the R1 raw logs are not present in the workspace and the existing R1
 history JSON files contain no timing fields.
+
+## 2026-06-24 - RR-48: R3 goal-sensitivity-loss smoke
+
+Implemented an optional R3 direct low-level training term:
+
+```text
+goal_sensitivity_weight * mean(relu(margin - ||pi(x, g) - pi(x, g_swap)||_2)^2)
+```
+
+The swapped goal is another in-batch valid goal feature. This is a cheap attempt
+to address the RR-46 diagnosis that the tuned low level barely changes action
+when the future latent goal changes.
+
+Smoke command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --run-name goal_sensitivity_w10_m005_smoke_10k \
+  --steps 10240 --learning-rate 1e-5 --bc-weight 1.0 \
+  --goal-sensitivity-weight 10.0 --goal-sensitivity-margin 0.05 \
+  --checkpoint-every-updates 1 --force
+```
+
+Because the R3 PPO loop always finishes a full local rollout batch, this ran one
+`4096 x 10` update (`global_step=40960`) rather than stopping at exactly `10240`.
+
+Tracked compact summary:
+
+```text
+rl_rerun_local_r3_goal_sensitivity_w10_m005_smoke.json
+```
+
+Smoke results:
+
+| metric | value |
+| --- | ---: |
+| train goal-swap action sensitivity | 0.0319 |
+| sensitivity margin | 0.0500 |
+| sensitivity loss | 0.000735 |
+| train terminal distance | 0.6089 |
+| one-batch local final distance | 0.6215 |
+| one-batch local reduction fraction | 0.8037 |
+
+For comparison, the earlier R3 10k smoke in RR-30/RR-31 had local final
+distance `0.6020` and reduction fraction `0.8379`. This first simple
+goal-sensitivity hinge therefore does not look promising: it did not raise the
+action response to the requested margin and it worsened the cheap local metric.
+Do not promote this exact setting to a serious 1M-transition run.
+
+Operational note: an initial `eval-local-r3 --episodes 4096` command was
+stopped because local evaluator `episodes` are vector reset batches. With the
+4096-env corpus, the correct one-batch check is `--episodes 1`, which still
+evaluates 4096 local episodes.

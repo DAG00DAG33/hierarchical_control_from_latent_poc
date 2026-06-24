@@ -2351,6 +2351,8 @@ def train_rl_rerun_local_r3(
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
     checkpoint_every_updates: int = 5,
+    goal_sensitivity_weight: float = 0.0,
+    goal_sensitivity_margin: float = 0.05,
     force: bool = False,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
@@ -2365,6 +2367,10 @@ def train_rl_rerun_local_r3(
         raise ValueError("total_steps must be positive")
     if checkpoint_every_updates <= 0:
         raise ValueError("checkpoint_every_updates must be positive")
+    if goal_sensitivity_weight < 0:
+        raise ValueError("goal_sensitivity_weight must be non-negative")
+    if goal_sensitivity_margin <= 0:
+        raise ValueError("goal_sensitivity_margin must be positive")
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
@@ -2477,6 +2483,12 @@ def train_rl_rerun_local_r3(
             "task_progress",
         ],
     }
+    if goal_sensitivity_weight > 0:
+        recipe["goal_sensitivity_weight"] = goal_sensitivity_weight
+        recipe["goal_sensitivity_margin"] = goal_sensitivity_margin
+        recipe["goal_sensitivity_loss"] = (
+            "in-batch valid-goal swap hinge on deterministic mean action"
+        )
     global_step = 0
     history: list[dict[str, Any]] = []
     if latest.exists() and not force:
@@ -2662,6 +2674,8 @@ def train_rl_rerun_local_r3(
                 value_losses: list[float] = []
                 entropies: list[float] = []
                 bc_losses: list[float] = []
+                sensitivity_losses: list[float] = []
+                sensitivity_values: list[float] = []
                 approx_kl = torch.tensor(0.0, device=device)
                 agent.train()
                 for _epoch in range(update_epochs):
@@ -2674,6 +2688,47 @@ def train_rl_rerun_local_r3(
                         )
                         mean_action = agent.mean_action(flat_condition[mb])
                         bc_loss = torch.mean((mean_action - flat_base_action[mb]).square())
+                        sensitivity_loss = torch.zeros((), device=device)
+                        if goal_sensitivity_weight > 0:
+                            swapped_condition = flat_condition[mb].clone()
+                            if frozen.conditioning in {"concat", "delta", "film"}:
+                                goal_start = frozen.frame_dim
+                                goal_stop = goal_start + frozen.goal_dim
+                                permutation = torch.randperm(
+                                    swapped_condition.shape[0], device=device
+                                )
+                                swapped_condition[:, goal_start:goal_stop] = swapped_condition[
+                                    permutation, goal_start:goal_stop
+                                ]
+                            elif frozen.conditioning == "relation":
+                                future_start = frozen.frame_dim + frozen.goal_dim
+                                future_stop = future_start + frozen.goal_dim
+                                permutation = torch.randperm(
+                                    swapped_condition.shape[0], device=device
+                                )
+                                swapped_condition[:, future_start:future_stop] = (
+                                    swapped_condition[permutation, future_start:future_stop]
+                                )
+                            else:
+                                raise ValueError(
+                                    f"Unknown goal conditioning: {frozen.conditioning}"
+                                )
+                            swapped_mean_action = agent.mean_action(swapped_condition)
+                            action_sensitivity = torch.linalg.vector_norm(
+                                mean_action - swapped_mean_action, dim=-1
+                            )
+                            sensitivity_loss = torch.mean(
+                                torch.clamp(
+                                    goal_sensitivity_margin - action_sensitivity,
+                                    min=0.0,
+                                ).square()
+                            )
+                            sensitivity_losses.append(
+                                float(sensitivity_loss.detach().cpu())
+                            )
+                            sensitivity_values.append(
+                                float(action_sensitivity.detach().mean().cpu())
+                            )
                         logratio = new_logprob - flat_logprob[mb]
                         ratio = logratio.exp()
                         with torch.no_grad():
@@ -2694,6 +2749,7 @@ def train_rl_rerun_local_r3(
                             - ent_coef * entropy_loss
                             + value_coef * value_loss
                             + bc_weight * bc_loss
+                            + goal_sensitivity_weight * sensitivity_loss
                         )
                         optimizer.zero_grad(set_to_none=True)
                         loss.backward()
@@ -2723,6 +2779,12 @@ def train_rl_rerun_local_r3(
                     "policy_loss": float(np.mean(policy_losses)),
                     "value_loss": float(np.mean(value_losses)),
                     "bc_loss": float(np.mean(bc_losses)),
+                    "goal_sensitivity_loss": (
+                        float(np.mean(sensitivity_losses)) if sensitivity_losses else None
+                    ),
+                    "goal_swap_action_sensitivity_l2": (
+                        float(np.mean(sensitivity_values)) if sensitivity_values else None
+                    ),
                     "entropy": float(np.mean(entropies)),
                     "approx_kl": float(approx_kl.detach().cpu()),
                     "clip_fraction": float(np.mean(clipfracs)),

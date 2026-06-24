@@ -145,3 +145,6 @@ Additional diagnostic conclusion:
 6. If pursuing another learned-interface attempt, prioritize stronger
    goal-conditioned low-level training or architecture changes that measurably
    increase valid-goal sensitivity before spending large deployment budgets.
+   RR-48 tried a first simple in-batch goal-swap sensitivity hinge; it did not
+   reach the action-sensitivity margin and worsened the cheap local metric, so
+   that exact setting should not be promoted to a serious run.
