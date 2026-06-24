@@ -1931,3 +1931,53 @@ state is internal simulator/contact/controller state that is not exposed in the
 flat equality check. Keep replay mode as the trusted oracle path; do not use
 state-dict mode for final branch-oracle claims unless a stronger parity method
 is implemented.
+
+## 2026-06-24 - RR-44: Matched learned-goal comparison for oracle seed bank
+
+The 100-episode replay-oracle check in RR-42 used eval seeds `50000-50099`, but
+the previous learned-goal closed-loop results used other seed banks. To compare
+oracle goals against the deployed learned high-level on the same episodes, ran
+the matched learned-goal evaluation for both selected R3 checkpoints.
+
+Commands:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 100 --eval-seed-start 50000 --num-envs 64 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/closed_loop_step_000409600_100_seed50000.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000614400.pt \
+  --n-demo 500 --seed 1 --episodes 100 --eval-seed-start 50000 --num-envs 64 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/closed_loop_step_000614400_100_seed50000.json
+```
+
+Tracked result copies:
+
+```text
+rl_rerun_local_r3_n500_seed0_409k_learned_goal_100_seed50000.json
+rl_rerun_local_r3_n500_seed1_614k_learned_goal_100_seed50000.json
+```
+
+Matched seed-bank results:
+
+| policy seed | goal source | frozen success | tuned success | tuned-vs-frozen delta | tuned final-reward delta |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 0 | learned | 0.36 | 0.31 | -0.05 | -0.038 |
+| 0 | replay oracle | 0.36 | 0.37 | +0.01 | +0.014 |
+| 1 | learned | 0.42 | 0.35 | -0.07 | -0.058 |
+| 1 | replay oracle | 0.37 | 0.39 | +0.02 | +0.012 |
+| mean | learned | 0.39 | 0.33 | -0.06 | -0.048 |
+| mean | replay oracle | 0.365 | 0.38 | +0.015 | +0.013 |
+
+Interpretation: on the exact same 100 evaluation seeds, the replay-oracle
+high-level goal gives the tuned low level a `+0.05` absolute success advantage
+over the learned high-level goal (`0.38` versus `0.33`). The tuned-vs-frozen
+delta also flips from negative with learned goals (`-0.06`) to slightly
+positive with replay-oracle goals (`+0.015`). This supports the idea that part
+of the deployment issue is high-level goal quality or compounding goal error,
+not only low-level action quality. The evidence is still bounded to 100
+episodes and two policy seeds, so it is diagnostic rather than a final gate.

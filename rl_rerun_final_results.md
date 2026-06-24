@@ -238,6 +238,17 @@ replay branch-oracle path is wired and exact at the current-state level, but
 the positive performance signal is small and too low-budget to change the final
 RL rerun conclusion.
 
+On the same `50000-50099` evaluation seeds, learned-goal deployment was worse
+than replay-oracle deployment:
+
+| Goal source | Frozen success | Tuned success | Tuned-vs-frozen delta |
+| --- | ---: | ---: | ---: |
+| learned high-level | 0.390 | 0.330 | -0.060 |
+| replay oracle | 0.365 | 0.380 | +0.015 |
+
+This matched-bank comparison suggests that the learned high-level goal quality
+or its compounding errors are part of the remaining deployment bottleneck.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -251,6 +262,7 @@ RL rerun conclusion.
 | R3 direct tuning | No robust fresh deployment gain | fresh 500-bank deltas are `-0.024` and `+0.020`, mean `-0.002`; earlier `+0.04`/`+0.01` were development-bank results |
 | Disturbed/recovery gate | Fail | 500-episode disturbed mean success delta `-0.014`, recovery delta `-0.015`; 100-episode diagnostic was optimistic |
 | Branch-oracle diagnostic | Bounded only | 100-episode replay-oracle seed results are `+0.01` and `+0.02`; exact replay error `0.0`; no final-budget gate claim |
+| Matched learned-vs-oracle goal check | Diagnostic only | same 100 eval seeds: tuned learned-goal success `0.330`, tuned replay-oracle success `0.380` |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 
