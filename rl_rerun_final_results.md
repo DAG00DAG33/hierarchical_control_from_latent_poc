@@ -2,7 +2,8 @@
 
 This report summarizes the low-level RL rerun from
 `low_level_rl_rerun_state_parallel_plan.md`. The chronological execution log is
-`rl_rerun_experiment_log.md`; this file is the compact results view.
+`rl_rerun_experiment_log.md`. The requirement-by-requirement completion audit
+is `rl_rerun_completion_audit.md`; this file is the compact results view.
 
 ## Main Result
 
@@ -54,6 +55,7 @@ gate of `+0.10` success.
 | `data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5` | cheap fixed checkpoint-selection corpus |
 | `rl_rerun_vector_state_audit_n4096_b2.json` | exact replay audit for the main corpus |
 | `rl_rerun_throughput_rollout10_large.csv` | 10-step throughput benchmark |
+| `rl_rerun_completion_audit.md` | requirement-by-requirement completion status |
 | `rl_rerun_failure_videos/` | paired frozen/tuned deployment videos for the best R3 checkpoint |
 
 The single-env corpus replays exactly in a single-env CUDA simulator, but
