@@ -1598,3 +1598,39 @@ Telemetry smoke result:
 This fixes the code path for future serious runs. The already completed serious
 R1/R2/R3 histories still do not contain retrospective wall-clock or memory
 measurements, so the final report remains explicit about that historical gap.
+
+## 2026-06-24 - RR-37: Fresh 500-episode R3 seed0 evaluation
+
+The earlier R3 result used 100 deployment seeds starting at `10000`, which had
+also been used during development checkpoint comparison. To check whether the
+positive `+0.04` seed0 signal held on a larger and fresh evaluation bank, ran a
+500-episode paired closed-loop evaluation from `eval_seed_start=20000`.
+
+Command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 500 --eval-seed-start 20000 --num-envs 64 \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/closed_loop_step_000409600_500_seed20000.json
+```
+
+Result:
+
+| eval bank | episodes | frozen success | tuned success | success delta | final reward delta | max reward delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| development seeds `10000-10099` | 100 | 0.34 | 0.38 | +0.04 | +0.0307 | +0.0315 |
+| fresh seeds `20000-20499` | 500 | 0.306 | 0.282 | -0.024 | -0.0097 | -0.0154 |
+
+Tracked result copy:
+
+```text
+rl_rerun_local_r3_n500_seed0_409k_closed_loop_500_seed20000.json
+```
+
+Interpretation: the seed0 positive R3 signal does not survive a larger fresh
+evaluation bank. The most defensible conclusion is now weaker than RR-34: direct
+last-layer low-level RL can improve local latent reaching and produced positive
+development-bank results, but there is no current evidence that it improves
+fresh closed-loop deployment. Do not claim a positive RL result from the
+100-episode development bank.

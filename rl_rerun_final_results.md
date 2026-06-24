@@ -7,23 +7,32 @@ is `rl_rerun_completion_audit.md`; this file is the compact results view.
 
 ## Main Result
 
-The best low-level RL variant was direct deterministic low-level last-layer
-tuning:
+The best development-bank low-level RL variant was direct deterministic
+low-level last-layer tuning:
 
 ```text
 R3 direct last-layer, N=500, lr=1e-5, bc_weight=1.0
 ```
 
 It improved paired 100-episode closed-loop Push-T success on the two serious
-policy seeds tested:
+policy seeds tested during development:
 
 | Policy seed | Selected checkpoint | Frozen success | Tuned success | Delta |
 | ---: | ---: | ---: | ---: | ---: |
 | 0 | 409600 | 0.34 | 0.38 | +0.04 |
 | 1 | 614400 | 0.39 | 0.40 | +0.01 |
 
-This is a positive signal, but it does not pass the original full-hierarchy
-gate of `+0.10` success.
+However, the selected seed0 checkpoint did **not** improve on a larger fresh
+500-episode bank:
+
+| Eval bank | Episodes | Frozen success | Tuned success | Delta |
+| --- | ---: | ---: | ---: | ---: |
+| development seeds `10000-10099` | 100 | 0.34 | 0.38 | +0.04 |
+| fresh seeds `20000-20499` | 500 | 0.306 | 0.282 | -0.024 |
+
+The final takeaway is therefore negative for closed-loop deployment: R3 improved
+local latent reaching and looked positive on the small development bank, but it
+did not pass a fresh larger evaluation.
 
 ## Required Run Facts
 
@@ -56,6 +65,7 @@ gate of `+0.10` success.
 | `rl_rerun_vector_state_audit_n4096_b2.json` | exact replay audit for the main corpus |
 | `rl_rerun_throughput_rollout10_large.csv` | 10-step throughput benchmark |
 | `rl_rerun_completion_audit.md` | requirement-by-requirement completion status |
+| `rl_rerun_local_r3_n500_seed0_409k_closed_loop_500_seed20000.json` | tracked fresh 500-episode R3 seed0 evaluation |
 | `rl_rerun_failure_videos/` | paired frozen/tuned deployment videos for the best R3 checkpoint |
 
 The single-env corpus replays exactly in a single-env CUDA simulator, but
@@ -83,8 +93,9 @@ These are supervised frozen-hierarchy baselines, not RL-tuned results.
 
 ## RL Results
 
-All main RL rows below use exact 10-step local resets. Closed-loop deployment
-uses paired 100-episode evaluation seeds.
+All main RL rows below use exact 10-step local resets. Most closed-loop
+deployment rows use paired 100-episode development banks; the seed0 fresh-bank
+R3 row uses 500 episodes and is the stronger deployment check.
 
 | Method | N | Main envs | Steps | Best local final distance | Closed-loop success | Delta vs frozen |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -93,10 +104,11 @@ uses paired 100-episode evaluation seeds.
 | R1 disjoint-state ablation | 500 | 512 | 1.024M | 0.5958 | 0.30 | -0.04 |
 | R2 residual flow low level | 500 | 4096 | 1.024M | 0.6267 | 0.23 | -0.05 vs flow base |
 | R3 direct last-layer, lr=3e-5 | 500 | 4096 | 1.024M | 0.5851 | 0.29 at local-best | -0.05 |
-| R3 direct last-layer, lr=1e-5, seed0 | 500 | 4096 | 1.024M | 0.5932 | 0.38 | +0.04 |
+| R3 direct last-layer, lr=1e-5, seed0 dev bank | 500 | 4096 | 1.024M | 0.5932 | 0.38 | +0.04 |
+| R3 direct last-layer, lr=1e-5, seed0 fresh 500 bank | 500 | 4096 | 1.024M | 0.5932 | 0.282 | -0.024 |
 | R3 direct last-layer, lr=1e-5, seed1 | 500 | 4096 | 1.024M | 0.6171 | 0.40 | +0.01 |
 
-The summary plot is:
+The development summary plot is:
 
 ![RL rerun learning curves](rl_rerun_learning_curves.png)
 
@@ -136,12 +148,22 @@ penalized deviation from the frozen low-level action.
 
 `lr=3e-5` gave the best local final distance but overfit the local objective and
 hurt deployment. Reducing the direct learning rate to `1e-5` preserved a smaller
-local gain and improved closed-loop success on two policy seeds:
+local gain and improved closed-loop success on two 100-episode development
+banks:
 
 | Seed | Checkpoint | Frozen success | Tuned success | Final reward delta | Max reward delta |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 409600 | 0.34 | 0.38 | +0.0307 | +0.0315 |
 | 1 | 614400 | 0.39 | 0.40 | +0.0224 | +0.0156 |
+
+The selected seed0 checkpoint was then evaluated on 500 fresh seeds:
+
+| Seed | Checkpoint | Eval seeds | Episodes | Frozen success | Tuned success | Final reward delta | Max reward delta |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | `20000-20499` | 500 | 0.306 | 0.282 | -0.0097 | -0.0154 |
+
+This larger fresh-bank result overrides the small development-bank optimism for
+the final deployment interpretation.
 
 Seed2 failed the cheap 10k local final-distance screen (`0.6913` tuned versus
 `0.6836` frozen), so it has not been promoted to a serious `4096`-env run.
@@ -170,32 +192,32 @@ failed.
 | RL correctness | Pass for local PPO setup | no task reward/progress in training; 10-step segment boundary |
 | R1 local gate | Fail | local gains far below 25% target |
 | R2 flow gate | Fail | flow base weak; residual degrades deployment |
-| R3 direct tuning | Positive but below final gate | `+0.04` on seed0 and `+0.01` on seed1, not `+0.10` |
+| R3 direct tuning | Fails fresh deployment check | seed0 fresh 500-bank delta `-0.024`; earlier `+0.04`/`+0.01` were development-bank results |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
-| Final multi-seed RL gate | Partial only | two serious policy seeds tested; third seed failed cheap screen; no 500-episode final eval |
+| Final multi-seed RL gate | Fail/incomplete | one fresh 500-episode bank was negative; no reason to spend full multi-seed final bank without a new method |
 
 ## Interpretation
 
 The rerun invalidates the earlier weak RL attempt as a definitive negative:
 using exact local resets and large vector batches matters. However, residual
 low-level PPO did not solve the problem. Directly tuning the deterministic
-low-level final layer is more promising and produced the first positive
-closed-loop RL results, but the improvement is modest and not yet robust enough
-for a final claim.
+low-level final layer improves local latent reaching more reliably than the
+residual variants, but the closed-loop gain did not hold on a fresh larger
+evaluation bank.
 
 The current best scientific conclusion is:
 
-> Low-level RL can improve the learned-interface hierarchy slightly when it is
-> constrained to a small direct update of the deterministic low-level policy,
-> but the observed `+4` and `+1` point success gains are below the planned gate
-> and did not reproduce in the cheap `N=1000` screen.
+> Low-level RL improved some local latent-reaching metrics and small
+> development-bank evaluations, but the current best R3 checkpoint failed a
+> fresh 500-episode deployment evaluation. The current evidence does not support
+> using this low-level RL rerun as an improvement over the frozen hierarchy.
 
 ## Remaining Instrumentation Gaps
 
 - New R1/R2/R3 runs now store wall-clock and peak CUDA-memory telemetry, but the
   already completed serious RL histories do not contain retrospective values.
-- A final positive claim would require at least three policy seeds and a larger
-  evaluation budget for the selected R3 setting.
+- A future positive claim would need a new method or tuning rule that first
+  improves a fresh held-out deployment bank.
 
 ## Videos
 

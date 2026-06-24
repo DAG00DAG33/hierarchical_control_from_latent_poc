@@ -12,8 +12,9 @@ requirements.
 
 The original plan asks for 3 policy seeds and 500 clean plus 500 disturbed
 episodes per final seed. During execution this was reduced because runtime was
-large. The current result should therefore be read as a serious development
-result, not a final statistically powered claim.
+large. After the two 100-episode development-bank R3 signals, one selected
+checkpoint was evaluated on a fresh 500-episode clean bank. That fresh bank was
+negative, so a full multi-seed positive evaluation was not pursued.
 
 ## Required Deliverables
 
@@ -45,28 +46,35 @@ result, not a final statistically powered claim.
 | Direct deterministic fine-tuning tested | pass | R3 `lr=3e-5` and `lr=1e-5` serious N=500 runs |
 | N=1000 checked | partial | cheap exact-reset R3 screen failed; full 4096-env N=1000 run skipped |
 | R4 direct-flow tested | skipped by plan condition | R2 did not establish a stable flow base; final report documents this |
-| Final multi-seed 500-episode evaluation | partial | two serious R3 seeds evaluated on 100 episodes; seed2 failed cheap screen; no 500-episode final bank |
+| Fresh 500-episode clean evaluation | fail for selected R3 seed0 | frozen `0.306`, tuned `0.282`, delta `-0.024` on seeds `20000-20499` |
+| Final multi-seed 500-episode evaluation | stopped after negative fresh bank | two serious R3 seeds evaluated on 100 dev episodes; selected seed0 failed fresh 500-bank eval; seed2 failed cheap screen |
 | Disturbed/recovery/branch-oracle evaluations | not run | omitted under runtime reduction; no final gate claim is made |
 | RL wall-clock and GPU telemetry | implemented for future runs | R1/R2/R3 history writers now record update/run wall time, sample rates, and peak CUDA memory; verified by `telemetry_smoke_1update` |
 
 ## Main Quantitative Result
 
-Best method: R3 direct deterministic last-layer tuning, `N=500`,
-`lr=1e-5`, `bc_weight=1.0`.
+Best development-bank method: R3 direct deterministic last-layer tuning,
+`N=500`, `lr=1e-5`, `bc_weight=1.0`.
 
 | Policy seed | Selected checkpoint | Frozen success | Tuned success | Delta | Episodes |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 409600 | 0.34 | 0.38 | +0.04 | 100 |
 | 1 | 614400 | 0.39 | 0.40 | +0.01 | 100 |
 
-The result is positive but below the original `+0.10` success gate.
+Fresh-bank check:
+
+| Policy seed | Selected checkpoint | Eval seeds | Frozen success | Tuned success | Delta | Episodes |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 0 | 409600 | `20000-20499` | 0.306 | 0.282 | -0.024 | 500 |
+
+The fresh-bank result is negative for the selected method.
 
 ## Negative/Positive Claim Status
 
 Strong positive claim: **not supported**.
 
-Reason: R3 improves two development seeds, but the success gains are only
-`+0.04` and `+0.01`, and no 500-episode final bank was run.
+Reason: R3 improves two 100-episode development banks, but the selected seed0
+checkpoint loses `2.4` percentage points on a fresh 500-episode bank.
 
 Strong negative claim: **not supported**.
 
@@ -78,14 +86,14 @@ Supported conclusion:
 
 > Exact local resets and large vector batches invalidate the earlier weak RL
 > run as a definitive negative. Residual R1/R2 did not solve the problem. A
-> small direct update to the deterministic low-level final layer gives a modest
-> positive deployment signal at N=500, but the result is below gate and should
-> be treated as preliminary.
+> small direct update to the deterministic low-level final layer gives better
+> local latent reaching and small development-bank positives, but the selected
+> checkpoint does not improve fresh closed-loop deployment.
 
 ## Remaining Work For A Final Claim
 
-1. Run a final 500-episode evaluation for any method intended to be claimed as
-   positive.
+1. Do not claim the current R3 setting as positive; design a new method or
+   checkpoint-selection rule before spending a full multi-seed final bank.
 2. Re-run any serious RL point whose final report needs wall-clock and GPU
    memory, because telemetry is now implemented but old histories do not contain
    retrospective measurements.
