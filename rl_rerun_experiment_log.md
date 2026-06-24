@@ -2370,3 +2370,34 @@ adding the goal to observation improves raw L2 by only `0.020`. This supports
 the RR-51 interpretation: the supervised one-step target itself is mostly
 current-state/previous-action predictable, so a low-level trained this way has
 little pressure to use the future latent as a strong interface.
+
+## 2026-06-24 - RR-53: Goal-conditioning identifiability conclusion
+
+Added the synthesis note:
+
+```text
+rl_rerun_goal_conditioning_identifiability.md
+```
+
+The core conclusion is that the current one-step deterministic teacher
+distillation target does not make the future goal identifiable as a causal input.
+For a fixed current state, the deterministic teacher action is the same no
+matter whether the supplied same-trajectory future goal is `k=2`, `k=5`, `k=10`,
+or `k=20`:
+
+```text
+a_t = pi_teacher(s_t)
+```
+
+Therefore the supervised label is invariant to the future-goal choice. The low
+level can minimize one-step action error by relying on current observation and
+previous action, which is exactly what RR-49 through RR-52 measure.
+
+Next formulation change before more expensive RL:
+
+1. train low-level control with multi-step goal-reaching rollouts, not only
+   one-step teacher action labels;
+2. collect counterfactual branch data where the same current state can pair with
+   different reachable future goals and different desired behavior;
+3. use a goal-gated or goal-bottlenecked architecture and promote it only if the
+   valid-goal sensitivity diagnostics improve before closed-loop deployment.

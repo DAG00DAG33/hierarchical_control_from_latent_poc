@@ -82,6 +82,7 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_valid_goal_sensitivity_seed0_2048_wide.json` | same-state `k=2/5/10/20` valid-goal sensitivity diagnostic |
 | `rl_rerun_condition_block_sensitivity_seed0_2048.json` | observation/goal/previous-action block sensitivity diagnostic |
 | `rl_rerun_action_block_prediction_seed0_8192_2048.json` | one-step teacher-action predictability by condition block |
+| `rl_rerun_goal_conditioning_identifiability.md` | synthesis note explaining why one-step deterministic labels weakly identify goal use |
 | `scripts/rl_rerun_goal_mismatch_audit.py` | reproducible learned-vs-oracle goal mismatch audit |
 | `scripts/rl_rerun_valid_goal_sensitivity.py` | reproducible same-state valid-goal sensitivity diagnostic |
 | `scripts/rl_rerun_condition_block_sensitivity.py` | reproducible condition-block sensitivity diagnostic |
@@ -304,6 +305,13 @@ observation only versus `0.404` from goal only. Adding the goal to observation
 improves raw L2 by only `0.020`, so the one-step teacher label itself provides
 weak pressure to rely on future latents.
 
+The synthesis note `rl_rerun_goal_conditioning_identifiability.md` makes this
+explicit: for a fixed current state, one-step deterministic teacher imitation
+has the same action label for same-trajectory goals at different horizons. The
+future goal is therefore not behaviorally identifiable unless training uses
+multi-step goal-reaching rollouts, counterfactual branch data, or a stronger
+goal-gated low-level formulation.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -324,6 +332,7 @@ weak pressure to rely on future latents.
 | Wide-horizon valid-goal sensitivity | Diagnostic only | same-trajectory `k=2/5/10/20` future latents differ by mean L2 `~24-27`, but actions change only `~0.016-0.022` L2 |
 | Condition-block sensitivity | Diagnostic only | observation-block shuffle changes actions by `~0.805` L2, goal-block shuffle by only `~0.048-0.050` L2 |
 | Action block prediction | Diagnostic only | obs-only raw action L2 `0.227`, goal-only `0.404`, obs+goal improves obs-only by only `0.020` |
+| Goal-conditioning identifiability | Diagnostic conclusion | one-step deterministic action labels are invariant to same-current-state horizon changes, so goal use is weakly identified |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 
