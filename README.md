@@ -240,8 +240,8 @@ not the final result of this repository:
 - [rl_rerun_final_results.md](rl_rerun_final_results.md): exact-reset
   low-level RL rerun with R1/R2/R3 comparisons. The best R3 setting averaged
   no fresh-bank deployment gain across two 500-episode checks (`-0.002` success
-  delta); a bounded replay-oracle diagnostic was mixed and remains below final
-  gate budget. The strict completion audit is
+  delta); a bounded replay-oracle diagnostic was only slightly positive and
+  remains below final gate budget. The strict completion audit is
   [rl_rerun_completion_audit.md](rl_rerun_completion_audit.md).
 - [FINAL_RESULTS_AND_CANDIDATES.md](FINAL_RESULTS_AND_CANDIDATES.md): earlier
   AE hierarchy and flat-policy studies.

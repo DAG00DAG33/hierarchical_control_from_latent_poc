@@ -26,7 +26,7 @@ evaluation was not pursued.
 | `rl_rerun_state_load_audit.md` | done | full dataset reset-and-replay audit summarized |
 | `rl_rerun_throughput_benchmark.csv` | done | throughput benchmark exported at repo root |
 | `rl_rerun_algorithm_audit.md` | done | Phase D algorithm audit documented |
-| `rl_rerun_experiment_log.md` | done | chronological log through RR-40 |
+| `rl_rerun_experiment_log.md` | done | chronological log through RR-42 |
 | `rl_rerun_final_results.md` | done | compact final result report |
 | `rl_rerun_learning_curves.png` | done | summary plot exported |
 | `rl_rerun_failure_videos/` | done | paired frozen/tuned videos for the best R3 seed0 checkpoint |
@@ -51,7 +51,7 @@ evaluation was not pursued.
 | Fresh 500-episode clean evaluation | no robust gain | seed0 delta `-0.024`, seed1 delta `+0.020`, mean delta `-0.002` on seeds `20000-20499` |
 | Final multi-seed 500-episode evaluation | stopped after near-zero two-seed result | two serious R3 seeds evaluated on fresh 500-episode banks; seed2 failed cheap screen |
 | Disturbed/recovery evaluation | fail at final budget | 500-episode disturbed mean success delta `-0.014`, recovery delta `-0.015`; 100-episode diagnostic was optimistic |
-| Branch-oracle evaluation | bounded diagnostic only | 20-episode replay-oracle checks for two selected R3 seeds: deltas `-0.15` and `+0.25`, mean `+0.05`; replay state error `0.0`; no 500-episode gate claim |
+| Branch-oracle evaluation | bounded diagnostic only | 100-episode replay-oracle checks for two selected R3 seeds: deltas `+0.01` and `+0.02`, mean `+0.015`; replay state error `0.0`; no 500-episode gate claim |
 | RL wall-clock and GPU telemetry | implemented for future runs | R1/R2/R3 history writers now record update/run wall time, sample rates, and peak CUDA memory; verified by `telemetry_smoke_1update` |
 
 ## Main Quantitative Result
@@ -101,7 +101,7 @@ Strong negative claim: **not supported**.
 
 Reason: the plan's credible-negative conditions are mostly satisfied for local
 R1/R2/R3, but N=1000 was only screened cheaply and branch-oracle evaluation was
-only run as a bounded 20-episode replay diagnostic.
+only run as a bounded 100-episode replay diagnostic.
 
 Supported conclusion:
 
@@ -123,6 +123,6 @@ Supported conclusion:
    since seed2 already failed the cheap local screen and the two fresh-bank
    seeds average to no gain.
 4. If pursuing a negative claim, run the branch-oracle evaluation at final
-   budget; the current 20-episode replay diagnostic is not enough.
+   budget; the current 100-episode replay diagnostic is not enough.
 5. If pursuing N=1000, design a new R3/R2 setting because the current cheap
    R3 screen was locally worse than frozen.

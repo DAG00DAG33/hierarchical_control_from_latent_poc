@@ -1841,3 +1841,48 @@ branch parity and gives mixed deployment evidence: one selected R3 seed gets
 worse and one improves. The result does not overturn the fresh clean/disturbed
 500-episode conclusion, but it narrows the remaining gap from "oracle not run"
 to "small replay-oracle diagnostic run; full-budget oracle gate still omitted."
+
+## 2026-06-24 - RR-42: 100-episode replay-oracle check
+
+The 20-episode replay-oracle diagnostic in RR-41 was too noisy: seed0 was
+negative and seed1 was strongly positive. Ran the same trusted replay-oracle
+evaluation for 100 episodes per selected R3 seed using `num_envs=8`.
+
+Commands:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 100 --eval-seed-start 50000 --num-envs 8 \
+  --goal-source oracle --oracle-copy-mode replay \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/oracle_replay_step_000409600_100_seed50000.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000614400.pt \
+  --n-demo 500 --seed 1 --episodes 100 --eval-seed-start 50000 --num-envs 8 \
+  --goal-source oracle --oracle-copy-mode replay \
+  --output results/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/oracle_replay_step_000614400_100_seed50000.json
+```
+
+Tracked result copies:
+
+```text
+rl_rerun_local_r3_n500_seed0_409k_oracle_replay_100_seed50000.json
+rl_rerun_local_r3_n500_seed1_614k_oracle_replay_100_seed50000.json
+```
+
+100-episode replay-oracle results:
+
+| policy seed | checkpoint | frozen success | tuned success | success delta | final reward delta | max replay error | mean branch latency/replan |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.36 | 0.37 | +0.01 | +0.014 | 0.0 | 0.243 s |
+| 1 | 614400 | 0.37 | 0.39 | +0.02 | +0.012 | 0.0 | 0.247 s |
+| mean | n/a | 0.365 | 0.380 | +0.015 | +0.013 | 0.0 | 0.245 s |
+
+Interpretation: increasing the replay-oracle diagnostic from 20 to 100 episodes
+removes the large seed split and leaves a small positive average. This still
+does not meet a final gate: it uses 100 episodes rather than 500, only two
+policy seeds, and oracle branch generation is an expensive privileged
+diagnostic rather than the deployable learned high-level model. It does,
+however, show that the local branch-oracle interface is not obviously worse
+than the learned-goal deployment for the selected R3 checkpoints.
