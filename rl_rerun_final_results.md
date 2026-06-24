@@ -72,6 +72,12 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_local_r3_n500_seed1_614k_disturbed_100_seed30000.json` | tracked disturbed/recovery R3 seed1 diagnostic |
 | `rl_rerun_local_r3_n500_seed0_409k_disturbed_500_seed40000.json` | tracked fresh 500-episode disturbed R3 seed0 evaluation |
 | `rl_rerun_local_r3_n500_seed1_614k_disturbed_500_seed40000.json` | tracked fresh 500-episode disturbed R3 seed1 evaluation |
+| `rl_rerun_local_r3_n500_seed0_409k_oracle_replay_100_seed50000.json` | tracked 100-episode replay-oracle R3 seed0 diagnostic |
+| `rl_rerun_local_r3_n500_seed1_614k_oracle_replay_100_seed50000.json` | tracked 100-episode replay-oracle R3 seed1 diagnostic |
+| `rl_rerun_local_r3_n500_seed0_409k_learned_goal_100_seed50000.json` | matched learned-goal R3 seed0 comparison on oracle seed bank |
+| `rl_rerun_local_r3_n500_seed1_614k_learned_goal_100_seed50000.json` | matched learned-goal R3 seed1 comparison on oracle seed bank |
+| `rl_rerun_goal_sensitivity_summary_seed50000.json` | compact learned-vs-oracle goal-sensitivity summary |
+| `scripts/rl_rerun_goal_mismatch_audit.py` | reproducible learned-vs-oracle goal mismatch audit |
 | `rl_rerun_failure_videos/` | paired frozen/tuned deployment videos for the best R3 checkpoint |
 
 The single-env corpus replays exactly in a single-env CUDA simulator, but

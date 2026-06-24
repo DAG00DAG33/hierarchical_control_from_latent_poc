@@ -26,7 +26,7 @@ evaluation was not pursued.
 | `rl_rerun_state_load_audit.md` | done | full dataset reset-and-replay audit summarized |
 | `rl_rerun_throughput_benchmark.csv` | done | throughput benchmark exported at repo root |
 | `rl_rerun_algorithm_audit.md` | done | Phase D algorithm audit documented |
-| `rl_rerun_experiment_log.md` | done | chronological log through RR-42 |
+| `rl_rerun_experiment_log.md` | done | chronological log through RR-46 |
 | `rl_rerun_final_results.md` | done | compact final result report |
 | `rl_rerun_learning_curves.png` | done | summary plot exported |
 | `rl_rerun_failure_videos/` | done | paired frozen/tuned videos for the best R3 seed0 checkpoint |
@@ -116,6 +116,17 @@ Supported conclusion:
 > improve fresh clean or disturbed closed-loop deployment on average across the
 > two serious seeds.
 
+Additional diagnostic conclusion:
+
+> On a matched 100-episode seed bank, replay-oracle goals outperform learned
+> high-level goals for the tuned R3 low level (`0.380` versus `0.330` success),
+> so high-level goal quality or compounding goal error is part of the remaining
+> bottleneck. However, the learned-versus-oracle goal mismatch audit shows that
+> large latent-goal errors only weakly affect low-level actions (`0.00117`
+> action-L2 per latent-goal-L2), and R3 tuning does not improve this sensitivity
+> over frozen. The current learned-interface bottleneck is therefore both
+> high-level goal prediction and weak useful goal conditioning in the low level.
+
 ## Remaining Work For A Final Claim
 
 1. Do not claim the current R3 setting as positive; design a new method or
@@ -130,3 +141,6 @@ Supported conclusion:
    budget; the current 100-episode replay diagnostic is not enough.
 5. If pursuing N=1000, design a new R3/R2 setting because the current cheap
    R3 screen was locally worse than frozen.
+6. If pursuing another learned-interface attempt, prioritize stronger
+   goal-conditioned low-level training or architecture changes that measurably
+   increase valid-goal sensitivity before spending large deployment budgets.
