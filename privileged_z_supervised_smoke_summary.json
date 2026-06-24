@@ -1,0 +1,34 @@
+{
+  "experiment": "privileged_z_supervised_smoke",
+  "decision": "positive_goal_sensitivity_signal",
+  "plan": "privileged_z_rl_experiment_plan.md",
+  "log": "privileged_z_rl_experiment_log.md",
+  "checkpoint": "artifacts/incremental/privileged_z/n500/seed0/privileged_z_k10.pt",
+  "metrics_file": "artifacts/incremental/privileged_z/n500/seed0/privileged_z_k10_metrics.json",
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5",
+  "n_trajectories": 500,
+  "validation_trajectories": 200,
+  "horizon_steps": 10,
+  "seed": 0,
+  "epochs": 40,
+  "state_dim": 31,
+  "offline_metrics": {
+    "high_future_z_mse": 0.21283851563930511,
+    "high_future_z_l2": 1.8552566766738892,
+    "flat_low_mse": 0.09941063076257706,
+    "flat_low_l2": 0.43770626187324524,
+    "goal_low_mse": 0.08429337292909622,
+    "goal_low_l2": 0.4111350178718567
+  },
+  "goal_sensitivity": {
+    "k2_vs_k10_action_l2_mean": 0.26525160670280457,
+    "k5_vs_k10_action_l2_mean": 0.18800757825374603,
+    "k20_vs_k10_action_l2_mean": 0.18975739181041718,
+    "k2_vs_k20_action_l2_mean": 0.33125296235084534
+  },
+  "comparison": {
+    "learned_latent_margin_scaled_k2_vs_k10_action_l2_mean": 0.025506915438498368,
+    "privileged_z_to_learned_latent_sensitivity_ratio": 10.399200406832018
+  },
+  "interpretation": "Using privileged physical state as z produces much stronger valid-goal action sensitivity than the learned-latent residual smokes, so the future-state interface remains plausible when representation and data ambiguity are controlled."
+}

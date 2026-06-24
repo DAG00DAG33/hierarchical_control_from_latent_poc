@@ -2612,3 +2612,78 @@ creating a strong goal-conditioned local controller. The next useful step is no
 longer residual scaling; it should be the stronger Phase G1/G3 branch: direct
 goal-gated low-level training or counterfactual branch data where different
 reachable goals require different behavior.
+
+## 2026-06-24 - RR-57: Privileged-z supervised sanity check
+
+Added the simpler privileged-state interface plan and log:
+
+```text
+privileged_z_rl_experiment_plan.md
+privileged_z_rl_experiment_log.md
+```
+
+Implemented a compact trainer:
+
+```text
+uv run hcl-poc rl-rerun train-privileged-z
+```
+
+This bypasses DINO and learned encoders entirely:
+
+```text
+z_t = observations_state_t
+```
+
+where `observations_state` is the 31D privileged Push-T state stored in the
+vector-consistent RL rerun corpus.
+
+Command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-privileged-z \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-trajectories 500 --validation-trajectories 200 \
+  --horizon 10 --seed 0 --epochs 40 --batch-size 4096 \
+  --hidden-dim 512 --force
+```
+
+Tracked compact summary:
+
+```text
+privileged_z_supervised_smoke_summary.json
+```
+
+Artifact:
+
+```text
+artifacts/incremental/privileged_z/n500/seed0/privileged_z_k10.pt
+```
+
+Offline validation:
+
+| model | normalized MSE | normalized L2 | normalized MAE |
+| --- | ---: | ---: | ---: |
+| high future-z predictor | 0.2128 | 1.8553 | 0.2147 |
+| flat low level | 0.0994 | 0.4377 | 0.2154 |
+| goal-conditioned low level | 0.0843 | 0.4111 | 0.2034 |
+
+Valid-goal action sensitivity:
+
+| goal swap | privileged-z action L2 mean | learned-latent reference |
+| --- | ---: | ---: |
+| `k=2` vs `k=10` | 0.2653 | 0.0255 |
+| `k=5` vs `k=10` | 0.1880 | n/a |
+| `k=20` vs `k=10` | 0.1898 | n/a |
+| `k=2` vs `k=20` | 0.3313 | n/a |
+
+Interpretation: this is a strong positive sanity signal for the future-state
+interface when `z` is privileged physical state. The `k=2` versus `k=10`
+sensitivity is about `10.4x` larger than the learned-latent margin-scaled G1
+smoke. This suggests the weak learned-latent result is at least partly due to
+representation/data/training-identifiability issues, not simply because
+future-state conditioning is impossible.
+
+Next branch: implement the simplest privileged-z local PPO/R1-style fine-tuning
+and then collect or derive the proposed 500-trajectory clean/disturbed mixed
+dataset to test whether recovery diversity increases learned-latent goal
+sensitivity.

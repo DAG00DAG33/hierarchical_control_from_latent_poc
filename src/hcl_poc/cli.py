@@ -106,6 +106,7 @@ from hcl_poc.low_level_rl import (
     train_direct_low_rl,
     train_residual_rl,
 )
+from hcl_poc.privileged_z import train_privileged_z_hierarchy
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.rl_rerun import (
@@ -492,6 +493,22 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 seed=args.seed,
                 dataset_path=Path(args.dataset) if args.dataset else None,
                 eval_episodes=args.eval_episodes,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "train-privileged-z":
+        console.print(
+            train_privileged_z_hierarchy(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_trajectories=args.n_trajectories,
+                validation_trajectories=args.validation_trajectories,
+                horizon_steps=args.horizon,
+                seed=args.seed,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                hidden_dim=args.hidden_dim,
+                lr=args.lr,
                 force=args.force,
             )
         )
@@ -1720,6 +1737,18 @@ def build_parser() -> argparse.ArgumentParser:
     train_supervised.add_argument("--eval-episodes", type=int, default=100)
     train_supervised.add_argument("--force", action="store_true")
     train_supervised.set_defaults(func=rl_rerun_cmd)
+    train_priv_z = rl_rerun_sub.add_parser("train-privileged-z")
+    train_priv_z.add_argument("--dataset")
+    train_priv_z.add_argument("--n-trajectories", type=int, default=500)
+    train_priv_z.add_argument("--validation-trajectories", type=int, default=200)
+    train_priv_z.add_argument("--horizon", type=int, default=10)
+    train_priv_z.add_argument("--seed", type=int, default=0)
+    train_priv_z.add_argument("--epochs", type=int, default=40)
+    train_priv_z.add_argument("--batch-size", type=int, default=4096)
+    train_priv_z.add_argument("--hidden-dim", type=int, default=512)
+    train_priv_z.add_argument("--lr", type=float, default=3e-4)
+    train_priv_z.add_argument("--force", action="store_true")
+    train_priv_z.set_defaults(func=rl_rerun_cmd)
     throughput = rl_rerun_sub.add_parser("throughput-benchmark")
     throughput.add_argument(
         "--num-envs",
