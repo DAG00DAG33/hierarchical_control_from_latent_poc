@@ -314,7 +314,10 @@ The current best scientific conclusion is:
 > improvement over two fresh 500-episode clean evaluations and is slightly worse
 > on two fresh 500-episode disturbed evaluations. The current evidence does not
 > support using this low-level RL rerun as an improvement over the frozen
-> hierarchy.
+> hierarchy. The replay-oracle diagnostics further suggest that learned
+> high-level goal quality matters, but the current low level is also weakly
+> sensitive to large future-goal changes, so the next learned-interface attempt
+> should address both prediction quality and goal-conditioned control.
 
 ## Remaining Instrumentation Gaps
 
