@@ -84,6 +84,7 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_action_block_prediction_seed0_8192_2048.json` | one-step teacher-action predictability by condition block |
 | `rl_rerun_goal_conditioning_identifiability.md` | synthesis note explaining why one-step deterministic labels weakly identify goal use |
 | `rl_rerun_goal_identifiable_next_plan.md` | concrete next-experiment plan with diagnostics and promotion gates |
+| `rl_rerun_phase_g1_goal_delta_residual_smokes.json` | first Phase G1 goal-dominant residual smoke comparison |
 | `scripts/rl_rerun_goal_mismatch_audit.py` | reproducible learned-vs-oracle goal mismatch audit |
 | `scripts/rl_rerun_valid_goal_sensitivity.py` | reproducible same-state valid-goal sensitivity diagnostic |
 | `scripts/rl_rerun_condition_block_sensitivity.py` | reproducible condition-block sensitivity diagnostic |
@@ -318,6 +319,11 @@ execution path. It requires cheap valid-goal and condition-block sensitivity
 gates to improve before another full 1.024M-transition RL run or final
 closed-loop evaluation.
 
+The first Phase G1 smokes added a `goal_delta` residual condition mode. Both
+initial settings plus a lower-exploration variant were not promoted: one-batch
+local final distances were acceptable (`0.6196`, `0.6232`, `0.6249`), but
+training action saturation stayed around `18%`, above the `5%` gate.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -339,6 +345,7 @@ closed-loop evaluation.
 | Condition-block sensitivity | Diagnostic only | observation-block shuffle changes actions by `~0.805` L2, goal-block shuffle by only `~0.048-0.050` L2 |
 | Action block prediction | Diagnostic only | obs-only raw action L2 `0.227`, goal-only `0.404`, obs+goal improves obs-only by only `0.020` |
 | Goal-conditioning identifiability | Diagnostic conclusion | one-step deterministic action labels are invariant to same-current-state horizon changes, so goal use is weakly identified |
+| Phase G1 goal-dominant residual smokes | Fail | `goal_delta` residual smokes had train action saturation `0.184`, `0.176`, and `0.176`, above the `0.05` gate |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 

@@ -60,6 +60,7 @@ evaluation was not pursued.
 | Condition-block sensitivity | diagnostic only | observation-block shuffle changes frozen/R3 actions by `~0.805` L2, goal-block shuffle by only `~0.048-0.050` L2; previous action is comparable to goal |
 | Action block prediction | diagnostic only | scratch MLP predicts one-step action much better from observation-only (`0.227` raw L2) than goal-only (`0.404`); adding goal to observation improves only `0.020` raw L2 |
 | Goal-conditioning identifiability | diagnostic conclusion | `rl_rerun_goal_conditioning_identifiability.md`: one-step deterministic labels are invariant to same-current-state horizon changes, so future-goal use is weakly identified |
+| Phase G1 goal-dominant residual smokes | fail | `rl_rerun_phase_g1_goal_delta_residual_smokes.json`: `goal_delta` residual mode works technically, but tested settings have train action saturation `0.184`, `0.176`, and `0.176`, above the `0.05` gate |
 | Fast state-dict branch copy | fail for oracle use | current state/action parity is near `1e-6`, but 10-step same-action branch rollout still has mean future-goal L2 error `5.19`; replay remains the trusted oracle path |
 | RL wall-clock telemetry | partial, retrospectively recovered where logs exist | `rl_rerun_recovered_wallclock.csv` recovers raw-log wall-clock for R2/R3 serious runs; R1 raw logs are missing and old histories have no timing fields |
 | RL GPU-memory telemetry | implemented for future runs | R1/R2/R3 history writers now record peak CUDA memory; verified by `telemetry_smoke_1update`, but old serious runs do not contain retrospective memory traces |
@@ -167,4 +168,9 @@ Additional diagnostic conclusion:
    a goal-gated low-level architecture before any more expensive RL rerun. RR-54
    records this as `rl_rerun_goal_identifiable_next_plan.md`; the immediate next
    code step is a Phase G1 multi-step local goal-reaching trainer with cheap
-   goal-sensitivity promotion gates before any serious run.
+   goal-sensitivity promotion gates before any serious run. RR-55 implemented
+   the first goal-dominant residual smoke; the code path works, but the
+   first three settings failed the action-saturation gate. Lowering initial log
+   standard deviation reduced deterministic residual magnitude but not train
+   saturation, so the next smoke should handle near-bound base actions explicitly
+   instead of relying only on residual scale/logstd.

@@ -2430,3 +2430,93 @@ Key promotion gates before a serious 1.024M-transition run:
 
 This explicitly stops further small final-layer R3 variants unless they first
 change the goal-use diagnostics.
+
+## 2026-06-24 - RR-55: Phase G1 goal-dominant residual smoke
+
+Implemented a recipe-backed residual condition mode for R1/R2:
+
+```text
+--residual-condition-mode {full,goal_delta}
+```
+
+The default `full` preserves existing checkpoints. The new `goal_delta` mode
+feeds the trainable residual only:
+
+```text
+[current_z, goal_z, goal_z - current_z, previous_action, remaining]
+```
+
+The frozen base action still uses the full observation-conditioned low-level
+policy, so this is a stable goal-dominant residual smoke rather than a full
+architecture replacement.
+
+Smoke command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r1 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 \
+  --run-name goal_delta_residual_alpha025_nopenalty_smoke_10k \
+  --steps 10240 --alpha 0.25 --residual-penalty-weight 0.0 \
+  --learning-rate 1e-4 --residual-condition-mode goal_delta \
+  --checkpoint-every-updates 1 --force
+```
+
+Local eval command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r1 \
+  --checkpoint artifacts/rl_rerun/local_r1/n500/seed0/goal_delta_residual_alpha025_nopenalty_smoke_10k/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --episodes 1 \
+  --output results/rl_rerun/local_r1/n500/seed0/goal_delta_residual_alpha025_nopenalty_smoke_10k/eval_local_1batch.json
+```
+
+Follow-up lower-alpha smoke:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r1 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 \
+  --run-name goal_delta_residual_alpha01_penalty001_smoke_10k \
+  --steps 10240 --alpha 0.1 --residual-penalty-weight 0.01 \
+  --learning-rate 1e-4 --residual-condition-mode goal_delta \
+  --checkpoint-every-updates 1 --force
+```
+
+Lower-exploration follow-up:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r1 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 \
+  --run-name goal_delta_residual_alpha01_penalty001_logstd4_smoke_10k \
+  --steps 10240 --alpha 0.1 --residual-penalty-weight 0.01 \
+  --learning-rate 1e-4 --initial-logstd -4.0 \
+  --residual-condition-mode goal_delta \
+  --checkpoint-every-updates 1 --force
+```
+
+Tracked compact summary:
+
+```text
+rl_rerun_phase_g1_goal_delta_residual_smokes.json
+```
+
+Smoke results:
+
+| setting | train terminal distance | train residual norm | train saturation | eval final distance | eval reduction fraction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `alpha=0.25`, no penalty | 1.0703 | 0.0398 | 0.1841 | 0.6196 | 0.8049 |
+| `alpha=0.10`, penalty `0.01` | 1.0551 | 0.0159 | 0.1763 | 0.6232 | 0.8040 |
+| `alpha=0.10`, penalty `0.01`, logstd `-4.0` | 1.0588 | 0.0029 | 0.1764 | 0.6249 | 0.8035 |
+
+Decision: do not promote any of these settings. All one-batch local final distances
+are within the safety bound, but all training updates have `~18%` action
+saturation, well above the Phase G1 gate of `5%`. Lowering initial log standard
+deviation reduces deterministic residual magnitude but does not reduce train
+saturation, likely because many frozen base actions are already near the action
+box boundary and stochastic residual exploration pushes them outside. The
+reduced goal-dominant residual input works technically, but this residual PPO
+family needs an action-space-aware exploration or clipping formulation before
+running full valid-goal diagnostics.

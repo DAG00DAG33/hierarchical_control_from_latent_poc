@@ -1438,6 +1438,39 @@ def _local_condition_dim(frozen: Any) -> int:
     return int(frozen.frame_dim + goal_features + 4)
 
 
+def _residual_condition_dim(frozen: Any, mode: str) -> int:
+    if mode == "full":
+        return _local_condition_dim(frozen)
+    if mode == "goal_delta":
+        return int(3 * frozen.goal_dim + 4)
+    raise ValueError(f"Unknown residual condition mode: {mode}")
+
+
+def _residual_condition_array(
+    *,
+    mode: str,
+    full_condition: np.ndarray,
+    current_z: np.ndarray,
+    goal_z: np.ndarray,
+    previous_action: np.ndarray,
+    remaining: np.ndarray,
+) -> np.ndarray:
+    if mode == "full":
+        return full_condition.astype(np.float32)
+    if mode == "goal_delta":
+        return np.concatenate(
+            [
+                current_z,
+                goal_z,
+                goal_z - current_z,
+                previous_action,
+                remaining,
+            ],
+            axis=-1,
+        ).astype(np.float32)
+    raise ValueError(f"Unknown residual condition mode: {mode}")
+
+
 def _load_low_flow_base(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -1862,11 +1895,13 @@ def train_rl_rerun_local_r1(
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
     checkpoint_every_updates: int = 5,
+    initial_logstd: float | None = None,
     force: bool = False,
     base_policy: str = "deterministic",
     flow_checkpoint_path: Path | None = None,
     family_dir: str = "local_r1",
     method_name: str = "r1_residual_deterministic_local_mode_a",
+    residual_condition_mode: str = "full",
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
@@ -1880,6 +1915,8 @@ def train_rl_rerun_local_r1(
         raise ValueError("total_steps must be positive")
     if base_policy not in {"deterministic", "flow"}:
         raise ValueError(f"Unknown residual base policy: {base_policy}")
+    if residual_condition_mode not in {"full", "goal_delta"}:
+        raise ValueError("residual_condition_mode must be 'full' or 'goal_delta'")
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
@@ -1952,12 +1989,16 @@ def train_rl_rerun_local_r1(
     h5 = h5py.File(path, "r")
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
-    condition_dim = _local_condition_dim(frozen)
+    condition_dim = _residual_condition_dim(frozen, residual_condition_mode)
     agent = ResidualActorCritic(
         condition_dim,
         width=int(config.get("low_level_rl.residual_width", 256)),
         depth=int(config.get("low_level_rl.residual_depth", 2)),
-        initial_logstd=float(config.get("low_level_rl.initial_logstd", -2.3)),
+        initial_logstd=float(
+            initial_logstd
+            if initial_logstd is not None
+            else config.get("low_level_rl.initial_logstd", -2.3)
+        ),
     ).to(device)
     resolved_learning_rate = float(
         learning_rate
@@ -2000,7 +2041,11 @@ def train_rl_rerun_local_r1(
         "max_grad_norm": max_grad_norm,
         "actor_critic_width": int(config.get("low_level_rl.residual_width", 256)),
         "actor_critic_depth": int(config.get("low_level_rl.residual_depth", 2)),
-        "initial_logstd": float(config.get("low_level_rl.initial_logstd", -2.3)),
+        "initial_logstd": float(
+            initial_logstd
+            if initial_logstd is not None
+            else config.get("low_level_rl.initial_logstd", -2.3)
+        ),
         "residual_penalty_weight": float(
             residual_penalty_weight
             if residual_penalty_weight is not None
@@ -2014,6 +2059,8 @@ def train_rl_rerun_local_r1(
             "task_progress",
         ],
     }
+    if residual_condition_mode != "full":
+        recipe["residual_condition_mode"] = residual_condition_mode
     global_step = 0
     history: list[dict[str, Any]] = []
     if latest.exists() and not force:
@@ -2075,7 +2122,7 @@ def train_rl_rerun_local_r1(
             max(horizon - local_step, 1) / horizon,
             dtype=np.float32,
         )
-        condition_np = _low_condition_array(
+        full_condition_np = _low_condition_array(
             frozen.frame_norm.transform(current_frames),
             current_z,
             goal_z,
@@ -2083,17 +2130,26 @@ def train_rl_rerun_local_r1(
             remaining,
             frozen.conditioning,
         )
-        condition = torch.from_numpy(condition_np).to(device).float()
+        full_condition = torch.from_numpy(full_condition_np).to(device).float()
         if base_policy == "deterministic":
-            normalized_base = frozen.low_model(condition)
+            normalized_base = frozen.low_model(full_condition)
             base_action = torch.from_numpy(
                 frozen.action_norm.inverse(normalized_base.cpu().numpy().astype(np.float32))
             ).to(device)
         else:
             if flow_model is None or flow_checkpoint is None:
                 raise RuntimeError("R2 flow base was not loaded")
-            base_action = _low_flow_base_action(flow_model, flow_checkpoint, condition, frozen)
-        return condition, base_action, distance
+            base_action = _low_flow_base_action(flow_model, flow_checkpoint, full_condition, frozen)
+        residual_condition_np = _residual_condition_array(
+            mode=residual_condition_mode,
+            full_condition=full_condition_np,
+            current_z=current_z,
+            goal_z=goal_z,
+            previous_action=previous_action,
+            remaining=remaining,
+        )
+        residual_condition = torch.from_numpy(residual_condition_np).to(device).float()
+        return residual_condition, base_action, distance
 
     @torch.inference_mode()
     def local_step_env(action: torch.Tensor, previous_distance: np.ndarray, residual: torch.Tensor) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
@@ -2315,8 +2371,10 @@ def train_rl_rerun_local_r2(
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
     checkpoint_every_updates: int = 5,
+    initial_logstd: float | None = None,
     flow_checkpoint_path: Path | None = None,
     force: bool = False,
+    residual_condition_mode: str = "full",
 ) -> Path:
     return train_rl_rerun_local_r1(
         config,
@@ -2331,11 +2389,13 @@ def train_rl_rerun_local_r2(
         learning_rate=learning_rate,
         num_minibatches=num_minibatches,
         checkpoint_every_updates=checkpoint_every_updates,
+        initial_logstd=initial_logstd,
         force=force,
         base_policy="flow",
         flow_checkpoint_path=flow_checkpoint_path,
         family_dir="local_r2",
         method_name="r2_residual_flow_local_mode_a",
+        residual_condition_mode=residual_condition_mode,
     )
 
 
@@ -2879,13 +2939,16 @@ def evaluate_rl_rerun_local_r1(
     else:
         agent = ResidualActorCritic(
             condition_dim,
-            width=int(config.get("low_level_rl.residual_width", 256)),
-            depth=int(config.get("low_level_rl.residual_depth", 2)),
-            initial_logstd=float(config.get("low_level_rl.initial_logstd", -2.3)),
+            width=int(recipe["actor_critic_width"]),
+            depth=int(recipe["actor_critic_depth"]),
+            initial_logstd=float(recipe["initial_logstd"]),
         ).to(device)
     agent.load_state_dict(checkpoint["agent"])
     agent.eval()
     alpha = float(recipe.get("alpha", 0.0))
+    residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
+    if residual_condition_mode not in {"full", "goal_delta"}:
+        raise ValueError(f"Unknown residual_condition_mode: {residual_condition_mode}")
 
     with h5py.File(path, "r") as h5:
         meta = h5["meta"].attrs
@@ -2950,7 +3013,7 @@ def evaluate_rl_rerun_local_r1(
                         (horizon - local_step) / horizon,
                         dtype=np.float32,
                     )
-                    condition = _low_condition_array(
+                    full_condition_np = _low_condition_array(
                         frozen.frame_norm.transform(frames),
                         current_z,
                         goal_z,
@@ -2958,7 +3021,7 @@ def evaluate_rl_rerun_local_r1(
                         remaining,
                         frozen.conditioning,
                     )
-                    condition_t = torch.from_numpy(condition).to(device).float()
+                    condition_t = torch.from_numpy(full_condition_np).to(device).float()
                     if base_policy == "deterministic":
                         normalized_base = frozen.low_model(condition_t)
                         base_action = torch.from_numpy(
@@ -2987,8 +3050,19 @@ def evaluate_rl_rerun_local_r1(
                             .numpy()
                         )
                     else:
+                        residual_condition_np = _residual_condition_array(
+                            mode=residual_condition_mode,
+                            full_condition=full_condition_np,
+                            current_z=current_z,
+                            goal_z=goal_z,
+                            previous_action=previous,
+                            remaining=remaining,
+                        )
+                        residual_condition_t = torch.from_numpy(
+                            residual_condition_np
+                        ).to(device).float()
                         raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
-                            condition_t,
+                            residual_condition_t,
                             deterministic=True,
                         )
                         residual = alpha * torch.tanh(raw_action)
@@ -3175,6 +3249,9 @@ def evaluate_rl_rerun_closed_loop_r1(
     dino = _phase4_dino_from_config(config, device)
     teacher = load_ppo_agent(_rl_paths(config).best, device) if goal_source == "oracle" else None
     alpha = float(recipe.get("alpha", 0.0))
+    residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
+    if residual_condition_mode not in {"full", "goal_delta"}:
+        raise ValueError(f"Unknown residual_condition_mode: {residual_condition_mode}")
     max_steps = int(config.get("env_max_episode_steps", 100))
     disturbance_rng = np.random.default_rng(eval_seed_start + 10_000)
     all_schedules = (
@@ -3365,7 +3442,9 @@ def evaluate_rl_rerun_closed_loop_r1(
                         countdown[replan] = frozen.update_period
                         high_decisions += int(np.sum(replan))
 
-                    if frozen.conditioning in {"delta", "relation"}:
+                    if frozen.conditioning in {"delta", "relation"} or (
+                        use_residual and not is_direct and residual_condition_mode != "full"
+                    ):
                         current_z = _encode_rerun_frames(frozen, frames, device)
                     else:
                         current_z = np.empty_like(held_goal)
@@ -3408,8 +3487,19 @@ def evaluate_rl_rerun_closed_loop_r1(
                             .tolist()
                         )
                     elif use_residual:
+                        residual_condition_np = _residual_condition_array(
+                            mode=residual_condition_mode,
+                            full_condition=condition_np,
+                            current_z=current_z,
+                            goal_z=held_goal,
+                            previous_action=previous_action,
+                            remaining=(remaining / frozen.horizon_steps)[:, None],
+                        )
+                        residual_condition = torch.from_numpy(
+                            residual_condition_np
+                        ).to(device).float()
                         raw_residual, _logprob, _entropy, _value = agent.get_action_and_value(
-                            condition,
+                            residual_condition,
                             deterministic=True,
                         )
                         residual = alpha * torch.tanh(raw_residual)

@@ -319,6 +319,8 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 learning_rate=args.learning_rate,
                 num_minibatches=args.num_minibatches,
                 checkpoint_every_updates=args.checkpoint_every_updates,
+                initial_logstd=args.initial_logstd,
+                residual_condition_mode=args.residual_condition_mode,
                 force=args.force,
             )
         )
@@ -375,9 +377,11 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 learning_rate=args.learning_rate,
                 num_minibatches=args.num_minibatches,
                 checkpoint_every_updates=args.checkpoint_every_updates,
+                initial_logstd=args.initial_logstd,
                 flow_checkpoint_path=Path(args.flow_checkpoint)
                 if args.flow_checkpoint
                 else None,
+                residual_condition_mode=args.residual_condition_mode,
                 force=args.force,
             )
         )
@@ -1560,6 +1564,12 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r1.add_argument("--learning-rate", type=float)
     train_local_r1.add_argument("--num-minibatches", type=int)
     train_local_r1.add_argument("--checkpoint-every-updates", type=int, default=5)
+    train_local_r1.add_argument("--initial-logstd", type=float)
+    train_local_r1.add_argument(
+        "--residual-condition-mode",
+        choices=["full", "goal_delta"],
+        default="full",
+    )
     train_local_r1.add_argument("--force", action="store_true")
     train_local_r1.set_defaults(func=rl_rerun_cmd)
     eval_local_r1 = rl_rerun_sub.add_parser("eval-local-r1")
@@ -1604,7 +1614,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r2.add_argument("--learning-rate", type=float)
     train_local_r2.add_argument("--num-minibatches", type=int)
     train_local_r2.add_argument("--checkpoint-every-updates", type=int, default=5)
+    train_local_r2.add_argument("--initial-logstd", type=float)
     train_local_r2.add_argument("--flow-checkpoint")
+    train_local_r2.add_argument(
+        "--residual-condition-mode",
+        choices=["full", "goal_delta"],
+        default="full",
+    )
     train_local_r2.add_argument("--force", action="store_true")
     train_local_r2.set_defaults(func=rl_rerun_cmd)
     eval_local_r2 = rl_rerun_sub.add_parser("eval-local-r2")
