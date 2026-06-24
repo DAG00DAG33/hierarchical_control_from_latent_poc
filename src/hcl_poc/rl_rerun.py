@@ -1128,9 +1128,11 @@ def collect_rl_rerun_vector_dataset(
     seed_start: int = 9_500_000,
     checkpoint_path: Path | None = None,
     store_dino: bool = True,
+    disturbed: bool = False,
     force: bool = False,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.incremental import _pre_rl_phase_d_schedule, PRE_RL_PHASE_D_PERTURBATIONS
 
     if num_envs <= 0 or batches <= 0 or max_steps <= 10:
         raise ValueError("num_envs and batches must be positive; max_steps must exceed 10")
@@ -1151,6 +1153,9 @@ def collect_rl_rerun_vector_dataset(
     env = _make_benchmark_env(config, num_envs, "rgb+state")
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    action_low_np = np.asarray(env.single_action_space.low, dtype=np.float32)
+    action_high_np = np.asarray(env.single_action_space.high, dtype=np.float32)
+    action_range_np = action_high_np - action_low_np
 
     try:
         with h5py.File(tmp_path, "w") as h5:
@@ -1167,10 +1172,20 @@ def collect_rl_rerun_vector_dataset(
             meta.attrs["store_dino"] = bool(store_dino)
             meta.attrs["dino_model"] = config.get("dino.model_name")
             meta.attrs["dino_feature_type"] = config.get("dino.feature_type", "cls")
+            meta.attrs["disturbed"] = bool(disturbed)
+            meta.attrs["disturbance_family"] = (
+                str(PRE_RL_PHASE_D_PERTURBATIONS) if disturbed else ""
+            )
             meta.attrs.update(_git_metadata())
             for batch_index in trange(batches, desc="collect vector PPO batches"):
                 batch_seed = int(seed_start + batch_index)
                 obs, _info = env.reset(seed=batch_seed)
+                disturbance_rng = np.random.default_rng(batch_seed + 10_000)
+                schedules = (
+                    _pre_rl_phase_d_schedule(disturbance_rng, num_envs, max_steps, 1, 1)
+                    if disturbed
+                    else [[] for _ in range(num_envs)]
+                )
 
                 states: list[np.ndarray] = []
                 obs_states: list[np.ndarray] = []
@@ -1185,6 +1200,8 @@ def collect_rl_rerun_vector_dataset(
                 success_flags: list[np.ndarray] = []
                 success_once = np.zeros(num_envs, dtype=np.bool_)
                 previous = np.zeros((num_envs, 3), dtype=np.float32)
+                bias_noise = np.zeros((num_envs, 3), dtype=np.float32)
+                policy_action_history: list[np.ndarray] = []
 
                 def store_observation(current_obs: dict[str, Any]) -> None:
                     rgb, state = _vector_rgb_and_state(current_obs)
@@ -1198,7 +1215,7 @@ def collect_rl_rerun_vector_dataset(
                         dinos.append(np.concatenate(features, axis=0).astype(np.float32))
 
                 store_observation(obs)
-                for _step in range(max_steps):
+                for step_index in range(max_steps):
                     state_t = torch.from_numpy(obs_states[-1]).to(device).float()
                     action_t, _logprob, _entropy, _value = teacher.get_action_and_value(
                         state_t,
@@ -1207,6 +1224,35 @@ def collect_rl_rerun_vector_dataset(
                     raw_action = action_t.detach().cpu().numpy().astype(np.float32)
                     executed = torch.clamp(action_t, action_low, action_high)
                     executed_np = executed.detach().cpu().numpy().astype(np.float32)
+                    policy_action_history.append(executed_np.copy())
+                    if disturbed:
+                        for env_index, events in enumerate(schedules):
+                            event = events[0]
+                            if not event["start"] <= step_index < event["end"]:
+                                continue
+                            kind = int(event["kind"])
+                            if kind == 1:
+                                bias_noise[env_index] = (
+                                    0.7 * bias_noise[env_index]
+                                    + 0.3
+                                    * disturbance_rng.normal(0.0, 0.01, size=3).astype(np.float32)
+                                    * action_range_np
+                                )
+                                executed_np[env_index] += (
+                                    event["bias_fraction"]
+                                    * action_range_np
+                                    * event["bias_direction"]
+                                    + bias_noise[env_index]
+                                )
+                            elif kind == 2:
+                                executed_np[env_index] = previous[env_index]
+                            elif kind == 3:
+                                source_step = max(0, step_index - int(event["delay"]))
+                                executed_np[env_index] = policy_action_history[source_step][env_index]
+                            else:
+                                executed_np[env_index] *= float(event["scale"])
+                        executed_np = np.clip(executed_np, action_low_np, action_high_np)
+                        executed = torch.from_numpy(executed_np).to(device).float()
                     next_obs, reward, terminated, truncated, info = env.step(executed)
                     success = _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_))).reshape(-1).astype(np.bool_)
                     success_once |= success
@@ -1229,6 +1275,32 @@ def collect_rl_rerun_vector_dataset(
                 group.attrs["num_envs"] = int(num_envs)
                 group.attrs["max_steps"] = int(max_steps)
                 group.attrs["success_count"] = int(success_once.sum())
+                group.attrs["disturbed"] = bool(disturbed)
+                if disturbed:
+                    group.create_dataset(
+                        "disturbance_kind",
+                        data=np.asarray(
+                            [int(events[0]["kind"]) for events in schedules],
+                            dtype=np.int16,
+                        ),
+                        compression="gzip",
+                    )
+                    group.create_dataset(
+                        "disturbance_start",
+                        data=np.asarray(
+                            [int(events[0]["start"]) for events in schedules],
+                            dtype=np.int16,
+                        ),
+                        compression="gzip",
+                    )
+                    group.create_dataset(
+                        "disturbance_end",
+                        data=np.asarray(
+                            [int(events[0]["end"]) for events in schedules],
+                            dtype=np.int16,
+                        ),
+                        compression="gzip",
+                    )
                 group.create_dataset("simulator_states", data=np.stack(states), compression="gzip")
                 group.create_dataset("observations_state", data=np.stack(obs_states), compression="gzip")
                 group.create_dataset("proprio", data=np.stack(proprios), compression="gzip")

@@ -26,22 +26,41 @@ def _default_dataset(config: Config) -> Path:
     )
 
 
-def _artifact_dir(config: Config, n_trajectories: int, seed: int) -> Path:
-    return ensure_dir(
-        config.path_value("paths.incremental_artifact_dir")
-        / "privileged_z"
-        / f"n{n_trajectories}"
-        / f"seed{seed}"
-    )
+def _artifact_dir(
+    config: Config,
+    n_trajectories: int,
+    seed: int,
+    run_tag: str | None = None,
+) -> Path:
+    root = config.path_value("paths.incremental_artifact_dir") / "privileged_z"
+    if run_tag:
+        root = root / run_tag
+    return ensure_dir(root / f"n{n_trajectories}" / f"seed{seed}")
 
 
-def _result_dir(config: Config, n_trajectories: int, seed: int) -> Path:
-    return ensure_dir(
-        config.path_value("paths.incremental_results_dir")
-        / "privileged_z"
-        / f"n{n_trajectories}"
-        / f"seed{seed}"
-    )
+def _result_dir(
+    config: Config,
+    n_trajectories: int,
+    seed: int,
+    run_tag: str | None = None,
+) -> Path:
+    root = config.path_value("paths.incremental_results_dir") / "privileged_z"
+    if run_tag:
+        root = root / run_tag
+    return ensure_dir(root / f"n{n_trajectories}" / f"seed{seed}")
+
+
+def _trajectory_group_keys(h5: h5py.File) -> list[str]:
+    keys: list[str] = []
+    for key in sorted(h5.keys()):
+        if key == "meta":
+            continue
+        group = h5[key]
+        if not isinstance(group, h5py.Group):
+            continue
+        if "success_once" in group and "observations_state" in group:
+            keys.append(key)
+    return keys
 
 
 def _select_successful_streams(
@@ -49,17 +68,71 @@ def _select_successful_streams(
     n_trajectories: int,
     validation_trajectories: int,
     seed: int,
+    selection_mode: str = "any_success",
+    train_per_expert: int | None = None,
+    validation_per_expert: int | None = None,
+    expert_attr: str = "expert_index",
 ) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    if selection_mode not in {"any_success", "balanced_experts"}:
+        raise ValueError(f"Unknown privileged-z selection mode: {selection_mode}")
     streams: list[tuple[str, int]] = []
-    for key in sorted(name for name in h5 if name.startswith("batch_")):
+    by_expert: dict[int, list[tuple[str, int]]] = {}
+    for key in _trajectory_group_keys(h5):
+        group = h5[key]
         success_once = np.asarray(h5[key]["success_once"], dtype=np.bool_)
-        streams.extend((key, int(index)) for index in np.flatnonzero(success_once))
+        for env_index in np.flatnonzero(success_once):
+            stream = (key, int(env_index))
+            streams.append(stream)
+            if selection_mode == "balanced_experts":
+                if expert_attr not in group.attrs:
+                    raise ValueError(
+                        f"Group {key} is missing required expert attr {expert_attr!r}"
+                    )
+                expert_index = int(group.attrs[expert_attr])
+                by_expert.setdefault(expert_index, []).append(stream)
     required = n_trajectories + validation_trajectories
+    rng = np.random.default_rng(seed + 5_000_000)
+    if selection_mode == "balanced_experts":
+        if not by_expert:
+            raise ValueError("No expert-indexed successful streams were found")
+        expert_ids = sorted(by_expert)
+        if train_per_expert is None:
+            if n_trajectories % len(expert_ids) != 0:
+                raise ValueError(
+                    "n_trajectories is not divisible by the number of experts; "
+                    "pass --train-per-expert explicitly"
+                )
+            train_per_expert = n_trajectories // len(expert_ids)
+        if validation_per_expert is None:
+            if validation_trajectories % len(expert_ids) != 0:
+                raise ValueError(
+                    "validation_trajectories is not divisible by the number of experts; "
+                    "pass --validation-per-expert explicitly"
+                )
+            validation_per_expert = validation_trajectories // len(expert_ids)
+        train: list[tuple[str, int]] = []
+        validation: list[tuple[str, int]] = []
+        for expert_id in expert_ids:
+            expert_streams = by_expert[expert_id]
+            required_expert = train_per_expert + validation_per_expert
+            if len(expert_streams) < required_expert:
+                raise ValueError(
+                    f"Expert {expert_id} needs {required_expert} successful streams, "
+                    f"found {len(expert_streams)}"
+                )
+            chosen = [
+                expert_streams[index]
+                for index in rng.permutation(len(expert_streams))[:required_expert]
+            ]
+            train.extend(chosen[:train_per_expert])
+            validation.extend(chosen[train_per_expert:])
+        rng.shuffle(train)
+        rng.shuffle(validation)
+        return train, validation
     if len(streams) < required:
         raise ValueError(
             f"Need {required} successful vector streams, found {len(streams)}"
         )
-    rng = np.random.default_rng(seed + 5_000_000)
     chosen = [streams[index] for index in rng.permutation(len(streams))[:required]]
     return chosen[:n_trajectories], chosen[n_trajectories:]
 
@@ -71,6 +144,7 @@ def _read_streams(
     episodes: list[dict[str, np.ndarray]] = []
     for key, env_index in streams:
         group = h5[key]
+        expert_index = group.attrs.get("expert_index")
         episodes.append(
             {
                 "states": np.asarray(group["observations_state"][:, env_index], dtype=np.float32),
@@ -81,6 +155,7 @@ def _read_streams(
                 ),
                 "batch": key,
                 "env_index": np.asarray(env_index, dtype=np.int64),
+                "expert_index": np.asarray(-1 if expert_index is None else int(expert_index), dtype=np.int64),
             }
         )
     return episodes
@@ -91,6 +166,9 @@ def _load_episodes(
     n_trajectories: int,
     validation_trajectories: int,
     seed: int,
+    selection_mode: str = "any_success",
+    train_per_expert: int | None = None,
+    validation_per_expert: int | None = None,
 ) -> tuple[list[dict[str, np.ndarray]], list[dict[str, np.ndarray]], dict[str, Any]]:
     if not dataset_path.exists():
         raise FileNotFoundError(dataset_path)
@@ -101,9 +179,22 @@ def _load_episodes(
             n_trajectories,
             validation_trajectories,
             seed,
+            selection_mode,
+            train_per_expert,
+            validation_per_expert,
         )
         train = _read_streams(h5, train_streams)
         validation = _read_streams(h5, val_streams)
+    train_experts = [
+        int(episode["expert_index"])
+        for episode in train
+        if int(episode["expert_index"]) >= 0
+    ]
+    validation_experts = [
+        int(episode["expert_index"])
+        for episode in validation
+        if int(episode["expert_index"]) >= 0
+    ]
     return (
         train,
         validation,
@@ -111,6 +202,17 @@ def _load_episodes(
             "dataset_path": str(dataset_path),
             "n_trajectories": n_trajectories,
             "validation_trajectories": validation_trajectories,
+            "selection_mode": selection_mode,
+            "train_per_expert": train_per_expert,
+            "validation_per_expert": validation_per_expert,
+            "train_expert_counts": {
+                str(expert): train_experts.count(expert)
+                for expert in sorted(set(train_experts))
+            },
+            "validation_expert_counts": {
+                str(expert): validation_experts.count(expert)
+                for expert in sorted(set(validation_experts))
+            },
             "h5_meta": {key: str(value) for key, value in meta.items()},
         },
     )
@@ -265,6 +367,147 @@ def _predict(
     return np.concatenate(outputs, axis=0)
 
 
+def _model_from_payload(payload: dict[str, Any], device: torch.device) -> MLP:
+    model = MLP(
+        int(payload["input_dim"]),
+        int(payload["output_dim"]),
+        int(payload["hidden_dim"]),
+        depth=int(payload["depth"]),
+    ).to(device)
+    model.load_state_dict(payload["model"])
+    model.eval()
+    return model
+
+
+@torch.inference_mode()
+def evaluate_privileged_z_hierarchy(
+    config: Config,
+    checkpoint_path: Path,
+    *,
+    mode: str = "hierarchy",
+    episodes: int = 100,
+    seed_start: int = 9_900_000,
+    num_envs: int = 64,
+    output_path: Path | None = None,
+    force: bool = False,
+) -> Path:
+    from hcl_poc.rl_rerun import _make_benchmark_env, _to_numpy
+
+    if mode not in {"flat", "hierarchy"}:
+        raise ValueError(f"Unknown privileged-z eval mode: {mode}")
+    out_path = output_path or checkpoint_path.with_name(
+        f"{checkpoint_path.stem}_eval_{mode}_n{episodes}.json"
+    )
+    if out_path.exists() and not force:
+        return out_path
+    device = default_device()
+    payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_norm = Standardizer.from_state_dict(payload["state_norm"])
+    action_norm = Standardizer.from_state_dict(payload["action_norm"])
+    flat_model = _model_from_payload(payload["flat"], device)
+    high_model = _model_from_payload(payload["high"], device)
+    goal_model = _model_from_payload(payload["goal"], device)
+    horizon_steps = int(payload["horizon_steps"])
+
+    env = _make_benchmark_env(config, num_envs, "rgb+state")
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
+    zero_previous = action_norm.transform(np.zeros((1, int(payload["action_dim"])), dtype=np.float32))[0]
+    previous = np.repeat(zero_previous[None], num_envs, axis=0)
+    held_goal = np.zeros((num_envs, int(payload["state_dim"])), dtype=np.float32)
+    countdown = np.zeros(num_envs, dtype=np.int32)
+    successes: list[float] = []
+    returns: list[float] = []
+    cumulative_returns = np.zeros(num_envs, dtype=np.float32)
+    max_rewards = np.full(num_envs, -np.inf, dtype=np.float32)
+    decisions = 0
+    obs, _info = env.reset(seed=seed_start)
+    try:
+        while len(successes) < episodes:
+            state_np = _to_numpy(obs["state"]).astype(np.float32)
+            normalized_state = state_norm.transform(state_np)
+            if mode == "hierarchy":
+                replan = countdown <= 0
+                if np.any(replan):
+                    high_input = np.concatenate([normalized_state, previous], axis=-1)
+                    high_goal = high_model(torch.from_numpy(high_input).to(device).float())
+                    held_goal[replan] = high_goal.cpu().numpy()[replan]
+                    countdown[replan] = horizon_steps
+                    decisions += int(np.sum(replan))
+                remaining = np.maximum(countdown, 1).astype(np.float32)[:, None]
+                low_input = np.concatenate(
+                    [
+                        normalized_state,
+                        held_goal,
+                        previous,
+                        remaining / float(horizon_steps),
+                    ],
+                    axis=-1,
+                )
+                normalized_action = goal_model(
+                    torch.from_numpy(low_input).to(device).float()
+                ).cpu().numpy()
+                countdown -= 1
+            else:
+                flat_input = np.concatenate(
+                    [
+                        normalized_state,
+                        previous,
+                        np.ones((num_envs, 1), dtype=np.float32),
+                    ],
+                    axis=-1,
+                )
+                normalized_action = flat_model(
+                    torch.from_numpy(flat_input).to(device).float()
+                ).cpu().numpy()
+            action_np = action_norm.inverse(normalized_action)
+            action = torch.as_tensor(action_np, device=device, dtype=torch.float32)
+            action = torch.clamp(action, action_low, action_high)
+            obs, reward, _terminated, _truncated, info = env.step(action)
+            previous = action_norm.transform(action.cpu().numpy().astype(np.float32))
+            reward_np = _to_numpy(reward).reshape(-1).astype(np.float32)
+            cumulative_returns += reward_np
+            max_rewards = np.maximum(max_rewards, reward_np)
+            if "final_info" in info:
+                mask = info["_final_info"]
+                if bool(mask.any()):
+                    final_info = info["final_info"]
+                    mask_np = mask.detach().cpu().numpy().astype(np.bool_)
+                    if "episode" in final_info:
+                        ep = final_info["episode"]
+                        success_values = (
+                            ep["success_once"][mask].detach().float().cpu().numpy()
+                        )
+                        return_values = ep["return"][mask].detach().float().cpu().numpy()
+                    else:
+                        success_values = (
+                            final_info["success"][mask].detach().float().cpu().numpy()
+                        )
+                        return_values = cumulative_returns[mask_np].copy()
+                    successes.extend(float(x) for x in success_values)
+                    returns.extend(float(x) for x in return_values)
+                    previous[mask_np] = zero_previous
+                    held_goal[mask_np] = 0.0
+                    countdown[mask_np] = 0
+                    cumulative_returns[mask_np] = 0.0
+                    max_rewards[mask_np] = -np.inf
+    finally:
+        env.close()
+    result = {
+        "checkpoint": str(checkpoint_path),
+        "mode": mode,
+        "episodes": int(episodes),
+        "seed_start": int(seed_start),
+        "num_envs": int(num_envs),
+        "success": float(np.mean(successes[:episodes])),
+        "return": float(np.mean(returns[:episodes])),
+        "high_level_decisions_per_episode": decisions / max(len(successes), 1),
+    }
+    write_json(out_path, result)
+    console.print(result)
+    return out_path
+
+
 def _goal_sensitivity(
     goal_payload: dict[str, Any],
     validation: list[dict[str, np.ndarray]],
@@ -342,10 +585,14 @@ def train_privileged_z_hierarchy(
     batch_size: int = 4096,
     hidden_dim: int = 512,
     lr: float = 3e-4,
+    selection_mode: str = "any_success",
+    train_per_expert: int | None = None,
+    validation_per_expert: int | None = None,
+    run_tag: str | None = None,
     force: bool = False,
 ) -> Path:
     path = dataset_path or _default_dataset(config)
-    artifact = _artifact_dir(config, n_trajectories, seed)
+    artifact = _artifact_dir(config, n_trajectories, seed, run_tag)
     checkpoint_path = artifact / f"privileged_z_k{horizon_steps}.pt"
     metrics_path = artifact / f"privileged_z_k{horizon_steps}_metrics.json"
     if checkpoint_path.exists() and not force:
@@ -357,6 +604,9 @@ def train_privileged_z_hierarchy(
         n_trajectories,
         validation_trajectories,
         seed,
+        selection_mode,
+        train_per_expert,
+        validation_per_expert,
     )
     all_train_states = np.concatenate([episode["states"] for episode in train], axis=0)
     all_train_actions = np.concatenate([episode["actions"] for episode in train], axis=0)
@@ -436,8 +686,10 @@ def train_privileged_z_hierarchy(
         "validation_trajectories": validation_trajectories,
         "horizon_steps": horizon_steps,
         "seed": seed,
-        "state_dim": 31,
-        "action_dim": 3,
+        "run_tag": run_tag,
+        "selection_mode": selection_mode,
+        "state_dim": int(all_train_states.shape[-1]),
+        "action_dim": int(all_train_actions.shape[-1]),
         "state_norm": state_norm.state_dict(),
         "action_norm": action_norm.state_dict(),
         "high": high_payload,
@@ -463,6 +715,8 @@ def train_privileged_z_hierarchy(
             "validation_trajectories": validation_trajectories,
             "horizon_steps": horizon_steps,
             "seed": seed,
+            "run_tag": run_tag,
+            "selection_mode": selection_mode,
             "metrics": payload["metrics"],
             "data": data,
             "elapsed_s": payload["elapsed_s"],
@@ -470,4 +724,3 @@ def train_privileged_z_hierarchy(
     )
     console.print(f"Wrote privileged-z hierarchy: {checkpoint_path}")
     return checkpoint_path
-

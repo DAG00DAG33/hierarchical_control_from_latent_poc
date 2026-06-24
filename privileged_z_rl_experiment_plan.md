@@ -9,8 +9,8 @@ the supplied future latent goal. This may be a representation issue, but it may
 also be a conceptual issue with the high/low-level interface and the current
 mostly predictable teacher trajectories.
 
-This plan adds two simpler tests before spending more compute on learned latent
-interfaces.
+This plan adds three simpler tests before spending more compute on learned
+latent interfaces.
 
 ## Experiment A: Full Privileged-State Interface
 
@@ -119,6 +119,64 @@ mixed-data goal sensitivity should improve by at least 2x over clean-only before
 running a serious RL point.
 ```
 
+## Experiment C: Five-Expert 500-Trajectory Data
+
+Goal: introduce multimodality through multiple competent teachers instead of
+external disturbances.
+
+Collect a balanced 500-trajectory corpus from five independently trained expert
+policies:
+
+| Split | Count |
+| --- | ---: |
+| Expert 0 successful trajectories | 100 |
+| Expert 1 successful trajectories | 100 |
+| Expert 2 successful trajectories | 100 |
+| Expert 3 successful trajectories | 100 |
+| Expert 4 successful trajectories | 100 |
+
+Each expert should use the same Push-T privileged-state action space and the
+same environment/control settings as the existing official PPO teacher. The
+experts may differ by PPO seed, data collection seed, and final checkpoint, but
+they must be competent closed-loop policies. Do not count failed PPO checkpoints
+as experts just because they have the right architecture.
+
+Requirements:
+
+- Store the same fields as the vector-consistent corpus:
+  `observations_state`, `simulator_states`, `executed_actions`,
+  `previous_executed_actions`, rewards, success flags, and reset seeds.
+- Store `expert_index` and checkpoint path metadata on every trajectory group.
+- Train with balanced expert selection: 100 successful training streams per
+  expert and a balanced held-out validation split.
+- Use a separate run tag such as `five_expert` so artifacts cannot overwrite the
+  clean-only privileged-z run.
+
+Evaluate:
+
+1. offline high-level future-state prediction error;
+2. flat versus goal-conditioned low-level action MAE;
+3. same-current-state valid-goal action sensitivity;
+4. local RL fine-tuning with the same simplest R1-style recipe if sensitivity
+   improves;
+5. closed-loop deployment success for the supervised and RL-tuned hierarchy.
+
+Gate:
+
+```text
+five-expert goal sensitivity should improve over clean-only, or at minimum
+retain the clean-only sensitivity while improving closed-loop robustness.
+```
+
+Interpretation:
+
+- If five-expert data improves goal sensitivity, the original expert corpus was
+  too single-valued: current state alone made the future goal mostly redundant.
+- If disturbance-rich data helps but five-expert data does not, recovery states
+  are more valuable than style diversity.
+- If neither helps with privileged `z`, the interface objective/RL formulation
+  is the likely bottleneck.
+
 ## Immediate Execution Order
 
 1. Implement a compact privileged-z trainer/evaluator that consumes the
@@ -129,4 +187,9 @@ running a serious RL point.
 4. Only then decide whether to run the simplest RL fine-tuning on privileged-z.
 5. Implement disturbed-data collection after Experiment A tells us whether the
    privileged interface is conceptually viable.
-
+6. Verify how many competent PPO experts are available. If fewer than five are
+   available, train or import additional experts before running Experiment C.
+7. Collect the balanced five-expert dataset and train with
+   `--selection-mode balanced_experts --train-per-expert 100`.
+8. Compare clean-only, disturbance-rich, and five-expert runs in one table
+   before moving to larger RL sweeps.

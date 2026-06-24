@@ -106,7 +106,7 @@ from hcl_poc.low_level_rl import (
     train_direct_low_rl,
     train_residual_rl,
 )
-from hcl_poc.privileged_z import train_privileged_z_hierarchy
+from hcl_poc.privileged_z import evaluate_privileged_z_hierarchy, train_privileged_z_hierarchy
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.rl_rerun import (
@@ -257,6 +257,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 seed_start=args.seed_start,
                 checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
                 store_dino=not args.no_store_dino,
+                disturbed=args.disturbed,
                 force=args.force,
             )
         )
@@ -509,6 +510,23 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 batch_size=args.batch_size,
                 hidden_dim=args.hidden_dim,
                 lr=args.lr,
+                selection_mode=args.selection_mode,
+                train_per_expert=args.train_per_expert,
+                validation_per_expert=args.validation_per_expert,
+                run_tag=args.run_tag,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-privileged-z":
+        console.print(
+            evaluate_privileged_z_hierarchy(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                mode=args.mode,
+                episodes=args.episodes,
+                seed_start=args.seed_start,
+                num_envs=args.num_envs,
+                output_path=Path(args.output) if args.output else None,
                 force=args.force,
             )
         )
@@ -688,6 +706,13 @@ def diagnose_cmd(args: argparse.Namespace) -> None:
 
 def rl_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
+    if getattr(args, "seed", None) is not None or getattr(args, "rl_dir", None):
+        raw = copy.deepcopy(config.raw)
+        if getattr(args, "seed", None) is not None:
+            raw["seed"] = int(args.seed)
+        if getattr(args, "rl_dir", None):
+            raw.setdefault("paths", {})["rl_dir"] = args.rl_dir
+        config = type(config)(raw=raw, path=config.path)
     if args.rl_command == "train":
         train_ppo(config, resume=not args.no_resume)
     elif args.rl_command == "status":
@@ -1539,6 +1564,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_vector.add_argument("--seed-start", type=int, default=9_500_000)
     collect_vector.add_argument("--checkpoint")
     collect_vector.add_argument("--no-store-dino", action="store_true")
+    collect_vector.add_argument("--disturbed", action="store_true")
     collect_vector.add_argument("--force", action="store_true")
     collect_vector.set_defaults(func=rl_rerun_cmd)
     audit_state = rl_rerun_sub.add_parser("audit-state-data")
@@ -1747,8 +1773,25 @@ def build_parser() -> argparse.ArgumentParser:
     train_priv_z.add_argument("--batch-size", type=int, default=4096)
     train_priv_z.add_argument("--hidden-dim", type=int, default=512)
     train_priv_z.add_argument("--lr", type=float, default=3e-4)
+    train_priv_z.add_argument(
+        "--selection-mode",
+        choices=["any_success", "balanced_experts"],
+        default="any_success",
+    )
+    train_priv_z.add_argument("--train-per-expert", type=int)
+    train_priv_z.add_argument("--validation-per-expert", type=int)
+    train_priv_z.add_argument("--run-tag")
     train_priv_z.add_argument("--force", action="store_true")
     train_priv_z.set_defaults(func=rl_rerun_cmd)
+    eval_priv_z = rl_rerun_sub.add_parser("eval-privileged-z")
+    eval_priv_z.add_argument("--checkpoint", required=True)
+    eval_priv_z.add_argument("--mode", choices=["flat", "hierarchy"], default="hierarchy")
+    eval_priv_z.add_argument("--episodes", type=int, default=100)
+    eval_priv_z.add_argument("--seed-start", type=int, default=9_900_000)
+    eval_priv_z.add_argument("--num-envs", type=int, default=64)
+    eval_priv_z.add_argument("--output")
+    eval_priv_z.add_argument("--force", action="store_true")
+    eval_priv_z.set_defaults(func=rl_rerun_cmd)
     throughput = rl_rerun_sub.add_parser("throughput-benchmark")
     throughput.add_argument(
         "--num-envs",
@@ -1784,13 +1827,19 @@ def build_parser() -> argparse.ArgumentParser:
     rl_sub = p.add_subparsers(dest="rl_command", required=True)
     rt = rl_sub.add_parser("train")
     add_config_arg(rt)
+    rt.add_argument("--seed", type=int)
+    rt.add_argument("--rl-dir")
     rt.add_argument("--no-resume", action="store_true")
     rt.set_defaults(func=rl_cmd)
     rs = rl_sub.add_parser("status")
     add_config_arg(rs)
+    rs.add_argument("--seed", type=int)
+    rs.add_argument("--rl-dir")
     rs.set_defaults(func=rl_cmd)
     re = rl_sub.add_parser("eval")
     add_config_arg(re)
+    re.add_argument("--seed", type=int)
+    re.add_argument("--rl-dir")
     re.add_argument("--checkpoint")
     re.add_argument("--episodes", type=int)
     re.set_defaults(func=rl_cmd)
