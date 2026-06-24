@@ -23,6 +23,7 @@ from hcl_poc.learned_interface import (
 )
 from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
+from hcl_poc.privileged_z import _privileged_z_samples
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
 from hcl_poc.vae_scaling import (
@@ -126,6 +127,30 @@ def test_held_goal_dataset_keeps_fixed_future_goal() -> None:
     assert condition.shape == (2 + 3 + 3 + 1,)
     assert target.shape == (3,)
     assert 0.1 <= float(condition[-1]) <= 1.0
+
+
+def test_privileged_z_goal_samples_cover_all_remaining_offsets() -> None:
+    states = np.arange(12 * 2, dtype=np.float32).reshape(12, 2)
+    actions = np.arange(11 * 3, dtype=np.float32).reshape(11, 3)
+    previous_actions = np.vstack([np.zeros((1, 3), dtype=np.float32), actions[:-1]])
+    state_norm = Standardizer.fit(states)
+    action_norm = Standardizer.fit(actions)
+
+    x, y = _privileged_z_samples(
+        [{"states": states, "actions": actions, "previous_actions": previous_actions}],
+        state_norm,
+        action_norm,
+        horizon_steps=10,
+        include_goal=True,
+        for_high=False,
+    )
+
+    assert x.shape == (10, 2 + 2 + 3 + 1)
+    assert y.shape == (10, 3)
+    np.testing.assert_allclose(x[:, -1], np.linspace(1.0, 0.1, 10, dtype=np.float32))
+    expected_goal = state_norm.transform(states[10:11])[0]
+    np.testing.assert_allclose(x[:, 2:4], np.repeat(expected_goal[None], 10, axis=0))
+    np.testing.assert_allclose(y, action_norm.transform(actions[:10]))
 
 
 def test_goal_conditioning_variants_have_consistent_policy_outputs() -> None:

@@ -106,7 +106,11 @@ from hcl_poc.low_level_rl import (
     train_direct_low_rl,
     train_residual_rl,
 )
-from hcl_poc.privileged_z import evaluate_privileged_z_hierarchy, train_privileged_z_hierarchy
+from hcl_poc.privileged_z import (
+    evaluate_privileged_z_hierarchy,
+    train_privileged_z_hierarchy,
+    train_privileged_z_residual_rl,
+)
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
 from hcl_poc.rl_rerun import (
@@ -510,6 +514,8 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 batch_size=args.batch_size,
                 hidden_dim=args.hidden_dim,
                 lr=args.lr,
+                model_family=args.model_family,
+                flow_steps=args.flow_steps,
                 selection_mode=args.selection_mode,
                 train_per_expert=args.train_per_expert,
                 validation_per_expert=args.validation_per_expert,
@@ -526,7 +532,32 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 episodes=args.episodes,
                 seed_start=args.seed_start,
                 num_envs=args.num_envs,
+                residual_checkpoint_path=Path(args.residual_checkpoint)
+                if args.residual_checkpoint
+                else None,
                 output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "train-privileged-z-residual":
+        console.print(
+            train_privileged_z_residual_rl(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                init_dataset_path=Path(args.init_dataset),
+                run_tag=args.run_tag,
+                seed=args.seed,
+                total_steps=args.steps,
+                alpha=args.alpha,
+                terminal_weight=args.terminal_weight,
+                residual_penalty_weight=args.residual_penalty_weight,
+                learning_rate=args.learning_rate,
+                num_minibatches=args.num_minibatches,
+                update_epochs=args.update_epochs,
+                checkpoint_every_updates=args.checkpoint_every_updates,
+                initial_logstd=args.initial_logstd,
+                residual_action_mode=args.residual_action_mode,
+                residual_goal_source=args.residual_goal_source,
                 force=args.force,
             )
         )
@@ -1773,6 +1804,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_priv_z.add_argument("--batch-size", type=int, default=4096)
     train_priv_z.add_argument("--hidden-dim", type=int, default=512)
     train_priv_z.add_argument("--lr", type=float, default=3e-4)
+    train_priv_z.add_argument("--model-family", choices=["mlp", "flow"], default="mlp")
+    train_priv_z.add_argument("--flow-steps", type=int, default=24)
     train_priv_z.add_argument(
         "--selection-mode",
         choices=["any_success", "balanced_experts"],
@@ -1783,9 +1816,40 @@ def build_parser() -> argparse.ArgumentParser:
     train_priv_z.add_argument("--run-tag")
     train_priv_z.add_argument("--force", action="store_true")
     train_priv_z.set_defaults(func=rl_rerun_cmd)
+    train_priv_z_residual = rl_rerun_sub.add_parser("train-privileged-z-residual")
+    train_priv_z_residual.add_argument("--checkpoint", required=True)
+    train_priv_z_residual.add_argument("--init-dataset", required=True)
+    train_priv_z_residual.add_argument("--run-tag", required=True)
+    train_priv_z_residual.add_argument("--seed", type=int, default=0)
+    train_priv_z_residual.add_argument("--steps", type=int, default=32_768)
+    train_priv_z_residual.add_argument("--alpha", type=float, default=0.1)
+    train_priv_z_residual.add_argument("--terminal-weight", type=float, default=1.0)
+    train_priv_z_residual.add_argument("--residual-penalty-weight", type=float, default=0.01)
+    train_priv_z_residual.add_argument("--learning-rate", type=float, default=1e-4)
+    train_priv_z_residual.add_argument("--num-minibatches", type=int, default=8)
+    train_priv_z_residual.add_argument("--update-epochs", type=int, default=4)
+    train_priv_z_residual.add_argument("--checkpoint-every-updates", type=int, default=5)
+    train_priv_z_residual.add_argument("--initial-logstd", type=float, default=-2.3)
+    train_priv_z_residual.add_argument(
+        "--residual-action-mode",
+        choices=["additive", "margin_scaled"],
+        default="additive",
+    )
+    train_priv_z_residual.add_argument(
+        "--residual-goal-source",
+        choices=["oracle", "predicted", "oracle_to_predicted"],
+        default="oracle",
+    )
+    train_priv_z_residual.add_argument("--force", action="store_true")
+    train_priv_z_residual.set_defaults(func=rl_rerun_cmd)
     eval_priv_z = rl_rerun_sub.add_parser("eval-privileged-z")
     eval_priv_z.add_argument("--checkpoint", required=True)
-    eval_priv_z.add_argument("--mode", choices=["flat", "hierarchy"], default="hierarchy")
+    eval_priv_z.add_argument("--residual-checkpoint")
+    eval_priv_z.add_argument(
+        "--mode",
+        choices=["flat", "hierarchy", "oracle_hierarchy"],
+        default="hierarchy",
+    )
     eval_priv_z.add_argument("--episodes", type=int, default=100)
     eval_priv_z.add_argument("--seed-start", type=int, default=9_900_000)
     eval_priv_z.add_argument("--num-envs", type=int, default=64)
