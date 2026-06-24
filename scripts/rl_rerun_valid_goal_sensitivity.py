@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import h5py
+import gymnasium as gym
+import mani_skill  # noqa: F401
 import numpy as np
 import torch
 
@@ -15,9 +17,12 @@ from hcl_poc.rl_rerun import (
     _encode_rerun_frames,
     _load_low_flow_base,
     _low_flow_base_action,
+    _residual_action_from_raw,
+    _residual_condition_array,
     _rerun_base_config,
     _vector_dataset_path,
 )
+from hcl_poc.rl import _rl_backend
 from hcl_poc.utils import default_device, write_json
 
 
@@ -89,20 +94,45 @@ def _policy_action(
     label: str,
     condition: torch.Tensor,
     base_action: torch.Tensor,
+    current_z: np.ndarray,
+    goal_z: np.ndarray,
+    previous_action: np.ndarray,
+    remaining: np.ndarray,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
     policy: tuple[str, Any, dict[str, Any], Any | None, dict[str, Any] | None] | None,
 ) -> torch.Tensor:
     if policy is None:
-        return base_action
+        return torch.clamp(base_action, action_low, action_high)
     base_policy, agent, recipe, _flow_model, _flow_checkpoint = policy
     method = str(recipe.get("method", ""))
     if method.startswith("r3_direct"):
-        return agent.mean_action(condition)
+        return torch.clamp(agent.mean_action(condition), action_low, action_high)
+    residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
+    residual_condition_np = _residual_condition_array(
+        mode=residual_condition_mode,
+        full_condition=condition.detach().cpu().numpy().astype(np.float32),
+        current_z=current_z,
+        goal_z=goal_z,
+        previous_action=previous_action,
+        remaining=remaining,
+    )
+    residual_condition = torch.from_numpy(residual_condition_np).to(condition.device).float()
     raw_action, _logprob, _entropy, _value = agent.get_action_and_value(
-        condition,
+        residual_condition,
         deterministic=True,
     )
     alpha = float(recipe.get("alpha", 0.0))
-    return base_action + alpha * torch.tanh(raw_action)
+    residual_action_mode = str(recipe.get("residual_action_mode", "additive"))
+    _residual, _unclipped, action = _residual_action_from_raw(
+        base_action,
+        raw_action,
+        alpha,
+        action_low,
+        action_high,
+        residual_action_mode,
+    )
+    return action
 
 
 def _sample_batch(
@@ -171,6 +201,28 @@ def run_valid_goal_sensitivity(args: argparse.Namespace) -> Path:
 
     device = default_device()
     frozen = _load_frozen(_rerun_base_config(config), args.n_demo, args.seed, device)
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode="rgb+state",
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        sim_backend=_rl_backend(config),
+        num_envs=1,
+        reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+    )
+    try:
+        single_action_space = getattr(env, "single_action_space", env.action_space)
+        action_low = torch.as_tensor(
+            np.asarray(single_action_space.low, dtype=np.float32),
+            device=device,
+        )
+        action_high = torch.as_tensor(
+            np.asarray(single_action_space.high, dtype=np.float32),
+            device=device,
+        )
+    finally:
+        env.close()
     policies: dict[str, tuple[str, Any, dict[str, Any], Any | None, dict[str, Any] | None] | None] = {
         "frozen": None
     }
@@ -222,7 +274,18 @@ def run_valid_goal_sensitivity(args: argparse.Namespace) -> Path:
                     )
                 ).to(device)
                 for label, policy in policies.items():
-                    action = _policy_action(label, condition, base_action, policy)
+                    action = _policy_action(
+                        label,
+                        condition,
+                        base_action,
+                        current_z,
+                        goal_z,
+                        normalized_previous,
+                        remaining[:batch_samples],
+                        action_low,
+                        action_high,
+                        policy,
+                    )
                     action_by_policy[label][horizon].append(action.cpu().numpy())
             processed += batch_samples
 

@@ -1,0 +1,43 @@
+{
+  "experiment": "phase_g1_margin_scaled_goal_delta_residual_smoke",
+  "decision": "fail_goal_sensitivity_gate",
+  "checkpoint": "artifacts/rl_rerun/local_r1/n500/seed0/goal_delta_margin_alpha1_penalty001_smoke_10k/latest.pt",
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5",
+  "train": {
+    "global_step": 40960,
+    "num_envs": 4096,
+    "rollout_steps": 10,
+    "alpha": 1.0,
+    "residual_penalty_weight": 0.01,
+    "residual_condition_mode": "goal_delta",
+    "residual_action_mode": "margin_scaled",
+    "mean_terminal_distance": 1.332640438231465,
+    "mean_residual_norm": 0.17143939473870945,
+    "mean_reward": -0.02427572399857967,
+    "action_saturation_rate": 0.0,
+    "task_success_diagnostic_rate": 0.0005615234375,
+    "wall_time_s": 140.33317670598626
+  },
+  "local_eval_1batch": {
+    "sampled_local_episodes": 4096,
+    "initial_distance_mean": 1.0883679389953613,
+    "final_distance_mean": 0.6266261339187622,
+    "distance_reduction_mean": 0.4617418944835663,
+    "distance_reduction_fraction": 0.795166015625,
+    "mean_residual_norm": 0.011277154088020325,
+    "action_saturation_rate": 0.0
+  },
+  "valid_goal_sensitivity_k9_10_11": {
+    "frozen_k9_vs_k10_action_l2_mean": 0.008535612314808816,
+    "margin_k9_vs_k10_action_l2_mean": 0.011657948013045427,
+    "margin_k9_vs_k11_action_l2_mean": 0.013213327817673814,
+    "gate_threshold_k2_vs_k10_or_near_goal_action_l2": 0.08
+  },
+  "valid_goal_sensitivity_k2_5_10_20": {
+    "frozen_k2_vs_k10_action_l2_mean": 0.020815910653922742,
+    "margin_k2_vs_k10_action_l2_mean": 0.025506915438498368,
+    "margin_k2_vs_k20_action_l2_mean": 0.026771512025845823,
+    "gate_threshold_k2_vs_k10_action_l2": 0.08
+  },
+  "interpretation": "Margin-scaled residuals solve the additive PPO action-saturation problem, but this residual formulation still barely increases valid-goal action sensitivity. Do not promote to a 1.024M-transition run."
+}

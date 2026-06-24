@@ -85,6 +85,7 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_goal_conditioning_identifiability.md` | synthesis note explaining why one-step deterministic labels weakly identify goal use |
 | `rl_rerun_goal_identifiable_next_plan.md` | concrete next-experiment plan with diagnostics and promotion gates |
 | `rl_rerun_phase_g1_goal_delta_residual_smokes.json` | first Phase G1 goal-dominant residual smoke comparison |
+| `rl_rerun_phase_g1_margin_scaled_smoke.json` | Phase G1 margin-scaled residual smoke summary |
 | `scripts/rl_rerun_goal_mismatch_audit.py` | reproducible learned-vs-oracle goal mismatch audit |
 | `scripts/rl_rerun_valid_goal_sensitivity.py` | reproducible same-state valid-goal sensitivity diagnostic |
 | `scripts/rl_rerun_condition_block_sensitivity.py` | reproducible condition-block sensitivity diagnostic |
@@ -324,6 +325,12 @@ initial settings plus a lower-exploration variant were not promoted: one-batch
 local final distances were acceptable (`0.6196`, `0.6232`, `0.6249`), but
 training action saturation stayed around `18%`, above the `5%` gate.
 
+The follow-up `margin_scaled` residual action mode fixed that saturation issue:
+train/eval saturation was `0.0`, with one-batch final distance `0.6266`.
+However, valid-goal sensitivity remained weak. The wide `k=2` versus `k=10`
+action L2 was only `0.0255`, below the `0.08` promotion gate, so this setting
+also should not be promoted to a serious 1.024M-transition run.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -346,6 +353,7 @@ training action saturation stayed around `18%`, above the `5%` gate.
 | Action block prediction | Diagnostic only | obs-only raw action L2 `0.227`, goal-only `0.404`, obs+goal improves obs-only by only `0.020` |
 | Goal-conditioning identifiability | Diagnostic conclusion | one-step deterministic action labels are invariant to same-current-state horizon changes, so goal use is weakly identified |
 | Phase G1 goal-dominant residual smokes | Fail | `goal_delta` residual smokes had train action saturation `0.184`, `0.176`, and `0.176`, above the `0.05` gate |
+| Phase G1 margin-scaled residual smoke | Fail | saturation fixed at `0.0`, but `k=2` vs `k=10` action L2 was only `0.0255`, below `0.08` |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 

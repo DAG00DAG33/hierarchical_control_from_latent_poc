@@ -1471,6 +1471,33 @@ def _residual_condition_array(
     raise ValueError(f"Unknown residual condition mode: {mode}")
 
 
+def _residual_action_from_raw(
+    base_action: torch.Tensor,
+    raw_residual: torch.Tensor,
+    alpha: float,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
+    mode: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    unit_residual = torch.tanh(raw_residual)
+    if mode == "additive":
+        residual = alpha * unit_residual
+        unclipped = base_action + residual
+    elif mode == "margin_scaled":
+        base_anchor = torch.clamp(base_action, action_low, action_high)
+        margin = torch.where(
+            unit_residual >= 0.0,
+            action_high - base_anchor,
+            base_anchor - action_low,
+        )
+        residual = alpha * margin * unit_residual
+        unclipped = base_anchor + residual
+    else:
+        raise ValueError(f"Unknown residual action mode: {mode}")
+    action = torch.clamp(unclipped, action_low, action_high)
+    return residual, unclipped, action
+
+
 def _load_low_flow_base(path: Path, device: torch.device) -> tuple[FlowModel, dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -1902,6 +1929,7 @@ def train_rl_rerun_local_r1(
     family_dir: str = "local_r1",
     method_name: str = "r1_residual_deterministic_local_mode_a",
     residual_condition_mode: str = "full",
+    residual_action_mode: str = "additive",
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
@@ -1917,6 +1945,8 @@ def train_rl_rerun_local_r1(
         raise ValueError(f"Unknown residual base policy: {base_policy}")
     if residual_condition_mode not in {"full", "goal_delta"}:
         raise ValueError("residual_condition_mode must be 'full' or 'goal_delta'")
+    if residual_action_mode not in {"additive", "margin_scaled"}:
+        raise ValueError("residual_action_mode must be 'additive' or 'margin_scaled'")
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
@@ -2061,6 +2091,8 @@ def train_rl_rerun_local_r1(
     }
     if residual_condition_mode != "full":
         recipe["residual_condition_mode"] = residual_condition_mode
+    if residual_action_mode != "additive":
+        recipe["residual_action_mode"] = residual_action_mode
     global_step = 0
     history: list[dict[str, Any]] = []
     if latest.exists() and not force:
@@ -2210,9 +2242,14 @@ def train_rl_rerun_local_r1(
                     done_buf[step] = next_done
                     with torch.no_grad():
                         raw_action, logprob, _entropy, value = agent.get_action_and_value(condition)
-                    residual = alpha * torch.tanh(raw_action)
-                    unclipped = base_action + residual
-                    action = torch.clamp(unclipped, action_low, action_high)
+                    residual, unclipped, action = _residual_action_from_raw(
+                        base_action,
+                        raw_action,
+                        alpha,
+                        action_low,
+                        action_high,
+                        residual_action_mode,
+                    )
                     raw_action_buf[step] = raw_action
                     logprob_buf[step] = logprob
                     value_buf[step] = value
@@ -2375,6 +2412,7 @@ def train_rl_rerun_local_r2(
     flow_checkpoint_path: Path | None = None,
     force: bool = False,
     residual_condition_mode: str = "full",
+    residual_action_mode: str = "additive",
 ) -> Path:
     return train_rl_rerun_local_r1(
         config,
@@ -2396,6 +2434,7 @@ def train_rl_rerun_local_r2(
         family_dir="local_r2",
         method_name="r2_residual_flow_local_mode_a",
         residual_condition_mode=residual_condition_mode,
+        residual_action_mode=residual_action_mode,
     )
 
 
@@ -2949,6 +2988,9 @@ def evaluate_rl_rerun_local_r1(
     residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
     if residual_condition_mode not in {"full", "goal_delta"}:
         raise ValueError(f"Unknown residual_condition_mode: {residual_condition_mode}")
+    residual_action_mode = str(recipe.get("residual_action_mode", "additive"))
+    if residual_action_mode not in {"additive", "margin_scaled"}:
+        raise ValueError(f"Unknown residual_action_mode: {residual_action_mode}")
 
     with h5py.File(path, "r") as h5:
         meta = h5["meta"].attrs
@@ -3065,12 +3107,19 @@ def evaluate_rl_rerun_local_r1(
                             residual_condition_t,
                             deterministic=True,
                         )
-                        residual = alpha * torch.tanh(raw_action)
+                        residual, unclipped, action = _residual_action_from_raw(
+                            base_action,
+                            raw_action,
+                            alpha,
+                            action_low,
+                            action_high,
+                            residual_action_mode,
+                        )
                         action_delta_norms.append(
                             torch.linalg.vector_norm(residual, dim=-1).cpu().numpy()
                         )
-                        unclipped = base_action + residual
-                    action = torch.clamp(unclipped, action_low, action_high)
+                    if is_direct:
+                        action = torch.clamp(unclipped, action_low, action_high)
                     saturation_count += int(torch.any(unclipped != action, dim=-1).sum().cpu())
                     obs, _reward, _terminated, _truncated, _info = env.step(action)
                     previous = frozen.action_norm.transform(action.cpu().numpy())
@@ -3252,6 +3301,9 @@ def evaluate_rl_rerun_closed_loop_r1(
     residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
     if residual_condition_mode not in {"full", "goal_delta"}:
         raise ValueError(f"Unknown residual_condition_mode: {residual_condition_mode}")
+    residual_action_mode = str(recipe.get("residual_action_mode", "additive"))
+    if residual_action_mode not in {"additive", "margin_scaled"}:
+        raise ValueError(f"Unknown residual_action_mode: {residual_action_mode}")
     max_steps = int(config.get("env_max_episode_steps", 100))
     disturbance_rng = np.random.default_rng(eval_seed_start + 10_000)
     all_schedules = (
@@ -3502,8 +3554,14 @@ def evaluate_rl_rerun_closed_loop_r1(
                             residual_condition,
                             deterministic=True,
                         )
-                        residual = alpha * torch.tanh(raw_residual)
-                        unclipped = base_action + residual
+                        residual, unclipped, _action = _residual_action_from_raw(
+                            base_action,
+                            raw_residual,
+                            alpha,
+                            action_low,
+                            action_high,
+                            residual_action_mode,
+                        )
                         residual_norms.extend(
                             torch.linalg.vector_norm(residual, dim=-1)
                             .cpu()
@@ -3815,6 +3873,12 @@ def record_rl_rerun_videos(
     agent.load_state_dict(checkpoint["agent"])
     agent.eval()
     alpha = float(recipe.get("alpha", 0.0))
+    residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
+    if residual_condition_mode not in {"full", "goal_delta"}:
+        raise ValueError(f"Unknown residual_condition_mode: {residual_condition_mode}")
+    residual_action_mode = str(recipe.get("residual_action_mode", "additive"))
+    if residual_action_mode not in {"additive", "margin_scaled"}:
+        raise ValueError(f"Unknown residual_action_mode: {residual_action_mode}")
     dino = _phase4_dino_from_config(config, device)
     max_steps = int(config.get("env_max_episode_steps", 100))
     control_freq = int(config.get("control_freq", 20))
@@ -3894,7 +3958,11 @@ def record_rl_rerun_videos(
                         )
                         countdown[0] = frozen.update_period
 
-                    if frozen.conditioning in {"delta", "relation"}:
+                    if frozen.conditioning in {"delta", "relation"} or (
+                        selected_mode == "tuned"
+                        and not is_direct
+                        and residual_condition_mode != "full"
+                    ):
                         current_z = _encode_rerun_frames(frozen, frames, device)
                     else:
                         current_z = np.empty_like(held_goal)
@@ -3934,11 +4002,32 @@ def record_rl_rerun_videos(
                             deterministic=True,
                         )[0]
                     else:
+                        residual_condition_np = _residual_condition_array(
+                            mode=residual_condition_mode,
+                            full_condition=condition_np,
+                            current_z=current_z,
+                            goal_z=held_goal,
+                            previous_action=previous_action,
+                            remaining=(
+                                np.maximum(countdown, 1).astype(np.float32)
+                                / frozen.horizon_steps
+                            )[:, None],
+                        )
+                        residual_condition = torch.from_numpy(
+                            residual_condition_np
+                        ).to(device).float()
                         raw_residual = agent.get_action_and_value(
-                            condition,
+                            residual_condition,
                             deterministic=True,
                         )[0]
-                        unclipped = base_action + alpha * torch.tanh(raw_residual)
+                        _residual, unclipped, _action = _residual_action_from_raw(
+                            base_action,
+                            raw_residual,
+                            alpha,
+                            action_low,
+                            action_high,
+                            residual_action_mode,
+                        )
                     action = torch.clamp(unclipped, action_low, action_high)
                     obs, reward, terminated, truncated, info = env.step(action)
                     previous_action = frozen.action_norm.transform(

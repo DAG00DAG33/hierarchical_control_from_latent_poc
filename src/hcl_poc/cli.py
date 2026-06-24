@@ -321,6 +321,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 checkpoint_every_updates=args.checkpoint_every_updates,
                 initial_logstd=args.initial_logstd,
                 residual_condition_mode=args.residual_condition_mode,
+                residual_action_mode=args.residual_action_mode,
                 force=args.force,
             )
         )
@@ -382,6 +383,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 if args.flow_checkpoint
                 else None,
                 residual_condition_mode=args.residual_condition_mode,
+                residual_action_mode=args.residual_action_mode,
                 force=args.force,
             )
         )
@@ -1570,6 +1572,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["full", "goal_delta"],
         default="full",
     )
+    train_local_r1.add_argument(
+        "--residual-action-mode",
+        choices=["additive", "margin_scaled"],
+        default="additive",
+    )
     train_local_r1.add_argument("--force", action="store_true")
     train_local_r1.set_defaults(func=rl_rerun_cmd)
     eval_local_r1 = rl_rerun_sub.add_parser("eval-local-r1")
@@ -1620,6 +1627,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--residual-condition-mode",
         choices=["full", "goal_delta"],
         default="full",
+    )
+    train_local_r2.add_argument(
+        "--residual-action-mode",
+        choices=["additive", "margin_scaled"],
+        default="additive",
     )
     train_local_r2.add_argument("--force", action="store_true")
     train_local_r2.set_defaults(func=rl_rerun_cmd)

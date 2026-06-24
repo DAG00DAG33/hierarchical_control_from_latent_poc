@@ -2520,3 +2520,95 @@ box boundary and stochastic residual exploration pushes them outside. The
 reduced goal-dominant residual input works technically, but this residual PPO
 family needs an action-space-aware exploration or clipping formulation before
 running full valid-goal diagnostics.
+
+## 2026-06-24 - RR-56: Phase G1 margin-scaled residual smoke
+
+Implemented an action-space-aware residual mode:
+
+```text
+--residual-action-mode {additive,margin_scaled}
+```
+
+The default `additive` preserves existing checkpoints. The new `margin_scaled`
+mode clips the frozen base action first, then scales each residual component by
+the remaining action-box margin in that residual direction:
+
+```text
+base_anchor = clip(base_action, action_low, action_high)
+residual = alpha * margin(base_anchor, sign(raw_residual)) * tanh(raw_residual)
+action = base_anchor + residual
+```
+
+This keeps zero residual exactly equal to the deployed frozen policy and prevents
+PPO exploration from leaving the action box when `alpha <= 1`.
+
+Training command:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r1 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 \
+  --run-name goal_delta_margin_alpha1_penalty001_smoke_10k \
+  --steps 10240 --alpha 1.0 --residual-penalty-weight 0.01 \
+  --learning-rate 1e-4 --residual-condition-mode goal_delta \
+  --residual-action-mode margin_scaled \
+  --checkpoint-every-updates 1 --force
+```
+
+One-batch local evaluation:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r1 \
+  --checkpoint artifacts/rl_rerun/local_r1/n500/seed0/goal_delta_margin_alpha1_penalty001_smoke_10k/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --episodes 1 \
+  --output results/rl_rerun/local_r1/n500/seed0/goal_delta_margin_alpha1_penalty001_smoke_10k/eval_local_1batch.json
+```
+
+Valid-goal diagnostics:
+
+```text
+uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --samples 2048 --batch-size 512 \
+  --horizons 9,10,11 --reference-horizon 10 \
+  --policy margin=artifacts/rl_rerun/local_r1/n500/seed0/goal_delta_margin_alpha1_penalty001_smoke_10k/latest.pt \
+  --output results/rl_rerun/local_r1/n500/seed0/goal_delta_margin_alpha1_penalty001_smoke_10k/valid_goal_sensitivity_k9_10_11.json
+
+uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --samples 2048 --batch-size 512 \
+  --horizons 2,5,10,20 --reference-horizon 10 \
+  --policy margin=artifacts/rl_rerun/local_r1/n500/seed0/goal_delta_margin_alpha1_penalty001_smoke_10k/latest.pt \
+  --output results/rl_rerun/local_r1/n500/seed0/goal_delta_margin_alpha1_penalty001_smoke_10k/valid_goal_sensitivity_k2_5_10_20.json
+```
+
+Tracked compact summary:
+
+```text
+rl_rerun_phase_g1_margin_scaled_smoke.json
+```
+
+Results:
+
+| metric | value |
+| --- | ---: |
+| train terminal distance | 1.3326 |
+| train residual norm | 0.1714 |
+| train action saturation | 0.0000 |
+| eval final distance | 0.6266 |
+| eval reduction fraction | 0.7952 |
+| eval action saturation | 0.0000 |
+| `k=9` vs `k=10` action L2 | 0.0117 |
+| `k=2` vs `k=10` action L2 | 0.0255 |
+
+Decision: do not promote to a 1.024M-transition run. The action-space-aware
+residual solves the saturation failure from RR-55, but goal sensitivity is still
+far below the Phase G1 gate (`0.08` for `k=2` versus `k=10`). This means the
+residual formulation is still mostly preserving the base policy instead of
+creating a strong goal-conditioned local controller. The next useful step is no
+longer residual scaling; it should be the stronger Phase G1/G3 branch: direct
+goal-gated low-level training or counterfactual branch data where different
+reachable goals require different behavior.

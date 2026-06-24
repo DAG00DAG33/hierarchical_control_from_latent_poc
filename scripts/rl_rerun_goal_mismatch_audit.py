@@ -22,6 +22,8 @@ from hcl_poc.rl_rerun import (
     _encode_rerun_frames,
     _load_low_flow_base,
     _low_flow_base_action,
+    _residual_action_from_raw,
+    _residual_condition_array,
     _rerun_base_config,
     _to_numpy,
 )
@@ -108,6 +110,12 @@ def run_goal_mismatch_audit(args: argparse.Namespace) -> Path:
     dino = _phase4_dino_from_config(config, device)
     max_steps = int(config.get("env_max_episode_steps", 100))
     alpha = float(recipe.get("alpha", 0.0))
+    residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
+    if residual_condition_mode not in {"full", "goal_delta"}:
+        raise ValueError(f"Unknown residual_condition_mode: {residual_condition_mode}")
+    residual_action_mode = str(recipe.get("residual_action_mode", "additive"))
+    if residual_action_mode not in {"additive", "margin_scaled"}:
+        raise ValueError(f"Unknown residual_action_mode: {residual_action_mode}")
 
     metrics: dict[str, list[float]] = {
         "learned_oracle_goal_l2": [],
@@ -243,14 +251,50 @@ def run_goal_mismatch_audit(args: argparse.Namespace) -> Path:
                             oracle_condition, deterministic=True
                         )
                     else:
+                        learned_residual_condition_np = _residual_condition_array(
+                            mode=residual_condition_mode,
+                            full_condition=learned_condition_np,
+                            current_z=current_z,
+                            goal_z=learned_goal,
+                            previous_action=previous_action,
+                            remaining=remaining,
+                        )
+                        oracle_residual_condition_np = _residual_condition_array(
+                            mode=residual_condition_mode,
+                            full_condition=oracle_condition_np,
+                            current_z=current_z,
+                            goal_z=oracle_goal,
+                            previous_action=previous_action,
+                            remaining=remaining,
+                        )
+                        learned_residual_condition = torch.from_numpy(
+                            learned_residual_condition_np
+                        ).to(device).float()
+                        oracle_residual_condition = torch.from_numpy(
+                            oracle_residual_condition_np
+                        ).to(device).float()
                         learned_residual, *_ = agent.get_action_and_value(
-                            learned_condition, deterministic=True
+                            learned_residual_condition, deterministic=True
                         )
                         oracle_residual, *_ = agent.get_action_and_value(
-                            oracle_condition, deterministic=True
+                            oracle_residual_condition, deterministic=True
                         )
-                        learned_tuned = learned_base + alpha * torch.tanh(learned_residual)
-                        oracle_tuned = oracle_base + alpha * torch.tanh(oracle_residual)
+                        _learned_delta, learned_tuned, _learned_action = _residual_action_from_raw(
+                            learned_base,
+                            learned_residual,
+                            alpha,
+                            action_low,
+                            action_high,
+                            residual_action_mode,
+                        )
+                        _oracle_delta, oracle_tuned, _oracle_action = _residual_action_from_raw(
+                            oracle_base,
+                            oracle_residual,
+                            alpha,
+                            action_low,
+                            action_high,
+                            residual_action_mode,
+                        )
 
                     selected = np.flatnonzero(replan)
                     learned_base_np = learned_base.cpu().numpy()
@@ -319,14 +363,54 @@ def run_goal_mismatch_audit(args: argparse.Namespace) -> Path:
                             normalized_base.cpu().numpy().astype(np.float32)
                         )
                     ).to(device)
-                    residual, *_ = agent.get_action_and_value(condition, deterministic=True)
-                    action = base_action + alpha * torch.tanh(residual)
+                    residual_condition_np = _residual_condition_array(
+                        mode=residual_condition_mode,
+                        full_condition=condition_np,
+                        current_z=current_z,
+                        goal_z=held_goal,
+                        previous_action=previous_action,
+                        remaining=(remaining_steps / frozen.horizon_steps)[:, None],
+                    )
+                    residual_condition = torch.from_numpy(
+                        residual_condition_np
+                    ).to(device).float()
+                    residual, *_ = agent.get_action_and_value(
+                        residual_condition, deterministic=True
+                    )
+                    _delta, action, _clipped_action = _residual_action_from_raw(
+                        base_action,
+                        residual,
+                        alpha,
+                        action_low,
+                        action_high,
+                        residual_action_mode,
+                    )
                 else:
                     if flow_model is None or flow_checkpoint is None:
                         raise RuntimeError("Flow base was not loaded")
                     base_action = _low_flow_base_action(flow_model, flow_checkpoint, condition, frozen)
-                    residual, *_ = agent.get_action_and_value(condition, deterministic=True)
-                    action = base_action + alpha * torch.tanh(residual)
+                    residual_condition_np = _residual_condition_array(
+                        mode=residual_condition_mode,
+                        full_condition=condition_np,
+                        current_z=current_z,
+                        goal_z=held_goal,
+                        previous_action=previous_action,
+                        remaining=(remaining_steps / frozen.horizon_steps)[:, None],
+                    )
+                    residual_condition = torch.from_numpy(
+                        residual_condition_np
+                    ).to(device).float()
+                    residual, *_ = agent.get_action_and_value(
+                        residual_condition, deterministic=True
+                    )
+                    _delta, action, _clipped_action = _residual_action_from_raw(
+                        base_action,
+                        residual,
+                        alpha,
+                        action_low,
+                        action_high,
+                        residual_action_mode,
+                    )
                 active_tensor = torch.from_numpy(active).to(device)
                 action = torch.clamp(action, action_low, action_high)
                 action[~active_tensor] = 0.0
