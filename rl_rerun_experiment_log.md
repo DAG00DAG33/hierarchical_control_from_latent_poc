@@ -2070,3 +2070,29 @@ and tuned action-response statistics are nearly identical. This strengthens the
 interpretation that the low-level policy is mostly behaving like a current-state
 controller, with future goals acting as a weak modulation rather than a strong
 interface.
+
+## 2026-06-24 - RR-47: Recovered wall-clock telemetry
+
+Recovered wall-clock from the final complete tqdm records in available raw PPO
+logs and wrote the compact artifact:
+
+```text
+rl_rerun_recovered_wallclock.csv
+```
+
+Recovered serious-run wall-clock:
+
+| run | envs | rollout | transitions | wall-clock | status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| R1 residual deterministic seed0 | 4096 | 10 | 1,024,000 | n/a | missing raw log; history has no timing fields |
+| R1 residual deterministic disjoint-state seed0 | 512 | 10 | 1,024,000 | n/a | missing raw log; history has no timing fields |
+| R2 residual flow seed0 | 4096 | 10 | 1,024,000 | `59:29` | recovered from `logs_r2_aligned10_n4096_1m.txt` |
+| R3 direct lr=3e-5 seed0 | 4096 | 10 | 1,024,000 | `59:51` | recovered from `logs_r3_aligned10_n4096_1m.txt` |
+| R3 direct lr=1e-5 seed0 | 4096 | 10 | 1,024,000 | `59:25` | recovered from `logs_r3_lr1e5_aligned10_n4096_1m.txt` |
+| R3 direct lr=1e-5 seed1 | 4096 | 10 | 1,024,000 | `59:02` | recovered from `logs_r3_seed1_lr1e5_aligned10_n4096_1m.txt` |
+
+This closes part of the runtime documentation gap: available R2/R3 raw logs show
+roughly one hour per serious `4096 x 10`, 1.024M-transition PPO run. It does not
+recover GPU-memory traces for old runs, and it does not recover R1 wall-clock
+because the R1 raw logs are not present in the workspace and the existing R1
+history JSON files contain no timing fields.

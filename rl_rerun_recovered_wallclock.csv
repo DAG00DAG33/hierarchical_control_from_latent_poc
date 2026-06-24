@@ -1,0 +1,7 @@
+run_id,method,seed,envs,rollout_steps,transitions,log_file,wallclock_seconds,wallclock_hms,tqdm_rate_it_s,source_status,notes
+r1_residual_deterministic_seed0,R1 residual deterministic,0,4096,10,1024000,,,,,missing_log,history JSON exists but has no wall-clock fields; raw tqdm log not found
+r1_residual_deterministic_disjoint512_seed0,R1 residual deterministic disjoint-state ablation,0,512,10,1024000,,,,,missing_log,history JSON exists but has no wall-clock fields; raw tqdm log not found
+r2_residual_flow_seed0,R2 residual flow,0,4096,10,1024000,logs_r2_aligned10_n4096_1m.txt,3569,59:29,286.91,recovered_from_tqdm_log,elapsed time from final complete tqdm progress record
+r3_direct_lr3e5_seed0,R3 direct last-layer lr=3e-5,0,4096,10,1024000,logs_r3_aligned10_n4096_1m.txt,3591,59:51,285.10,recovered_from_tqdm_log,elapsed time from final complete tqdm progress record
+r3_direct_lr1e5_seed0,R3 direct last-layer lr=1e-5,0,4096,10,1024000,logs_r3_lr1e5_aligned10_n4096_1m.txt,3565,59:25,287.16,recovered_from_tqdm_log,elapsed time from final complete tqdm progress record
+r3_direct_lr1e5_seed1,R3 direct last-layer lr=1e-5,1,4096,10,1024000,logs_r3_seed1_lr1e5_aligned10_n4096_1m.txt,3542,59:02,289.06,recovered_from_tqdm_log,elapsed time from final complete tqdm progress record

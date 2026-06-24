@@ -53,7 +53,7 @@ development bank, but the two-seed fresh-bank mean is flat.
 | Exact local resets | Passed on vector-consistent corpora |
 | Termination/GAE handling | One complete local episode per rollout; GAE terminates at the 10-step segment boundary |
 | GPU memory | Not captured as a numeric time-series; `4096` envs was stable, `8192` failed camera-group allocation |
-| Wall-clock | Not stored in JSON for the serious RL runs; this is an instrumentation gap |
+| Wall-clock | Recovered from raw tqdm logs for R2/R3 serious runs; R1 raw logs are missing |
 
 ## Data And Artifacts
 
@@ -65,6 +65,7 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5` | cheap fixed checkpoint-selection corpus |
 | `rl_rerun_vector_state_audit_n4096_b2.json` | exact replay audit for the main corpus |
 | `rl_rerun_throughput_rollout10_large.csv` | 10-step throughput benchmark |
+| `rl_rerun_recovered_wallclock.csv` | recovered wall-clock telemetry from available raw PPO logs |
 | `rl_rerun_completion_audit.md` | requirement-by-requirement completion status |
 | `rl_rerun_local_r3_n500_seed0_409k_closed_loop_500_seed20000.json` | tracked fresh 500-episode R3 seed0 evaluation |
 | `rl_rerun_local_r3_n500_seed1_614k_closed_loop_500_seed20000.json` | tracked fresh 500-episode R3 seed1 evaluation |
@@ -321,8 +322,13 @@ The current best scientific conclusion is:
 
 ## Remaining Instrumentation Gaps
 
+- Raw tqdm logs recover wall-clock for the available serious R2/R3 runs:
+  `59:29` for R2 seed0, `59:51` for R3 lr=3e-5 seed0, `59:25` for R3 lr=1e-5
+  seed0, and `59:02` for R3 lr=1e-5 seed1. The R1 raw PPO logs are not present,
+  and the old R1 histories have no timing fields.
 - New R1/R2/R3 runs now store wall-clock and peak CUDA-memory telemetry, but the
-  already completed serious RL histories do not contain retrospective values.
+  already completed serious RL runs do not contain retrospective GPU-memory
+  time-series.
 - A future positive claim would need a new method or tuning rule that first
   improves a fresh held-out deployment bank.
 
