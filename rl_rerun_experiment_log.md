@@ -2310,3 +2310,63 @@ smoke remain almost identical to frozen. This explains why learned/oracle/valid
 future-goal swaps have limited effect: the low-level architecture and training
 distribution allow the policy to solve one-step imitation mostly from current
 observation and previous action.
+
+## 2026-06-24 - RR-52: One-step action block-prediction ablation
+
+Added a simulator-free supervised action-prediction diagnostic:
+
+```text
+scripts/rl_rerun_action_block_prediction.py
+```
+
+The script samples teacher-corpus states, builds the same normalized low-level
+blocks used by the hierarchy, and trains identical small MLPs to predict the
+one-step teacher action from different subsets of the condition:
+
+- observation only;
+- future goal only;
+- previous action only;
+- observation plus goal;
+- observation plus previous action;
+- goal plus previous action;
+- full condition.
+
+Command:
+
+```text
+uv run python scripts/rl_rerun_action_block_prediction.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --horizon 10 \
+  --train-samples 8192 --val-samples 2048 \
+  --hidden-dim 256 --depth 2 --epochs 20 --batch-size 512 \
+  --learning-rate 1e-3 \
+  --output results/rl_rerun/action_block_prediction_seed0_8192_2048.json
+```
+
+Tracked compact summary:
+
+```text
+rl_rerun_action_block_prediction_seed0_8192_2048.json
+```
+
+Validation action error:
+
+| input blocks | raw action L2 mean | raw action MAE | normalized MSE |
+| --- | ---: | ---: | ---: |
+| frozen low policy reference | 0.1383 | 0.0668 | 0.0679 |
+| full scratch MLP | 0.2023 | 0.0997 | 0.1369 |
+| observation + goal | 0.2075 | 0.1022 | 0.1432 |
+| observation + previous action | 0.2138 | 0.1052 | 0.1483 |
+| observation only | 0.2272 | 0.1113 | 0.1687 |
+| goal + previous action | 0.2669 | 0.1316 | 0.1991 |
+| previous action only | 0.3108 | 0.1525 | 0.3247 |
+| goal only | 0.4041 | 0.1972 | 0.4785 |
+
+The scratch MLPs are not expected to beat the trained frozen low policy; they
+are a block-importance diagnostic. Observation-only predicts the one-step
+teacher action much better than goal-only (`0.227` versus `0.404` raw L2), and
+adding the goal to observation improves raw L2 by only `0.020`. This supports
+the RR-51 interpretation: the supervised one-step target itself is mostly
+current-state/previous-action predictable, so a low-level trained this way has
+little pressure to use the future latent as a strong interface.

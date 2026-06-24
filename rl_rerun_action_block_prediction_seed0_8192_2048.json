@@ -1,0 +1,44 @@
+{
+  "epochs": 20,
+  "experiment": "rl_rerun_action_block_prediction_seed0_8192_2048",
+  "full_vs_obs_raw_l2_improvement": 0.02490195474047141,
+  "goal_only_vs_obs_raw_l2_ratio": 1.7785758755081742,
+  "goal_prev_vs_prev_raw_l2_improvement": 0.04390407609162139,
+  "horizon": 10,
+  "interpretation": "Scratch MLP action predictors show the one-step teacher action is much more predictable from current observation than from future goal. Adding goal to observation gives only a small validation L2 improvement, while goal-only is about 1.78x worse than obs-only.",
+  "norm_mse": {
+    "frozen_low_policy": 0.06791030615568161,
+    "full": 0.13687729835510254,
+    "goal": 0.47854340076446533,
+    "goal_prev": 0.19909381866455078,
+    "obs": 0.16868595778942108,
+    "obs_goal": 0.14324291050434113,
+    "obs_prev": 0.1483215093612671,
+    "prev": 0.3246690332889557
+  },
+  "obs_goal_vs_obs_raw_l2_improvement": 0.01973025015138319,
+  "raw_l2_mean": {
+    "frozen_low_policy": 0.13826664783573506,
+    "full": 0.20227873341707436,
+    "goal": 0.40405809133835646,
+    "goal_prev": 0.2668590224984655,
+    "obs": 0.22718068815754577,
+    "obs_goal": 0.20745043800616259,
+    "obs_prev": 0.21379512753151175,
+    "prev": 0.3107630985900869
+  },
+  "raw_mae": {
+    "frozen_low_policy": 0.06675741821527481,
+    "full": 0.09972802549600601,
+    "goal": 0.1971661001443863,
+    "goal_prev": 0.13156406581401825,
+    "obs": 0.11132621765136719,
+    "obs_goal": 0.1022462472319603,
+    "obs_prev": 0.10522830486297607,
+    "prev": 0.15245278179645538
+  },
+  "script": "scripts/rl_rerun_action_block_prediction.py",
+  "source_result": "results/rl_rerun/action_block_prediction_seed0_8192_2048.json",
+  "train_samples": 8192,
+  "val_samples": 2048
+}

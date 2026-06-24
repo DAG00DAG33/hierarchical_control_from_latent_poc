@@ -81,9 +81,11 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_valid_goal_sensitivity_seed0_2048.json` | same-state `k=9/10/11` valid-goal sensitivity diagnostic |
 | `rl_rerun_valid_goal_sensitivity_seed0_2048_wide.json` | same-state `k=2/5/10/20` valid-goal sensitivity diagnostic |
 | `rl_rerun_condition_block_sensitivity_seed0_2048.json` | observation/goal/previous-action block sensitivity diagnostic |
+| `rl_rerun_action_block_prediction_seed0_8192_2048.json` | one-step teacher-action predictability by condition block |
 | `scripts/rl_rerun_goal_mismatch_audit.py` | reproducible learned-vs-oracle goal mismatch audit |
 | `scripts/rl_rerun_valid_goal_sensitivity.py` | reproducible same-state valid-goal sensitivity diagnostic |
 | `scripts/rl_rerun_condition_block_sensitivity.py` | reproducible condition-block sensitivity diagnostic |
+| `scripts/rl_rerun_action_block_prediction.py` | reproducible action-block prediction diagnostic |
 | `rl_rerun_failure_videos/` | paired frozen/tuned deployment videos for the best R3 checkpoint |
 
 The single-env corpus replays exactly in a single-env CUDA simulator, but
@@ -297,6 +299,11 @@ changes actions by about `0.805` L2, while shuffling the future-goal block
 changes actions by only `~0.048-0.050` L2. Previous action has a similar or
 slightly larger effect than the goal block.
 
+A scratch action-prediction ablation reaches raw action L2 `0.227` from
+observation only versus `0.404` from goal only. Adding the goal to observation
+improves raw L2 by only `0.020`, so the one-step teacher label itself provides
+weak pressure to rely on future latents.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -316,6 +323,7 @@ slightly larger effect than the goal block.
 | Same-state valid-goal sensitivity | Diagnostic only | same-trajectory `k=9/10/11` future latents differ by mean L2 `~16`, but actions change only `~0.0085` L2 |
 | Wide-horizon valid-goal sensitivity | Diagnostic only | same-trajectory `k=2/5/10/20` future latents differ by mean L2 `~24-27`, but actions change only `~0.016-0.022` L2 |
 | Condition-block sensitivity | Diagnostic only | observation-block shuffle changes actions by `~0.805` L2, goal-block shuffle by only `~0.048-0.050` L2 |
+| Action block prediction | Diagnostic only | obs-only raw action L2 `0.227`, goal-only `0.404`, obs+goal improves obs-only by only `0.020` |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 

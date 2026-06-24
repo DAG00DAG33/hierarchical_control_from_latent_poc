@@ -58,6 +58,7 @@ evaluation was not pursued.
 | Same-state valid-goal sensitivity | diagnostic only | same-trajectory `k=9/10/11` future latents differ by mean L2 `~16`, but frozen/R3 actions change only `~0.0085` L2; RR-48 sensitivity hinge does not improve this metric |
 | Wide-horizon valid-goal sensitivity | diagnostic only | same-trajectory `k=2/5/10/20` future latents differ by mean L2 `~24-27`, but frozen/R3 actions change only `~0.016-0.022` L2; weak sensitivity is not just a `k±1` artifact |
 | Condition-block sensitivity | diagnostic only | observation-block shuffle changes frozen/R3 actions by `~0.805` L2, goal-block shuffle by only `~0.048-0.050` L2; previous action is comparable to goal |
+| Action block prediction | diagnostic only | scratch MLP predicts one-step action much better from observation-only (`0.227` raw L2) than goal-only (`0.404`); adding goal to observation improves only `0.020` raw L2 |
 | Fast state-dict branch copy | fail for oracle use | current state/action parity is near `1e-6`, but 10-step same-action branch rollout still has mean future-goal L2 error `5.19`; replay remains the trusted oracle path |
 | RL wall-clock telemetry | partial, retrospectively recovered where logs exist | `rl_rerun_recovered_wallclock.csv` recovers raw-log wall-clock for R2/R3 serious runs; R1 raw logs are missing and old histories have no timing fields |
 | RL GPU-memory telemetry | implemented for future runs | R1/R2/R3 history writers now record peak CUDA memory; verified by `telemetry_smoke_1update`, but old serious runs do not contain retrospective memory traces |
@@ -157,4 +158,7 @@ Additional diagnostic conclusion:
    pattern, so the next attempt should change the low-level formulation rather
    than continue small final-layer R3 tweaks. RR-51 shows why: the low-level is
    dominated by current observation features, with observation-block action
-   sensitivity about `16-17x` larger than goal-block sensitivity.
+   sensitivity about `16-17x` larger than goal-block sensitivity. RR-52 further
+   shows that the one-step teacher action is much more predictable from current
+   observation than from future goal alone, so the training label itself gives
+   weak pressure for goal use.
