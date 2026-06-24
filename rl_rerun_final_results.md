@@ -192,9 +192,8 @@ The current best scientific conclusion is:
 
 ## Remaining Instrumentation Gaps
 
-- Serious RL histories should store wall-clock time per update.
-- GPU memory should be sampled during training, not inferred from allocation
-  success/failure.
+- New R1/R2/R3 runs now store wall-clock and peak CUDA-memory telemetry, but the
+  already completed serious RL histories do not contain retrospective values.
 - A final positive claim would require at least three policy seeds and a larger
   evaluation budget for the selected R3 setting.
 

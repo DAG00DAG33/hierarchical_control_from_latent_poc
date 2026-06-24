@@ -1554,3 +1554,47 @@ different from the original supervised low-level training trajectories. The
 `512`-env disjoint run remains useful as an extra independent-state ablation,
 but its negative result should not be treated as the strongest possible PPO
 test because its batch is only one eighth of the serious `4096 x 10` setup.
+
+## 2026-06-24 - RR-36: RL history telemetry instrumentation
+
+The completion audit identified a remaining instrumentation gap: serious RL
+histories did not store wall-clock time or GPU memory. Added telemetry to the
+R1/R2/R3 PPO history writer for future runs:
+
+```text
+update_wall_time_s
+wall_time_s
+update_samples_per_second
+run_samples_per_second
+gpu_peak_memory_allocated_mib
+gpu_peak_memory_reserved_mib
+```
+
+R2 reuses the R1 trainer, so the same fields apply to residual-flow PPO.
+
+Verification commands:
+
+```text
+uv run python -m py_compile src/hcl_poc/rl_rerun.py
+uv run hcl-poc rl-rerun --help
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_b1.h5 \
+  --n-demo 500 --seed 0 --run-name telemetry_smoke_1update \
+  --steps 5120 --bc-weight 1.0 --terminal-weight 1.0 \
+  --learning-rate 0.00001 --num-minibatches 1 --checkpoint-every-updates 1 --force
+```
+
+Telemetry smoke result:
+
+| field | value |
+| --- | ---: |
+| global step | 5120 |
+| update wall time | 18.60 s |
+| update samples/s | 275.30 |
+| run samples/s | 275.28 |
+| peak CUDA allocated | 771.5 MiB |
+| peak CUDA reserved | 1168.0 MiB |
+
+This fixes the code path for future serious runs. The already completed serious
+R1/R2/R3 histories still do not contain retrospective wall-clock or memory
+measurements, so the final report remains explicit about that historical gap.

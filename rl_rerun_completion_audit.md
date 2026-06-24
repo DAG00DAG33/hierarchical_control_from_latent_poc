@@ -47,6 +47,7 @@ result, not a final statistically powered claim.
 | R4 direct-flow tested | skipped by plan condition | R2 did not establish a stable flow base; final report documents this |
 | Final multi-seed 500-episode evaluation | partial | two serious R3 seeds evaluated on 100 episodes; seed2 failed cheap screen; no 500-episode final bank |
 | Disturbed/recovery/branch-oracle evaluations | not run | omitted under runtime reduction; no final gate claim is made |
+| RL wall-clock and GPU telemetry | implemented for future runs | R1/R2/R3 history writers now record update/run wall time, sample rates, and peak CUDA memory; verified by `telemetry_smoke_1update` |
 
 ## Main Quantitative Result
 
@@ -85,7 +86,9 @@ Supported conclusion:
 
 1. Run a final 500-episode evaluation for any method intended to be claimed as
    positive.
-2. Add wall-clock and GPU-memory telemetry to serious RL histories.
+2. Re-run any serious RL point whose final report needs wall-clock and GPU
+   memory, because telemetry is now implemented but old histories do not contain
+   retrospective measurements.
 3. Decide whether to spend a full run on seed2 despite its failed cheap local
    screen, or explicitly stop at two-seed development evidence.
 4. If pursuing a negative claim, run the omitted disturbed, recovery-state, and

@@ -270,6 +270,36 @@ def _cuda_memory_mib() -> tuple[float | None, float | None]:
     )
 
 
+def _reset_cuda_peak_memory() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+
+def _rl_runtime_metrics(
+    *,
+    run_start_time: float,
+    update_start_time: float,
+    run_start_step: int,
+    global_step: int,
+    batch_size: int,
+) -> dict[str, float | None]:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    update_wall_time_s = time.perf_counter() - update_start_time
+    wall_time_s = time.perf_counter() - run_start_time
+    trained_steps = max(global_step - run_start_step, 0)
+    peak_allocated_mib, peak_reserved_mib = _cuda_memory_mib()
+    return {
+        "update_wall_time_s": float(update_wall_time_s),
+        "wall_time_s": float(wall_time_s),
+        "update_samples_per_second": float(batch_size / max(update_wall_time_s, 1e-9)),
+        "run_samples_per_second": float(trained_steps / max(wall_time_s, 1e-9)),
+        "gpu_peak_memory_allocated_mib": peak_allocated_mib,
+        "gpu_peak_memory_reserved_mib": peak_reserved_mib,
+    }
+
+
 def _safe_close(env: Any | None) -> None:
     if env is not None:
         env.close()
@@ -2104,9 +2134,13 @@ def train_rl_rerun_local_r1(
     done_buf = torch.zeros((rollout_steps, num_envs), device=device)
     value_buf = torch.zeros((rollout_steps, num_envs), device=device)
     next_done = torch.zeros(num_envs, device=device)
+    run_start_step = int(global_step)
+    run_start_time = time.perf_counter()
+    _reset_cuda_peak_memory()
     try:
         with trange(global_step, total_steps, initial=global_step, total=total_steps, desc=run_name) as progress:
             while global_step < total_steps:
+                update_start_time = time.perf_counter()
                 distance_values: list[float] = []
                 terminal_distances: list[float] = []
                 reward_values: list[float] = []
@@ -2233,6 +2267,15 @@ def train_rl_rerun_local_r1(
                     "batch_size": int(batch_size),
                     "minibatch_size": int(minibatch_size),
                 }
+                update_metrics.update(
+                    _rl_runtime_metrics(
+                        run_start_time=run_start_time,
+                        update_start_time=update_start_time,
+                        run_start_step=run_start_step,
+                        global_step=global_step,
+                        batch_size=batch_size,
+                    )
+                )
                 history.append(update_metrics)
                 write_json(history_path, {"recipe": recipe, "history": history})
                 checkpoint_state = {
@@ -2543,9 +2586,13 @@ def train_rl_rerun_local_r3(
     done_buf = torch.zeros((rollout_steps, num_envs), device=device)
     value_buf = torch.zeros((rollout_steps, num_envs), device=device)
     next_done = torch.zeros(num_envs, device=device)
+    run_start_step = int(global_step)
+    run_start_time = time.perf_counter()
+    _reset_cuda_peak_memory()
     try:
         with trange(global_step, total_steps, initial=global_step, total=total_steps, desc=run_name) as progress:
             while global_step < total_steps:
+                update_start_time = time.perf_counter()
                 distance_values: list[float] = []
                 terminal_distances: list[float] = []
                 action_delta_values: list[float] = []
@@ -2683,6 +2730,15 @@ def train_rl_rerun_local_r3(
                     "batch_size": int(batch_size),
                     "minibatch_size": int(minibatch_size),
                 }
+                update_metrics.update(
+                    _rl_runtime_metrics(
+                        run_start_time=run_start_time,
+                        update_start_time=update_start_time,
+                        run_start_step=run_start_step,
+                        global_step=global_step,
+                        batch_size=batch_size,
+                    )
+                )
                 history.append(update_metrics)
                 write_json(history_path, {"recipe": recipe, "history": history})
                 checkpoint_state = {
