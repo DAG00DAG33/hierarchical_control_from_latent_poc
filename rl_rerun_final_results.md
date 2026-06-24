@@ -61,6 +61,13 @@ single-env intermediate states are not vector-reset equivalent. Serious local
 RL therefore uses vector-consistent corpora collected with the same vector width
 used for reset/replay.
 
+The main `4096`-env RL corpus is already disjoint from the supervised low-level
+BC demonstrations by reset seed: the BC demos use `920001-921498`, while the
+main RL corpus uses vector batches seeded at `9800000` and `9800001`. The
+`512`-env disjoint-state R1 row below is an extra independent-state ablation,
+not the only disjoint-state RL test; its PPO batch is much smaller
+(`512 x 10 = 5120`) than the serious runs (`4096 x 10 = 40960`).
+
 ## Supervised Baselines
 
 The rerun retrained the VAE/high/low hierarchy from the regenerated data.

@@ -1516,3 +1516,41 @@ also weakening the claim: current evidence is a modest, not gate-passing,
 improvement. A final multi-seed claim would still need the third policy seed
 and a larger evaluation budget, but seed2 failed the cheap local final-distance
 screen and should not be promoted automatically without a new reason.
+
+## 2026-06-24 - RR-35: Clarify R1 environment count and disjoint-state status
+
+The last R1 ablation discussed in the chat was the `512`-stream disjoint-state
+run:
+
+```text
+data/rl_rerun/pusht_vector_state_demos_n512_b1.h5
+num_envs = 512
+rollout horizon = 10
+PPO batch = 5120 samples/update
+```
+
+That is much smaller than the serious aligned R1/R2/R3 setting:
+
+```text
+data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5
+num_envs = 4096
+rollout horizon = 10
+PPO batch = 40960 samples/update
+```
+
+However, the serious `4096`-env corpus is also disjoint from the supervised
+low-level BC trajectories in the important reset-seed sense:
+
+| corpus | reset/collection seed range |
+| --- | --- |
+| supervised BC demos, first 500 | `920001` to `920626` |
+| supervised BC demos, full 1200 | `920001` to `921498` |
+| main 4096-env RL corpus | `9800000`, `9800001` vector batches |
+| 4096-env validation corpus | `9900000` vector batch |
+| 512-env extra ablation corpus | `9700000` vector batch |
+
+Interpretation: the main 4096-env R1/R2/R3 runs already train RL on states
+different from the original supervised low-level training trajectories. The
+`512`-env disjoint run remains useful as an extra independent-state ablation,
+but its negative result should not be treated as the strongest possible PPO
+test because its batch is only one eighth of the serious `4096 x 10` setup.
