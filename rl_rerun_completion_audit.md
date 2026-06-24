@@ -164,4 +164,7 @@ Additional diagnostic conclusion:
    observation than from future goal alone, so the training label itself gives
    weak pressure for goal use. RR-53 formalizes the identifiability issue and
    recommends multi-step goal-reaching rollouts, counterfactual branch data, or
-   a goal-gated low-level architecture before any more expensive RL rerun.
+   a goal-gated low-level architecture before any more expensive RL rerun. RR-54
+   records this as `rl_rerun_goal_identifiable_next_plan.md`; the immediate next
+   code step is a Phase G1 multi-step local goal-reaching trainer with cheap
+   goal-sensitivity promotion gates before any serious run.

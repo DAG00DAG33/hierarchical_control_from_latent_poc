@@ -83,6 +83,7 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_condition_block_sensitivity_seed0_2048.json` | observation/goal/previous-action block sensitivity diagnostic |
 | `rl_rerun_action_block_prediction_seed0_8192_2048.json` | one-step teacher-action predictability by condition block |
 | `rl_rerun_goal_conditioning_identifiability.md` | synthesis note explaining why one-step deterministic labels weakly identify goal use |
+| `rl_rerun_goal_identifiable_next_plan.md` | concrete next-experiment plan with diagnostics and promotion gates |
 | `scripts/rl_rerun_goal_mismatch_audit.py` | reproducible learned-vs-oracle goal mismatch audit |
 | `scripts/rl_rerun_valid_goal_sensitivity.py` | reproducible same-state valid-goal sensitivity diagnostic |
 | `scripts/rl_rerun_condition_block_sensitivity.py` | reproducible condition-block sensitivity diagnostic |
@@ -311,6 +312,11 @@ has the same action label for same-trajectory goals at different horizons. The
 future goal is therefore not behaviorally identifiable unless training uses
 multi-step goal-reaching rollouts, counterfactual branch data, or a stronger
 goal-gated low-level formulation.
+
+The follow-up plan `rl_rerun_goal_identifiable_next_plan.md` makes this the next
+execution path. It requires cheap valid-goal and condition-block sensitivity
+gates to improve before another full 1.024M-transition RL run or final
+closed-loop evaluation.
 
 ## Gate Decisions
 

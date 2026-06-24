@@ -2401,3 +2401,32 @@ Next formulation change before more expensive RL:
    different reachable future goals and different desired behavior;
 3. use a goal-gated or goal-bottlenecked architecture and promote it only if the
    valid-goal sensitivity diagnostics improve before closed-loop deployment.
+
+## 2026-06-24 - RR-54: Goal-identifiable next-experiment plan
+
+Added the concrete follow-up plan:
+
+```text
+rl_rerun_goal_identifiable_next_plan.md
+```
+
+The plan turns RR-49 through RR-53 into execution gates. The immediate next code
+change should be Phase G1:
+
+```text
+train a low-level policy by rolling it for H=10 from exact local resets
+score the supplied future goal after the rollout
+promote only if valid-goal sensitivity diagnostics improve before closed-loop eval
+```
+
+Key promotion gates before a serious 1.024M-transition run:
+
+| Gate | Threshold |
+| --- | ---: |
+| goal-block shuffle action L2 | `>= 0.15` |
+| same-state `k=2` vs `k=10` action L2 | `>= 0.08` |
+| one-batch local final distance | no worse than frozen `+0.02` |
+| action saturation | `<= 5%` |
+
+This explicitly stops further small final-layer R3 variants unless they first
+change the goal-use diagnostics.
