@@ -1448,3 +1448,71 @@ rl_rerun_failure_videos/tuned/seed10005_step409600_success0_final0.201_max0.225.
 
 The set intentionally includes both successes and failures for frozen and tuned
 policies, so the action-level qualitative differences can be inspected directly.
+
+## 2026-06-24 - RR-34: R3 lower-LR seed1 confirmation
+
+The best seed0 R3 setting was a small direct update:
+
+```text
+R3 direct last-layer, N=500, lr=1e-5, bc_weight=1.0
+```
+
+To check whether the seed0 result was just a single-policy-seed artifact, ran
+the same serious `4096 x 10` local PPO setup for policy seed1.
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 1 --run-name aligned10_n4096_lr1e5_bc1_1m \
+  --steps 1024000 --bc-weight 1.0 --terminal-weight 1.0 \
+  --learning-rate 0.00001 --num-minibatches 8 --checkpoint-every-updates 5 --force
+```
+
+Configuration:
+
+| item | value |
+| --- | ---: |
+| environments | 4096 |
+| rollout horizon | 10 |
+| samples/update | 40960 |
+| total transitions | 1,024,000 |
+| learning rate | 1e-5 |
+| BC weight | 1.0 |
+
+Before the serious run, the cheap 10k local smoke screen was:
+
+| seed | frozen final distance | 10k tuned final distance | delta |
+| ---: | ---: | ---: | ---: |
+| 0 | 0.6073 | 0.6036 | -0.0037 |
+| 1 | 0.6299 | 0.6247 | -0.0051 |
+| 2 | 0.6836 | 0.6913 | +0.0078 |
+
+Seed1 passed the same cheap final-distance screen as seed0. Seed2 did not, so
+it has not been promoted to a serious `4096`-env run yet.
+
+Held-out 512-env local checkpoint selection for seed1:
+
+| checkpoint | final distance | reduction fraction | action delta |
+| ---: | ---: | ---: | ---: |
+| frozen BC | 0.6299 | 0.8379 | 0.0000 |
+| 204800 | 0.6310 | 0.8203 | 0.0026 |
+| 409600 | 0.6342 | 0.8379 | 0.0049 |
+| 614400 | 0.6171 | 0.8555 | 0.0045 |
+| 819200 | 0.6344 | 0.8359 | 0.0055 |
+| 1024000 | 0.6226 | 0.8477 | 0.0055 |
+
+The local-selected checkpoint is `614400`.
+
+Closed-loop paired evaluation on 100 deployment seeds:
+
+| seed | checkpoint | frozen success | tuned success | success delta | final reward delta | max reward delta | action delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.34 | 0.38 | +0.04 | +0.0307 | +0.0315 | 0.0045 |
+| 1 | 614400 | 0.39 | 0.40 | +0.01 | +0.0224 | +0.0156 | 0.0043 |
+
+Conclusion: the lower-LR R3 update remains positive on a second policy seed, but
+the deployment gain is smaller. This supports the direction of the result while
+also weakening the claim: current evidence is a modest, not gate-passing,
+improvement. A final multi-seed claim would still need the third policy seed
+and a larger evaluation budget, but seed2 failed the cheap local final-distance
+screen and should not be promoted automatically without a new reason.

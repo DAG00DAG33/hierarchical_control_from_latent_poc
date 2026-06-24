@@ -10,11 +10,16 @@ The best low-level RL variant was direct deterministic low-level last-layer
 tuning:
 
 ```text
-R3 direct last-layer, N=500, lr=1e-5, bc_weight=1.0, checkpoint 409600
+R3 direct last-layer, N=500, lr=1e-5, bc_weight=1.0
 ```
 
-It improved paired 100-episode closed-loop Push-T success from `0.34` to
-`0.38` on the same evaluation seeds.
+It improved paired 100-episode closed-loop Push-T success on the two serious
+policy seeds tested:
+
+| Policy seed | Selected checkpoint | Frozen success | Tuned success | Delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.34 | 0.38 | +0.04 |
+| 1 | 614400 | 0.39 | 0.40 | +0.01 |
 
 This is a positive signal, but it does not pass the original full-hierarchy
 gate of `+0.10` success.
@@ -79,7 +84,8 @@ uses paired 100-episode evaluation seeds.
 | R1 disjoint-state ablation | 500 | 512 | 1.024M | 0.5958 | 0.30 | -0.04 |
 | R2 residual flow low level | 500 | 4096 | 1.024M | 0.6267 | 0.23 | -0.05 vs flow base |
 | R3 direct last-layer, lr=3e-5 | 500 | 4096 | 1.024M | 0.5851 | 0.29 at local-best | -0.05 |
-| R3 direct last-layer, lr=1e-5 | 500 | 4096 | 1.024M | 0.5932 | 0.38 | +0.04 |
+| R3 direct last-layer, lr=1e-5, seed0 | 500 | 4096 | 1.024M | 0.5932 | 0.38 | +0.04 |
+| R3 direct last-layer, lr=1e-5, seed1 | 500 | 4096 | 1.024M | 0.6171 | 0.40 | +0.01 |
 
 The summary plot is:
 
@@ -121,12 +127,15 @@ penalized deviation from the frozen low-level action.
 
 `lr=3e-5` gave the best local final distance but overfit the local objective and
 hurt deployment. Reducing the direct learning rate to `1e-5` preserved a smaller
-local gain and improved closed-loop success:
+local gain and improved closed-loop success on two policy seeds:
 
-| Checkpoint | Frozen success | Tuned success | Final reward delta | Max reward delta |
-| ---: | ---: | ---: | ---: | ---: |
-| 409600 | 0.34 | 0.38 | +0.0307 | +0.0315 |
-| 819200 | 0.34 | 0.38 | +0.0272 | +0.0250 |
+| Seed | Checkpoint | Frozen success | Tuned success | Final reward delta | Max reward delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.34 | 0.38 | +0.0307 | +0.0315 |
+| 1 | 614400 | 0.39 | 0.40 | +0.0224 | +0.0156 |
+
+Seed2 failed the cheap 10k local final-distance screen (`0.6913` tuned versus
+`0.6836` frozen), so it has not been promoted to a serious `4096`-env run.
 
 ### N=1000 R3 Screen
 
@@ -152,9 +161,9 @@ failed.
 | RL correctness | Pass for local PPO setup | no task reward/progress in training; 10-step segment boundary |
 | R1 local gate | Fail | local gains far below 25% target |
 | R2 flow gate | Fail | flow base weak; residual degrades deployment |
-| R3 direct tuning | Positive but below final gate | `+0.04` success, not `+0.10` |
+| R3 direct tuning | Positive but below final gate | `+0.04` on seed0 and `+0.01` on seed1, not `+0.10` |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
-| Final multi-seed RL gate | Not run | current best single-seed result is positive but below gate |
+| Final multi-seed RL gate | Partial only | two serious policy seeds tested; third seed failed cheap screen; no 500-episode final eval |
 
 ## Interpretation
 
@@ -162,15 +171,15 @@ The rerun invalidates the earlier weak RL attempt as a definitive negative:
 using exact local resets and large vector batches matters. However, residual
 low-level PPO did not solve the problem. Directly tuning the deterministic
 low-level final layer is more promising and produced the first positive
-closed-loop RL result, but the improvement is modest and not yet robust enough
+closed-loop RL results, but the improvement is modest and not yet robust enough
 for a final claim.
 
 The current best scientific conclusion is:
 
 > Low-level RL can improve the learned-interface hierarchy slightly when it is
 > constrained to a small direct update of the deterministic low-level policy,
-> but the observed `+4` point success gain is below the planned gate and did not
-> reproduce in the cheap `N=1000` screen.
+> but the observed `+4` and `+1` point success gains are below the planned gate
+> and did not reproduce in the cheap `N=1000` screen.
 
 ## Remaining Instrumentation Gaps
 
