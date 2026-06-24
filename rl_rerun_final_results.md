@@ -78,7 +78,9 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_local_r3_n500_seed0_409k_learned_goal_100_seed50000.json` | matched learned-goal R3 seed0 comparison on oracle seed bank |
 | `rl_rerun_local_r3_n500_seed1_614k_learned_goal_100_seed50000.json` | matched learned-goal R3 seed1 comparison on oracle seed bank |
 | `rl_rerun_goal_sensitivity_summary_seed50000.json` | compact learned-vs-oracle goal-sensitivity summary |
+| `rl_rerun_valid_goal_sensitivity_seed0_2048.json` | same-state `k=9/10/11` valid-goal sensitivity diagnostic |
 | `scripts/rl_rerun_goal_mismatch_audit.py` | reproducible learned-vs-oracle goal mismatch audit |
+| `scripts/rl_rerun_valid_goal_sensitivity.py` | reproducible same-state valid-goal sensitivity diagnostic |
 | `rl_rerun_failure_videos/` | paired frozen/tuned deployment videos for the best R3 checkpoint |
 
 The single-env corpus replays exactly in a single-env CUDA simulator, but
@@ -276,6 +278,12 @@ action-L2 per unit of latent goal-L2, and R3 tuning does not increase this
 sensitivity relative to the frozen low level (`0.00118`). Goal mismatch and
 action change are correlated (`r=0.400`), but the action gain is very small.
 
+A stricter same-state diagnostic using same-trajectory future goals at
+`k=9/10/11` confirms the weak interface. The nearby valid future latents differ
+by mean L2 `~16`, but frozen and tuned low-level actions change only `~0.0085`
+L2. The RR-48 goal-sensitivity hinge smoke is indistinguishable from frozen on
+this metric.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -292,6 +300,7 @@ action change are correlated (`r=0.400`), but the action gain is very small.
 | Matched learned-vs-oracle goal check | Diagnostic only | same 100 eval seeds: tuned learned-goal success `0.330`, tuned replay-oracle success `0.380` |
 | Learned-vs-oracle goal mismatch | Diagnostic only | learned and oracle future latents differ by mean L2 `25.02`, but tuned action changes only `0.033` L2 |
 | Goal sensitivity | Diagnostic only | tuned action changes by only `0.00117` L2 per unit latent-goal L2; R3 does not improve this over frozen |
+| Same-state valid-goal sensitivity | Diagnostic only | same-trajectory `k=9/10/11` future latents differ by mean L2 `~16`, but actions change only `~0.0085` L2 |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 

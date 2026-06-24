@@ -2150,3 +2150,56 @@ Operational note: an initial `eval-local-r3 --episodes 4096` command was
 stopped because local evaluator `episodes` are vector reset batches. With the
 4096-env corpus, the correct one-batch check is `--episodes 1`, which still
 evaluates 4096 local episodes.
+
+## 2026-06-24 - RR-49: Same-state valid-goal sensitivity diagnostic
+
+Added a simulator-free valid-goal sensitivity diagnostic:
+
+```text
+scripts/rl_rerun_valid_goal_sensitivity.py
+```
+
+For each sampled current state from the vector teacher corpus, the script builds
+low-level conditions with same-trajectory future goals at `k=9`, `k=10`, and
+`k=11`, keeping the current state and previous action fixed. This is a cleaner
+goal-use diagnostic than RR-48's random in-batch swap because all compared goals
+come from the same teacher trajectory and are nearby reachable futures.
+
+Command:
+
+```text
+uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 --seed 0 --samples 2048 --batch-size 512 \
+  --horizons 9,10,11 \
+  --policy r3_lr1e5_409k=artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --policy r3_sensitivity_w10=artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt \
+  --output results/rl_rerun/valid_goal_sensitivity_seed0_2048.json
+```
+
+Tracked compact summary:
+
+```text
+rl_rerun_valid_goal_sensitivity_seed0_2048.json
+```
+
+Results over 2048 sampled states:
+
+| policy | `k=9` vs `k=10` action L2 | `k=11` vs `k=10` action L2 | action L2 per goal L2 |
+| --- | ---: | ---: | ---: |
+| frozen | 0.00858 | 0.00838 | 0.00049 |
+| R3 lr=1e-5 step 409600 | 0.00853 | 0.00833 | 0.00049 |
+| R3 sensitivity hinge smoke | 0.00858 | 0.00838 | 0.00049 |
+
+The same-state goal latent differences are large: mean `k=9` vs `k=10` goal L2
+is `16.48`, and mean `k=11` vs `k=10` goal L2 is `16.12`. Despite that, the
+low-level action changes are only about `0.0085` L2. The R3 selected checkpoint
+and the RR-48 sensitivity-hinge smoke are essentially indistinguishable from the
+frozen low level on this valid-goal metric.
+
+Interpretation: the low-level policy is not using nearby valid future latents as
+a strong control interface. The RR-48 random-swap hinge did not transfer to
+same-state `k±1` sensitivity. A more serious learned-interface attempt should
+change the low-level formulation or training data, not just add this hinge to
+the current final-layer R3 update.

@@ -1,0 +1,78 @@
+{
+  "experiment": "rl_rerun_valid_goal_sensitivity_seed0_2048",
+  "goal_l2": {
+    "k11_vs_k10": {
+      "max": 45.55133056640625,
+      "mean": 16.124150275507418,
+      "median": 16.524639129638672,
+      "p90": 23.791984367370606
+    },
+    "k9_vs_k10": {
+      "max": 42.52809143066406,
+      "mean": 16.480275010835612,
+      "median": 16.52657985687256,
+      "p90": 24.378646087646484
+    }
+  },
+  "horizons": [
+    9,
+    10,
+    11
+  ],
+  "interpretation": "For the same current state, teacher-trajectory future latents at k=9/10/11 differ by roughly 16 L2, but frozen and tuned low-level actions change by only about 0.008-0.010 L2. The R3 goal-sensitivity smoke does not improve this valid-goal metric.",
+  "policy_action_l2_mean": {
+    "frozen": {
+      "k11_vs_k10": 0.008380070475038082,
+      "k9_vs_k10": 0.008581499568613538,
+      "k9_vs_k11": 0.009864034586776427
+    },
+    "r3_lr1e5_409k": {
+      "k11_vs_k10": 0.008329564141245527,
+      "k9_vs_k10": 0.008532092080365317,
+      "k9_vs_k11": 0.009809091222862776
+    },
+    "r3_sensitivity_w10": {
+      "k11_vs_k10": 0.008380777380583737,
+      "k9_vs_k10": 0.008581821366327347,
+      "k9_vs_k11": 0.00986420068576166
+    }
+  },
+  "policy_action_l2_p90": {
+    "frozen": {
+      "k11_vs_k10": 0.017177901230752468,
+      "k9_vs_k10": 0.018087277375161647,
+      "k9_vs_k11": 0.0199331734329462
+    },
+    "r3_lr1e5_409k": {
+      "k11_vs_k10": 0.017070321924984456,
+      "k9_vs_k10": 0.017996255867183206,
+      "k9_vs_k11": 0.01984730884432792
+    },
+    "r3_sensitivity_w10": {
+      "k11_vs_k10": 0.017178460396826266,
+      "k9_vs_k10": 0.018078578636050224,
+      "k9_vs_k11": 0.01991903744637966
+    }
+  },
+  "policy_action_l2_per_goal_l2_mean": {
+    "frozen": {
+      "k11_vs_k10": 0.000494577880647995,
+      "k9_vs_k10": 0.0004926678402439322,
+      "k9_vs_k11": 0.0005149295307256274
+    },
+    "r3_lr1e5_409k": {
+      "k11_vs_k10": 0.0004916415605613622,
+      "k9_vs_k10": 0.0004897912801649085,
+      "k9_vs_k11": 0.0005120663363076261
+    },
+    "r3_sensitivity_w10": {
+      "k11_vs_k10": 0.0004946172704372032,
+      "k9_vs_k10": 0.0004926867302286198,
+      "k9_vs_k11": 0.0005149551430347898
+    }
+  },
+  "reference_horizon": 10,
+  "samples": 2048,
+  "script": "scripts/rl_rerun_valid_goal_sensitivity.py",
+  "source_result": "results/rl_rerun/valid_goal_sensitivity_seed0_2048.json"
+}
