@@ -264,6 +264,11 @@ action changes only weakly. The remaining bottleneck is therefore not just
 high-level prediction error; the low-level interface may also be too insensitive
 to the future-goal input.
 
+Aggregating all per-replan rows, the tuned action response is only `0.00117`
+action-L2 per unit of latent goal-L2, and R3 tuning does not increase this
+sensitivity relative to the frozen low level (`0.00118`). Goal mismatch and
+action change are correlated (`r=0.400`), but the action gain is very small.
+
 ## Gate Decisions
 
 | Gate | Decision | Evidence |
@@ -279,6 +284,7 @@ to the future-goal input.
 | Branch-oracle diagnostic | Bounded only | 100-episode replay-oracle seed results are `+0.01` and `+0.02`; exact replay error `0.0`; no final-budget gate claim |
 | Matched learned-vs-oracle goal check | Diagnostic only | same 100 eval seeds: tuned learned-goal success `0.330`, tuned replay-oracle success `0.380` |
 | Learned-vs-oracle goal mismatch | Diagnostic only | learned and oracle future latents differ by mean L2 `25.02`, but tuned action changes only `0.033` L2 |
+| Goal sensitivity | Diagnostic only | tuned action changes by only `0.00117` L2 per unit latent-goal L2; R3 does not improve this over frozen |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 

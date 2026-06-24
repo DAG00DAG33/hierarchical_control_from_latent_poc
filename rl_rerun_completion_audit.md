@@ -54,6 +54,7 @@ evaluation was not pursued.
 | Branch-oracle evaluation | bounded diagnostic only | 100-episode replay-oracle checks for two selected R3 seeds: deltas `+0.01` and `+0.02`, mean `+0.015`; replay state error `0.0`; no 500-episode gate claim |
 | Matched learned-vs-oracle seed bank | diagnostic only | on eval seeds `50000-50099`, tuned learned-goal mean success `0.330` versus tuned replay-oracle mean success `0.380`; suggests high-level goal quality remains a bottleneck |
 | Learned-vs-oracle goal mismatch | diagnostic only | 20-episode audits show mean future-goal L2 `25.02`, but tuned low-level action changes only `0.033` L2 when swapping learned goals for oracle goals |
+| Goal sensitivity | diagnostic only | tuned action response is `0.00117` L2 per unit latent-goal L2, essentially identical to frozen `0.00118`; R3 did not make the low-level more goal-sensitive |
 | Fast state-dict branch copy | fail for oracle use | current state/action parity is near `1e-6`, but 10-step same-action branch rollout still has mean future-goal L2 error `5.19`; replay remains the trusted oracle path |
 | RL wall-clock and GPU telemetry | implemented for future runs | R1/R2/R3 history writers now record update/run wall time, sample rates, and peak CUDA memory; verified by `telemetry_smoke_1update` |
 

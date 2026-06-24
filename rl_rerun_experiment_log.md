@@ -2035,3 +2035,38 @@ the current low-level interface also appears relatively insensitive to large
 goal changes. Improving the learned interface likely requires both better
 goal prediction and a low-level/controller formulation with stronger useful
 goal sensitivity.
+
+## 2026-06-24 - RR-46: Low-level goal-sensitivity summary
+
+Derived a compact sensitivity summary from the raw RR-45 per-replan rows.
+
+Tracked summary:
+
+```text
+rl_rerun_goal_sensitivity_summary_seed50000.json
+```
+
+Aggregate over both selected R3 checkpoints:
+
+| metric | mean | median | p90 | max |
+| --- | ---: | ---: | ---: | ---: |
+| learned-oracle goal L2 | 24.98 | 23.35 | 35.76 | 51.43 |
+| tuned action L2 learned-vs-oracle | 0.0334 | 0.0153 | 0.0697 | 0.539 |
+| frozen action L2 learned-vs-oracle | 0.0336 | 0.0155 | 0.0699 | 0.546 |
+| tuned action L2 per goal-L2 | 0.00117 | 0.000667 | 0.00216 | 0.0175 |
+| frozen action L2 per goal-L2 | 0.00118 | 0.000669 | 0.00216 | 0.0178 |
+
+Correlations:
+
+| relationship | correlation |
+| --- | ---: |
+| goal L2 versus tuned action L2 | 0.400 |
+| goal L2 versus frozen action L2 | 0.398 |
+
+Large goal mismatches do create larger action changes, but the gain is tiny.
+For goal mismatches above L2 `30`, tuned action L2 changes by only `0.076` on
+average. R3 tuning also does not materially increase goal sensitivity: frozen
+and tuned action-response statistics are nearly identical. This strengthens the
+interpretation that the low-level policy is mostly behaving like a current-state
+controller, with future goals acting as a weak modulation rather than a strong
+interface.

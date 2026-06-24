@@ -1,0 +1,117 @@
+{
+  "goal_thresholds": {
+    "goal_l2_ge_10": {
+      "count": 308,
+      "frozen_action_l2_mean": 0.033556650235285895,
+      "tuned_action_l2_mean": 0.03339329703545422
+    },
+    "goal_l2_ge_20": {
+      "count": 216,
+      "frozen_action_l2_mean": 0.04339693563761776,
+      "tuned_action_l2_mean": 0.04317308383933441
+    },
+    "goal_l2_ge_30": {
+      "count": 74,
+      "frozen_action_l2_mean": 0.07670076789863005,
+      "tuned_action_l2_mean": 0.07630745912713276
+    },
+    "goal_l2_ge_40": {
+      "count": 15,
+      "frozen_action_l2_mean": 0.09627780914306641,
+      "tuned_action_l2_mean": 0.09587331525981427
+    }
+  },
+  "method": "rl_rerun_goal_sensitivity_summary",
+  "metrics": {
+    "frozen_action_l2_learned_vs_oracle": {
+      "max": 0.5464978814125061,
+      "mean": 0.033556650235285895,
+      "median": 0.015450660604983568,
+      "p90": 0.06987605616450311
+    },
+    "learned_goal_displacement_l2": {
+      "max": 55.732975006103516,
+      "mean": 27.53388928438162,
+      "median": 27.265710830688477,
+      "p90": 37.46449241638184
+    },
+    "learned_oracle_goal_l2": {
+      "max": 51.426109313964844,
+      "mean": 24.98204368120664,
+      "median": 23.350913047790527,
+      "p90": 35.76161689758301
+    },
+    "oracle_goal_displacement_l2": {
+      "max": 51.410499572753906,
+      "mean": 27.137594201348044,
+      "median": 27.55902099609375,
+      "p90": 36.93152542114258
+    },
+    "tuned_action_l2_learned_vs_frozen": {
+      "max": 0.015440241433680058,
+      "mean": 0.004641994704018414,
+      "median": 0.004374448908492923,
+      "p90": 0.007434307876974346
+    },
+    "tuned_action_l2_learned_vs_oracle": {
+      "max": 0.5389527678489685,
+      "mean": 0.03339329703545422,
+      "median": 0.015341510530561209,
+      "p90": 0.06970281377434732
+    },
+    "tuned_action_l2_oracle_vs_frozen": {
+      "max": 0.015624983236193657,
+      "mean": 0.004621120839713855,
+      "median": 0.004393915645778179,
+      "p90": 0.007255743490532041
+    }
+  },
+  "rows": 308,
+  "sensitivity": {
+    "corr_goal_l2_frozen_action_l2": 0.3980046992583067,
+    "corr_goal_l2_tuned_action_l2": 0.40036905148391877,
+    "frozen_action_per_goal_l2": {
+      "max": 0.0177536925428455,
+      "mean": 0.0011756249856528518,
+      "median": 0.0006693386121039094,
+      "p90": 0.0021636461987376934
+    },
+    "tuned_action_per_goal_l2": {
+      "max": 0.017508579741929094,
+      "mean": 0.001170046895368795,
+      "median": 0.0006674687175042748,
+      "p90": 0.0021586004406661525
+    }
+  },
+  "source_files": [
+    "rl_rerun_local_r3_n500_seed0_409k_goal_mismatch_20_seed50000.json",
+    "rl_rerun_local_r3_n500_seed1_614k_goal_mismatch_20_seed50000.json"
+  ],
+  "step_bins": {
+    "0_20": {
+      "count": 80,
+      "goal_l2_mean": 26.200086903572082,
+      "tuned_action_l2_mean": 0.06429011517902836
+    },
+    "20_40": {
+      "count": 77,
+      "goal_l2_mean": 23.035976149819113,
+      "tuned_action_l2_mean": 0.018082415265508914
+    },
+    "40_60": {
+      "count": 63,
+      "goal_l2_mean": 23.499562732757084,
+      "tuned_action_l2_mean": 0.023525417800844897
+    },
+    "60_80": {
+      "count": 46,
+      "goal_l2_mean": 25.43429776896601,
+      "tuned_action_l2_mean": 0.02563196703609403
+    },
+    "80_101": {
+      "count": 42,
+      "goal_l2_mean": 27.958147344135103,
+      "tuned_action_l2_mean": 0.025914487905711645
+    }
+  }
+}
