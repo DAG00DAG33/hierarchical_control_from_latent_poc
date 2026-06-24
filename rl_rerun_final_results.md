@@ -70,6 +70,8 @@ development bank, but the two-seed fresh-bank mean is flat.
 | `rl_rerun_local_r3_n500_seed1_614k_closed_loop_500_seed20000.json` | tracked fresh 500-episode R3 seed1 evaluation |
 | `rl_rerun_local_r3_n500_seed0_409k_disturbed_100_seed30000.json` | tracked disturbed/recovery R3 seed0 diagnostic |
 | `rl_rerun_local_r3_n500_seed1_614k_disturbed_100_seed30000.json` | tracked disturbed/recovery R3 seed1 diagnostic |
+| `rl_rerun_local_r3_n500_seed0_409k_disturbed_500_seed40000.json` | tracked fresh 500-episode disturbed R3 seed0 evaluation |
+| `rl_rerun_local_r3_n500_seed1_614k_disturbed_500_seed40000.json` | tracked fresh 500-episode disturbed R3 seed1 evaluation |
 | `rl_rerun_failure_videos/` | paired frozen/tuned deployment videos for the best R3 checkpoint |
 
 The single-env corpus replays exactly in a single-env CUDA simulator, but
@@ -173,18 +175,21 @@ These larger fresh-bank results override the small development-bank optimism for
 the final deployment interpretation. Seed1 remains positive, but the two-seed
 fresh-bank mean is `0.299` tuned versus `0.301` frozen.
 
-The same two checkpoints were also evaluated on a 100-episode disturbed
-diagnostic bank with action-bias, action-hold, action-delay, and action-scaling
-perturbations:
+The same two checkpoints were also evaluated with action-bias, action-hold,
+action-delay, and action-scaling perturbations. The 100-episode diagnostic was
+positive, but the 500-episode disturbed bank was not:
 
-| Seed | Checkpoint | Frozen success | Tuned success | Success delta | Frozen recovery | Tuned recovery | Recovery delta |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 409600 | 0.32 | 0.33 | +0.01 | 0.29 | 0.31 | +0.02 |
-| 1 | 614400 | 0.30 | 0.35 | +0.05 | 0.29 | 0.32 | +0.03 |
-| mean | n/a | 0.31 | 0.34 | +0.03 | 0.29 | 0.315 | +0.025 |
+| Bank | Seed | Checkpoint | Frozen success | Tuned success | Success delta | Frozen recovery | Tuned recovery | Recovery delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| diagnostic 100 | 0 | 409600 | 0.32 | 0.33 | +0.01 | 0.29 | 0.31 | +0.02 |
+| diagnostic 100 | 1 | 614400 | 0.30 | 0.35 | +0.05 | 0.29 | 0.32 | +0.03 |
+| diagnostic 100 mean | n/a | n/a | 0.31 | 0.34 | +0.03 | 0.29 | 0.315 | +0.025 |
+| fresh 500 | 0 | 409600 | 0.292 | 0.260 | -0.032 | 0.284 | 0.254 | -0.030 |
+| fresh 500 | 1 | 614400 | 0.254 | 0.258 | +0.004 | 0.250 | 0.250 | 0.000 |
+| fresh 500 mean | n/a | n/a | 0.273 | 0.259 | -0.014 | 0.267 | 0.252 | -0.015 |
 
-This is a small positive recovery diagnostic, but it is only 100 episodes and
-does not override the clean fresh-bank deployment result.
+The 500-episode disturbed result matches the clean result: no robust deployment
+or recovery improvement.
 
 Seed2 failed the cheap 10k local final-distance screen (`0.6913` tuned versus
 `0.6836` frozen), so it has not been promoted to a serious `4096`-env run.
@@ -214,7 +219,7 @@ failed.
 | R1 local gate | Fail | local gains far below 25% target |
 | R2 flow gate | Fail | flow base weak; residual degrades deployment |
 | R3 direct tuning | No robust fresh deployment gain | fresh 500-bank deltas are `-0.024` and `+0.020`, mean `-0.002`; earlier `+0.04`/`+0.01` were development-bank results |
-| Disturbed/recovery diagnostic | Partial positive | 100-episode disturbed deltas `+0.01` and `+0.05`; recovery deltas `+0.02` and `+0.03` |
+| Disturbed/recovery gate | Fail | 500-episode disturbed mean success delta `-0.014`, recovery delta `-0.015`; 100-episode diagnostic was optimistic |
 | N=1000 confirmation | Not passed | smoke variants locally worse than frozen N=1000 |
 | Final multi-seed RL gate | Fail/incomplete | two fresh 500-episode banks average to `-0.002`; third seed failed cheap screen |
 
@@ -227,19 +232,18 @@ low-level final layer improves local latent reaching more reliably than the
 residual variants, but the closed-loop gain did not hold on fresh larger
 evaluation banks.
 
-The disturbed diagnostic is the one remaining positive signal: the tuned
-checkpoints improved disturbed success by about `+0.03` on average over two
-100-episode checks. That suggests possible recovery-specific value, but it is
-not enough to claim that the RL-tuned low level improves the deployable
-hierarchy.
+The disturbed/recovery result follows the same pattern as clean deployment:
+small-bank diagnostics can look positive, but the larger 500-episode bank does
+not support a benefit.
 
 The current best scientific conclusion is:
 
 > Low-level RL improved some local latent-reaching metrics and small
 > development-bank evaluations, but the current best R3 setting averages to no
-> improvement over two fresh 500-episode deployment evaluations. The current
-> evidence does not support using this low-level RL rerun as an improvement over
-> the frozen hierarchy.
+> improvement over two fresh 500-episode clean evaluations and is slightly worse
+> on two fresh 500-episode disturbed evaluations. The current evidence does not
+> support using this low-level RL rerun as an improvement over the frozen
+> hierarchy.
 
 ## Remaining Instrumentation Gaps
 

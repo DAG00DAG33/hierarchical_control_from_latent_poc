@@ -1731,3 +1731,47 @@ Interpretation: R3 has a small positive disturbed/recovery signal on the
 (`-0.002` mean success delta over two 500-episode checks), but it suggests the
 direct low-level update may help some recovery behavior even when it does not
 improve clean deployment.
+
+## 2026-06-24 - RR-40: Fresh 500-episode disturbed R3 evaluation
+
+The 100-episode disturbed diagnostic in RR-39 was positive, but it used the same
+small budget as the earlier development-bank clean checks. To test whether the
+recovery signal survives a larger fresh bank, ran 500 disturbed episodes for the
+two selected R3 checkpoints with `eval_seed_start=40000`.
+
+Commands:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000409600.pt \
+  --n-demo 500 --seed 0 --episodes 500 --eval-seed-start 40000 --num-envs 64 \
+  --disturbed \
+  --output results/rl_rerun/local_r3/n500/seed0/aligned10_n4096_lr1e5_bc1_1m/disturbed_step_000409600_500_seed40000.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/checkpoints/step_000614400.pt \
+  --n-demo 500 --seed 1 --episodes 500 --eval-seed-start 40000 --num-envs 64 \
+  --disturbed \
+  --output results/rl_rerun/local_r3/n500/seed1/aligned10_n4096_lr1e5_bc1_1m/disturbed_step_000614400_500_seed40000.json
+```
+
+Tracked result copies:
+
+```text
+rl_rerun_local_r3_n500_seed0_409k_disturbed_500_seed40000.json
+rl_rerun_local_r3_n500_seed1_614k_disturbed_500_seed40000.json
+```
+
+Final-budget disturbed results:
+
+| policy seed | checkpoint | frozen success | tuned success | success delta | frozen recovery | tuned recovery | recovery delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 409600 | 0.292 | 0.260 | -0.032 | 0.284 | 0.254 | -0.030 |
+| 1 | 614400 | 0.254 | 0.258 | +0.004 | 0.250 | 0.250 | 0.000 |
+| mean | n/a | 0.273 | 0.259 | -0.014 | 0.267 | 0.252 | -0.015 |
+
+Interpretation: the 100-episode disturbed positive was not stable. At the
+500-episode budget, disturbed success and recovery both average slightly worse
+for the tuned low level. The final RL rerun conclusion is now consistently
+negative/neutral for deployment: no clean improvement and no disturbed recovery
+improvement at 500 episodes.
