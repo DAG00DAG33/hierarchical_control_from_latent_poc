@@ -693,22 +693,57 @@ def evaluate_residual_rl(
     seed_start: int,
     candidate: str = VAE_CANDIDATE,
     checkpoint_path: Path | None = None,
+    ensemble_checkpoint_paths: list[Path] | None = None,
     distance_metric: str = "raw_l2",
     reachability_checkpoint_path: Path | None = None,
     force: bool = False,
 ) -> Path:
+    if checkpoint_path is not None and ensemble_checkpoint_paths:
+        raise ValueError("Use either checkpoint_path or ensemble_checkpoint_paths, not both")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     output = result / f"eval_{episodes}_seed{seed_start}.json"
     if output.exists() and not force:
         return output
     device = default_device()
     frozen = _load_frozen(config, n_demo, seed, device, candidate)
-    checkpoint_path = checkpoint_path or artifact / "latest.pt"
     residual_agent: ResidualActorCritic | None = None
     direct_agent: DirectLowActorCritic | None = None
+    direct_ensemble: list[DirectLowActorCritic] = []
     alpha = 0.0
     global_step = 0
-    if checkpoint_path.exists():
+    if ensemble_checkpoint_paths:
+        for index, ensemble_path in enumerate(ensemble_checkpoint_paths):
+            if not ensemble_path.exists():
+                raise FileNotFoundError(f"Ensemble checkpoint not found: {ensemble_path}")
+            raw_checkpoint = torch.load(ensemble_path, map_location="cpu", weights_only=False)
+            recipe = raw_checkpoint.get("recipe", {})
+            method = str(recipe.get("method", "r1_residual_deterministic"))
+            if method != "r3_direct_last_layer":
+                raise ValueError(
+                    "Low-level ensembles currently support only r3_direct_last_layer "
+                    f"checkpoints, got {method} for {ensemble_path}"
+                )
+            candidate_metric = str(recipe.get("distance_metric", "raw_l2"))
+            raw_reachability_checkpoint = recipe.get("reachability_checkpoint")
+            candidate_reachability_path = (
+                Path(str(raw_reachability_checkpoint))
+                if raw_reachability_checkpoint is not None
+                else None
+            )
+            if index == 0:
+                distance_metric = candidate_metric
+                reachability_checkpoint_path = candidate_reachability_path
+            elif (
+                candidate_metric != distance_metric
+                or candidate_reachability_path != reachability_checkpoint_path
+            ):
+                raise ValueError("All ensemble checkpoints must use the same distance metric")
+            agent, checkpoint = _load_direct(ensemble_path, frozen, device)
+            direct_ensemble.append(agent)
+            global_step = max(global_step, int(checkpoint["global_step"]))
+    else:
+        checkpoint_path = checkpoint_path or artifact / "latest.pt"
+    if not direct_ensemble and checkpoint_path is not None and checkpoint_path.exists():
         raw_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         recipe = raw_checkpoint.get("recipe", {})
         method = str(recipe.get("method", "r1_residual_deterministic"))
@@ -766,7 +801,16 @@ def evaluate_residual_rl(
             if current_segment_raw_initial is None:
                 raise RuntimeError("Raw segment distance state was not initialized")
             current_segment_raw_initial[replan] = raw_distance[replan]
-        if direct_agent is not None:
+        if direct_ensemble:
+            unclipped = torch.stack(
+                [
+                    agent.get_action_and_value(condition, deterministic=True)[0]
+                    for agent in direct_ensemble
+                ],
+                dim=0,
+            ).mean(dim=0)
+            residual = unclipped - base_action
+        elif direct_agent is not None:
             unclipped = direct_agent.get_action_and_value(condition, deterministic=True)[0]
             residual = unclipped - base_action
         else:
@@ -837,6 +881,9 @@ def evaluate_residual_rl(
         "run_name": run_name,
         "checkpoint": str(checkpoint_path)
         if (residual_agent is not None or direct_agent is not None)
+        else None,
+        "ensemble_checkpoints": [str(path) for path in ensemble_checkpoint_paths]
+        if ensemble_checkpoint_paths
         else None,
         "distance_metric": distance_metric,
         "reachability_checkpoint": str(reachability_checkpoint_path)

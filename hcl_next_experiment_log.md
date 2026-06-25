@@ -8029,3 +8029,75 @@ it is a selector/gating signal that can distinguish when the tuned low level is
 likely to help. The new per-episode reward arrays are a small step toward that
 diagnostic, but future evaluator work should also record compact initial-state
 and high-level goal features if we want to train an actual gate.
+
+## Effect32 FiLM R3 action-ensemble diagnostic
+
+The paired transition audit showed that the three R3 PPO seeds fail on
+different episodes. I tested a deployable variance-reduction baseline before
+building a more complex selector: average the deterministic action outputs of
+the three 40k R3 checkpoints at every control step.
+
+I added `--ensemble-checkpoints` to `low-level-rl eval`. It currently supports
+R3 direct-last-layer checkpoints with matching distance/reachability recipes.
+The evaluator loads each checkpoint and executes:
+
+```text
+a_ensemble(o, g, a_prev, tau) = mean_i a_i(o, g, a_prev, tau)
+```
+
+No new training is involved.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_ensemble3_final500_seed3500000 \
+  --episodes 500 \
+  --seed-start 3500000 \
+  --ensemble-checkpoints \
+    artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+    artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed1/best_train_latent.pt \
+    artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed2/best_train_latent.pt \
+  --distance-metric reachability \
+  --force
+```
+
+The same command was run with `seed_start=3600000`.
+
+### Two-bank result
+
+| policy | success values | mean success | mean max reward |
+| --- | --- | ---: | ---: |
+| frozen | 0.634, 0.662 | 0.648 | 0.749 |
+| R3 seed 0 | 0.684, 0.638 | 0.661 | 0.758 |
+| R3 seed 1 | 0.662, 0.646 | 0.654 | 0.749 |
+| R3 seed 2 | 0.610, 0.640 | 0.625 | 0.730 |
+| R3 action ensemble | 0.618, 0.650 | 0.634 | 0.738 |
+
+Paired against frozen over both banks:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| R3 action ensemble | 212 | 226 | -14 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_ensemble3_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_ensemble3_final500_seed3600000/eval_500_seed3600000.json`
+
+### Interpretation
+
+Naive action averaging does not solve the variance problem. It reduces action
+delta magnitude (`~0.0006`, smaller than each individual R3 seed), but it also
+reduces task success below frozen on the two-bank aggregate (`0.634` versus
+`0.648`). The R3 seed diversity is not a simple high-frequency noise problem
+that can be fixed by averaging actions.
+
+This strengthens the previous conclusion: robust improvement needs a state/goal
+conditioned gate or selector, not an unconditional ensemble. The ensemble eval
+path remains useful as a cheap baseline for future multi-checkpoint variants.

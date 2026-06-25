@@ -274,6 +274,9 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 seed_start=args.seed_start,
                 candidate=args.candidate,
                 checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+                ensemble_checkpoint_paths=[Path(path) for path in args.ensemble_checkpoints]
+                if args.ensemble_checkpoints
+                else None,
                 distance_metric=args.distance_metric,
                 reachability_checkpoint_path=Path(args.reachability_checkpoint)
                 if args.reachability_checkpoint
@@ -1925,6 +1928,7 @@ def build_parser() -> argparse.ArgumentParser:
     low_eval.add_argument("--episodes", type=int, required=True)
     low_eval.add_argument("--seed-start", type=int, required=True)
     low_eval.add_argument("--checkpoint")
+    low_eval.add_argument("--ensemble-checkpoints", nargs="+")
     low_eval.add_argument(
         "--distance-metric",
         choices=["raw_l2", "reachability"],
