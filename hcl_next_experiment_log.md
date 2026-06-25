@@ -10643,6 +10643,62 @@ is therefore not simply underweighted; the current formulation can move small
 goal-conditioned actions around, but it still does not create a robust
 learned-goal transfer improvement.
 
+## 2026-06-26 - Lower-BC sensitivity R3 tradeoff check
+
+I trained a one-update sensitivity variant that changes only the BC anchor from
+`1.0` to `0.3`, keeping the sensitivity weight/margin, dataset, terminal
+weight, learning rate, and logstd fixed:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name goal_sensitivity_w10_m005_1update_bc03_lr1e5_logstd4 \
+  --steps 40960 \
+  --bc-weight 0.3 \
+  --terminal-weight 1.0 \
+  --learning-rate 1e-5 \
+  --initial-logstd -4.0 \
+  --goal-sensitivity-weight 10.0 \
+  --goal-sensitivity-margin 0.05
+```
+
+Aligned one-batch local eval on `pusht_vector_state_demos_n4096_val_b1.h5`:
+
+| run | initial distance | final distance | reduction | action delta L2 | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BC 1.0, weight 10 | 0.8286 | 0.5738 | 0.2548 | 0.000845 | 0.0020 |
+| BC 0.3, weight 10 | 0.8286 | 0.5750 | 0.2536 | 0.000842 | 0.0020 |
+| BC 1.0, weight 30 | 0.8286 | 0.5751 | 0.2535 | 0.000834 | 0.0019 |
+
+Fresh learned-goal closed-loop transfer on `seed_start=4800000`:
+
+| run | frozen success | tuned success | success delta | max-reward delta | action delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BC 1.0, weight 10 | 0.306 | 0.324 | +0.018 | +0.0088 | 0.000973 |
+| BC 0.3, weight 10 | 0.306 | 0.288 | -0.018 | -0.0136 | 0.000958 |
+| BC 1.0, weight 30 | 0.306 | 0.332 | +0.026 | +0.0168 | 0.000977 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_1update_bc03_lr1e5_logstd4/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_1update_bc03_lr1e5_logstd4/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_1update_bc03_lr1e5_logstd4/eval_local_1batch_val_b1.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_1update_bc03_lr1e5_logstd4/closed_loop_learned_500_seed4800000.json`
+
+Interpretation:
+
+Relaxing the BC anchor to `0.3` does not create larger useful interventions.
+The aligned local eval is effectively unchanged, action delta is not larger,
+and the deployment check flips negative on the same window where the original
+`BC=1.0` sensitivity checkpoint was positive. This closes the simple
+"same sensitivity objective, weaker BC" branch for this checkpoint. The next
+meaningful change should alter the target formulation or representation rather
+than just scale BC/sensitivity coefficients.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:

@@ -592,6 +592,19 @@ The weight-30 run improved one window and regressed the other, with nearly
 identical action magnitude. The current sensitivity formulation appears useful
 as a harm-reduction diagnostic, but not sufficient as the main training target.
 
+I also tested loosening the BC anchor from `1.0` to `0.3` while keeping
+`goal_sensitivity_weight=10`. This did not create larger useful interventions:
+
+| run | seed 4800000 success delta | max-reward delta | action delta L2 |
+| --- | ---: | ---: | ---: |
+| BC 1.0, weight 10 | +0.018 | +0.0088 | 0.000973 |
+| BC 0.3, weight 10 | -0.018 | -0.0136 | 0.000958 |
+| BC 1.0, weight 30 | +0.026 | +0.0168 | 0.000977 |
+
+The aligned local eval was also nearly identical for `BC=1.0` and `BC=0.3`.
+So simple BC/sensitivity coefficient scaling is not enough; the next useful
+change should alter the target formulation or representation.
+
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.
 On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance
