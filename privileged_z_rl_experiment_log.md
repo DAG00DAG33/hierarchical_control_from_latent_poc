@@ -921,3 +921,66 @@ upper-bound story: residual alpha `0.25` on A clean n=1800 remains the only
 clear learned-high privileged RL gain so far; more direct paired training on
 hard local starts is not the next useful direction unless the local objective is
 made more task-aligned.
+
+## 2026-06-25 - PZ-14: Matched residual alpha025 validation
+
+PZ-12 identified A clean n=1800 residual alpha `0.25` as the only clear
+learned-high privileged RL gain, but that table used the older 100-episode
+window starting at `9940000`. To compare residual and direct paired on the same
+deployment window, I evaluated the residual checkpoint on
+`9900000..9900199`, matching PZ-13.
+
+Commands:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_residual/A_clean_n1800_residual_r1_n4096_alpha025/seed0/latest.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_residual/A_clean_n1800_residual_r1_n4096_alpha025/seed0/latest.pt \
+  --mode oracle_hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_oracle_seed9900000_200eps.json \
+  --force
+```
+
+Matched 200-episode comparison:
+
+| policy | mode | success | return | action delta/residual norm |
+| --- | --- | ---: | ---: | ---: |
+| base n=1800 clean | learned-high hierarchy | 0.560 | 44.74 | 0.0000 |
+| residual alpha025 | learned-high hierarchy | 0.555 | 44.24 | 0.0053 |
+| direct paired hard-start | learned-high hierarchy | 0.515 | 40.47 | 0.0102 |
+| base n=1800 clean | oracle-goal hierarchy | 0.720 | 48.69 | 0.0000 |
+| residual alpha025 | oracle-goal hierarchy | 0.725 | 49.01 | 0.0053 |
+| direct paired hard-start | oracle-goal hierarchy | 0.700 | 47.11 | 0.0143 |
+
+New artifacts:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_oracle_seed9900000_200eps.json`
+
+Interpretation:
+
+The residual alpha `0.25` checkpoint no longer shows a learned-high success
+gain on this matched 200-episode window: `0.560` frozen versus `0.555` residual.
+It is slightly positive in oracle-goal mode, `0.720` to `0.725`, and still much
+less harmful than direct paired hard-start tuning. The important update is that
+the previous 100-episode learned-high gain was not stable enough to treat as a
+privileged RL pass. The privileged-state sanity result is now: local RL can make
+small oracle-goal/local changes, but we still do not have a robust closed-loop
+improvement over the frozen privileged hierarchy.

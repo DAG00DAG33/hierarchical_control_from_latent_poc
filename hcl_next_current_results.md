@@ -326,28 +326,32 @@ robust policy improvement.
 ### Privileged-state sanity narrows the RL bottleneck
 
 The privileged-z experiments remain the upper-bound diagnostic where
-representation should not be the main bottleneck. The best positive result there
-is still the residual A-clean n=1800 run:
+representation should not be the main bottleneck. Earlier, the residual A-clean
+n=1800 run looked positive on a 100-episode window:
 
 | policy | learned-high success | oracle-goal success | note |
 | --- | ---: | ---: | --- |
 | frozen privileged-z n=1800 | 0.470 | 0.690 | 100-episode PZ window |
 | residual alpha 0.25 | 0.580 | 0.650 | improves learned-high, hurts oracle-goal |
 
-I also checked the stronger-looking direct paired hard-start checkpoint against
-a same-seed frozen baseline on `9900000..9900199`:
+I then checked both residual alpha `0.25` and the stronger-looking direct paired
+hard-start checkpoint against a same-seed frozen baseline on
+`9900000..9900199`:
 
 | policy | mode | success | return |
 | --- | --- | ---: | ---: |
 | frozen privileged-z n=1800 | learned-high | 0.560 | 44.74 |
+| residual alpha 0.25 | learned-high | 0.555 | 44.24 |
 | direct paired hard-start | learned-high | 0.515 | 40.47 |
 | frozen privileged-z n=1800 | oracle-goal | 0.720 | 48.69 |
+| residual alpha 0.25 | oracle-goal | 0.725 | 49.01 |
 | direct paired hard-start | oracle-goal | 0.700 | 47.11 |
 
-So privileged state confirms the idea is not completely dead, but the stronger
-direct paired local improvements still do not transfer. The current bottleneck
-is not only visual representation; it is the objective/deployment alignment of
-local RL updates.
+So privileged state confirms the idea is not completely dead, but neither the
+previous residual gain nor the stronger direct paired local improvements
+currently establish a robust learned-high deployment improvement. The current
+bottleneck is not only visual representation; it is the objective/deployment
+alignment of local RL updates.
 
 ## Current Best Policies
 
@@ -453,6 +457,8 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_p
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/paired_vs_frozen_serial50_seed4505000.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
+results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json
+results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_hierarchy_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_oracle_200eps.json
 ```
