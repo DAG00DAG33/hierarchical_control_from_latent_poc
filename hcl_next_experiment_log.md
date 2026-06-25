@@ -10279,6 +10279,42 @@ distribution. The next useful direction is therefore high-level/goal validity
 or oracle-to-learned goal robustness, not further scalar gates around the same
 learned-goal deployment.
 
+## 2026-06-26 - Fresh learned-vs-oracle transfer validation
+
+I repeated the 500-episode learned-vs-oracle split on a fresh closed-loop seed
+window, `seed_start=4700000`, for the same task-reward-debug local R3
+checkpoint.
+
+| seed start | goal source | frozen success | tuned success | success delta | frozen max reward | tuned max reward | max-reward delta |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4600000 | learned | 0.334 | 0.306 | -0.028 | 0.5061 | 0.4867 | -0.0194 |
+| 4600000 | oracle | 0.334 | 0.350 | +0.016 | 0.5160 | 0.5273 | +0.0113 |
+| 4700000 | learned | 0.304 | 0.276 | -0.028 | 0.4835 | 0.4679 | -0.0156 |
+| 4700000 | oracle | 0.314 | 0.340 | +0.026 | 0.5017 | 0.5185 | +0.0168 |
+
+Two-window aggregate:
+
+| goal source | mean success delta | mean max-reward delta |
+| --- | ---: | ---: |
+| learned | -0.028 | -0.0175 |
+| oracle | +0.021 | +0.0141 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_learned_500_seed4700000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_state_dict_500_seed4700000.json`
+
+Interpretation:
+
+The split replicated cleanly. The task-reward-debug local R3 update is
+consistently negative under learned goals across both 500-episode windows, but
+positive under privileged-teacher oracle goals. This makes the bottleneck more
+specific than "the residual policy is bad": it can improve the same low-level
+controller when the segment target is oracle-generated, and fails when deployed
+behind the learned high-level goal distribution. The next experiment should
+therefore change the goal regime or train for robustness to learned-goal error,
+rather than continue scalar fallback gates for the current learned-goal policy.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:
