@@ -697,12 +697,15 @@ def evaluate_residual_rl(
     distance_metric: str = "raw_l2",
     reachability_checkpoint_path: Path | None = None,
     residual_l2_gate_max: float | None = None,
+    selected_distance_gate_max: float | None = None,
     force: bool = False,
 ) -> Path:
     if checkpoint_path is not None and ensemble_checkpoint_paths:
         raise ValueError("Use either checkpoint_path or ensemble_checkpoint_paths, not both")
     if residual_l2_gate_max is not None and residual_l2_gate_max < 0.0:
         raise ValueError("residual_l2_gate_max must be non-negative")
+    if selected_distance_gate_max is not None and selected_distance_gate_max < 0.0:
+        raise ValueError("selected_distance_gate_max must be non-negative")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     output = result / f"eval_{episodes}_seed{seed_start}.json"
     if output.exists() and not force:
@@ -803,6 +806,7 @@ def evaluate_residual_rl(
     episode_initial_raw_distance: list[float] = []
     episode_initial_base_action_l2: list[float] = []
     episode_initial_env_reward: list[float] = []
+    episode_selected_distance_gate_rate: list[float] = []
     current_segment_initial: np.ndarray | None = None
     current_segment_raw_initial: np.ndarray | None = None
     current_final = np.zeros(num_envs, dtype=np.float32)
@@ -823,6 +827,8 @@ def evaluate_residual_rl(
     current_initial_raw_distance = np.full(num_envs, np.nan, dtype=np.float32)
     current_initial_base_action_l2 = np.full(num_envs, np.nan, dtype=np.float32)
     current_initial_env_reward = np.full(num_envs, np.nan, dtype=np.float32)
+    current_distance_gate_sum = np.zeros(num_envs, dtype=np.float32)
+    distance_gate_count = 0
     while len(successes) < episodes:
         condition, base_action, distance, replan = rollout.condition()
         raw_distance = rollout.raw_distance(rollout.current_latent, rollout.held_goal)
@@ -871,12 +877,21 @@ def evaluate_residual_rl(
             )
             residual = alpha * torch.tanh(raw_residual)
             unclipped = base_action + residual
+        distance_gate_np = np.zeros(num_envs, dtype=bool)
         if residual_l2_gate_max is not None:
             residual_norm_before_gate = torch.linalg.vector_norm(residual, dim=-1)
             use_base = residual_norm_before_gate > residual_l2_gate_max
             if bool(use_base.any()):
                 unclipped = torch.where(use_base[:, None], base_action, unclipped)
                 residual = torch.where(use_base[:, None], torch.zeros_like(residual), residual)
+        if selected_distance_gate_max is not None:
+            distance_gate_np = distance > selected_distance_gate_max
+            if bool(np.any(distance_gate_np)):
+                use_base = torch.from_numpy(distance_gate_np).to(device)
+                unclipped = torch.where(use_base[:, None], base_action, unclipped)
+                residual = torch.where(use_base[:, None], torch.zeros_like(residual), residual)
+        current_distance_gate_sum += distance_gate_np.astype(np.float32)
+        distance_gate_count += int(distance_gate_np.sum())
         action = torch.clamp(unclipped, rollout.action_low, rollout.action_high)
         saturated = torch.any(unclipped != action, dim=-1)
         saturation += int(saturated.sum().cpu())
@@ -976,6 +991,9 @@ def evaluate_residual_rl(
                     current_initial_base_action_l2[mask_np].tolist()
                 )
                 episode_initial_env_reward.extend(current_initial_env_reward[mask_np].tolist())
+                episode_selected_distance_gate_rate.extend(
+                    (current_distance_gate_sum[mask_np] / step_denominator).tolist()
+                )
                 current_max[mask_np] = -np.inf
                 current_residual_sum[mask_np] = 0.0
                 current_saturation_sum[mask_np] = 0.0
@@ -993,6 +1011,7 @@ def evaluate_residual_rl(
                 current_initial_raw_distance[mask_np] = np.nan
                 current_initial_base_action_l2[mask_np] = np.nan
                 current_initial_env_reward[mask_np] = np.nan
+                current_distance_gate_sum[mask_np] = 0.0
         if len(successes) >= episodes:
             break
     rollout.close()
@@ -1015,6 +1034,7 @@ def evaluate_residual_rl(
         if ensemble_checkpoint_paths
         else None,
         "residual_l2_gate_max": residual_l2_gate_max,
+        "selected_distance_gate_max": selected_distance_gate_max,
         "distance_metric": distance_metric,
         "reachability_checkpoint": str(reachability_checkpoint_path)
         if reachability_checkpoint_path is not None
@@ -1038,6 +1058,7 @@ def evaluate_residual_rl(
         "goal_threshold": threshold,
         "action_saturation_rate": saturation / max(action_count, 1),
         "residual_l2_mean": float(np.mean(residual_magnitudes)),
+        "selected_distance_gate_rate": distance_gate_count / max(action_count, 1),
         "episode_success": successes[:count],
         "episode_final_reward": finals[:count],
         "episode_max_reward": maxima[:count],
@@ -1055,6 +1076,7 @@ def evaluate_residual_rl(
         "episode_initial_raw_distance": episode_initial_raw_distance[:count],
         "episode_initial_base_action_l2": episode_initial_base_action_l2[:count],
         "episode_initial_env_reward": episode_initial_env_reward[:count],
+        "episode_selected_distance_gate_rate": episode_selected_distance_gate_rate[:count],
     }
     write_json(output, payload)
     return output

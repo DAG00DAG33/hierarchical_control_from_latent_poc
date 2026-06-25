@@ -162,6 +162,36 @@ The stronger diagnostic was mean selected distance along the R3 trajectory
 segment-level and observe current reachability-distance trouble during rollout.
 A one-shot episode gate from initial state alone is probably too weak.
 
+### Step-level distance gating also did not validate
+
+I added `--selected-distance-gate-max`, which falls back to the frozen base
+action whenever the current selected distance is above the threshold. A sweep on
+`seed_start=4100000` found one positive setting:
+
+| policy | success | fallback rate |
+| --- | ---: | ---: |
+| frozen | 0.656 | 0.000 |
+| R3 ungated | 0.618 | 0.000 |
+| selected-distance gate 0.85 | 0.664 | 0.175 |
+
+But a fresh 500-episode validation at `seed_start=4200000` did not hold:
+
+| policy | success | fallback rate |
+| --- | ---: | ---: |
+| frozen | 0.656 | 0.000 |
+| R3 ungated | 0.658 | 0.000 |
+| selected-distance gate 0.85 | 0.640 | 0.175 |
+
+Combined over these two 500-episode windows:
+
+| policy | success | improvements | regressions | net |
+| --- | ---: | ---: | ---: | ---: |
+| R3 ungated | 0.638 | 209 | 227 | -18 |
+| selected-distance gate 0.85 | 0.652 | 218 | 222 | -4 |
+
+So current-distance gating reduces harm, but like residual-L2 gating it remains
+mostly neutral and does not establish a robust improvement over frozen.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -192,9 +222,9 @@ The next useful directions are:
 1. Add a state/goal-aware gate.
    The eval path now records per-episode success, reward, residual magnitude,
    saturation, local progress, and compact pre-decision state/goal features.
-   Initial episode features are weak, so the next gate should be step-level or
-   segment-level and use current reachability-distance trouble as the fallback
-   signal.
+   Initial episode features and scalar current-distance gating are both weak.
+   A next gate should learn from multiple step/segment features rather than use
+   another hand-tuned one-dimensional threshold.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. A better objective should optimize
@@ -229,4 +259,8 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final1000_seed4000000/eval_1000_seed4000000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_predetail500_seed4100000/eval_500_seed4100000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_predetail500_seed4100000/eval_500_seed4100000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate085_final500_seed4100000/eval_500_seed4100000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_distgatecheck500_seed4200000/eval_500_seed4200000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgatecheck500_seed4200000/eval_500_seed4200000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate085_check500_seed4200000/eval_500_seed4200000.json
 ```

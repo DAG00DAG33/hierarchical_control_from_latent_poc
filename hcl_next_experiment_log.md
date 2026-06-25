@@ -8686,3 +8686,102 @@ observes current state/goal distance during rollout, not a one-shot episode
 gate from only initial state features. Scalar residual magnitude alone has
 already saturated; the better selector signal appears to be "current
 reachability-distance trouble" combined with conservative fallback to frozen.
+
+## Selected-distance step gate
+
+I added an eval-time `--selected-distance-gate-max` option. When the current
+selected distance is above the threshold, eval executes the frozen base action
+instead of the tuned action. Under `--distance-metric reachability`, this gates
+on the learned reachability distance. The eval JSON now records:
+
+- `selected_distance_gate_max`
+- `selected_distance_gate_rate`
+- `episode_selected_distance_gate_rate`
+
+### Threshold sweep on seed_start=4100000
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate085_final500_seed4100000 \
+  --episodes 500 \
+  --seed-start 4100000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --selected-distance-gate-max 0.85 \
+  --distance-metric reachability \
+  --force
+```
+
+The same command shape was run for thresholds `0.45`, `0.55`, `0.65`, `0.75`,
+and `0.85`.
+
+| policy | success | max reward | raw local reduction | reach rate | residual L2 | fallback rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.656 | 0.755 | 0.385 | 0.734 | 0.00000 | 0.000 |
+| R3 ungated | 0.618 | 0.728 | 0.393 | 0.718 | 0.00101 | 0.000 |
+| gate 0.45 | 0.642 | 0.741 | 0.399 | 0.714 | 0.00028 | 0.697 |
+| gate 0.55 | 0.618 | 0.727 | 0.387 | 0.719 | 0.00044 | 0.512 |
+| gate 0.65 | 0.620 | 0.729 | 0.379 | 0.718 | 0.00058 | 0.360 |
+| gate 0.75 | 0.624 | 0.730 | 0.396 | 0.715 | 0.00070 | 0.263 |
+| gate 0.85 | 0.664 | 0.762 | 0.418 | 0.727 | 0.00080 | 0.175 |
+
+Threshold `0.85` was the only sweep setting that beat frozen on this window.
+
+### Fresh validation on seed_start=4200000
+
+I fixed the threshold at `0.85` before evaluating a fresh 500-episode window.
+
+| policy | success | max reward | raw local reduction | reach rate | residual L2 | fallback rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.656 | 0.755 | 0.411 | 0.730 | 0.00000 | 0.000 |
+| R3 ungated | 0.658 | 0.752 | 0.408 | 0.730 | 0.00099 | 0.000 |
+| gate 0.85 | 0.640 | 0.741 | 0.384 | 0.720 | 0.00078 | 0.175 |
+
+Paired against frozen:
+
+| window | policy | improvements | regressions | net |
+| --- | --- | ---: | ---: | ---: |
+| 4100000 | R3 ungated | 99 | 118 | -19 |
+| 4100000 | gate 0.85 | 115 | 111 | +4 |
+| 4200000 | R3 ungated | 110 | 109 | +1 |
+| 4200000 | gate 0.85 | 103 | 111 | -8 |
+
+Combined over the two 500-episode windows:
+
+| policy | total episodes | success | improvements | regressions | net |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 1000 | 0.656 | - | - | - |
+| R3 ungated | 1000 | 0.638 | 209 | 227 | -18 |
+| gate 0.85 | 1000 | 0.652 | 218 | 222 | -4 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate045_final500_seed4100000/eval_500_seed4100000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate055_final500_seed4100000/eval_500_seed4100000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate065_final500_seed4100000/eval_500_seed4100000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate075_final500_seed4100000/eval_500_seed4100000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate085_final500_seed4100000/eval_500_seed4100000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_distgatecheck500_seed4200000/eval_500_seed4200000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgatecheck500_seed4200000/eval_500_seed4200000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate085_check500_seed4200000/eval_500_seed4200000.json`
+
+### Interpretation
+
+This selected-distance gate is useful instrumentation and reduces the worst R3
+damage on the combined two-window check, but it does not beat frozen. The fresh
+validation reversed the sweep-window gain. The result is similar to the
+residual-L2 gate: it can make R3 less harmful, but it is not a robust policy
+improvement.
+
+This weakens the case for hand-tuned one-dimensional gates. The next meaningful
+selector should either:
+
+- learn a multifeature segment/step selector from paired outcomes, using current
+  selected distance, raw distance, base-action norm, residual norm, and local
+  progress features; or
+- move back to the RL objective and create a larger, cleaner policy difference
+  before trying to gate it.
