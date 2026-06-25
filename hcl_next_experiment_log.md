@@ -9646,3 +9646,65 @@ question is learning dynamics/objective quality rather than branch mechanics.
 The next run should scale this cached paired local-R3 mode for several updates,
 track whether paired improvement becomes positive, and only then evaluate
 closed-loop deployment.
+
+## 2026-06-25 - Cached paired local-R3 3-update learning check
+
+I scaled the cached local-reset paired R3 mode to three 4096-env updates:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name paired_cached_n4096_3updates_bc1 \
+  --steps 122880 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --reward-mode paired \
+  --num-minibatches 8 \
+  --checkpoint-every-updates 1 \
+  --force
+```
+
+Training signal:
+
+| step | base terminal | tuned terminal | paired improvement | fraction improved | delta L2 | saturation |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 40960 | 0.5991 | 0.6089 | -0.0098 | 0.478 | 0.0293 | 0.0079 |
+| 81920 | 0.5991 | 0.6099 | -0.0107 | 0.476 | 0.0291 | 0.0075 |
+| 122880 | 0.6094 | 0.6245 | -0.0151 | 0.471 | 0.0292 | 0.0087 |
+
+Runtime was about 875s total, `~140` samples/s, with peak reserved GPU memory
+around 2.4 GiB. This confirms the cached-base formulation avoids the earlier
+paired-branch camera-memory failure at 4096 envs.
+
+Matched validation on
+`results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json`:
+
+| policy | initial distance | final distance | reduction | reduction fraction | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 1.0671 | 0.6020 | 0.4651 | 0.7969 | 0.0078 |
+| cached-paired R3 3 updates | 1.0671 | 0.6000 | 0.4671 | 0.7996 | 0.0079 |
+
+Validation delta vs frozen: final distance `-0.0020`, reduction fraction
+`+0.0027`. The improvement is tiny and far below a deployment-relevant effect,
+but it is directionally better than the one-update checkpoint.
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_3updates_bc1/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_3updates_bc1/eval_local_n4096_val_b1_manifest.json`
+
+Interpretation:
+
+The cached paired objective is now mechanically viable at the required 4096-env
+scale, but its training paired-improvement signal is negative across three
+updates and the held-out local improvement is only `0.002` final-distance units.
+This is not a useful RL improvement yet. If continuing this branch, the next
+change should not simply be "more of the same"; it should adjust the reward or
+optimization so training paired improvement becomes positive, for example by
+removing dense progress from paired mode, lowering the learning rate/action
+noise, or training/evaluating on a broader reset bank before attempting
+closed-loop deployment.

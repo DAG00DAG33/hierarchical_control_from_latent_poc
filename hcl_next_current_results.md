@@ -419,11 +419,14 @@ One 4096-env update is mechanically successful but not yet useful:
 | --- | ---: | ---: | ---: | ---: | ---: |
 | frozen local n500 | 4096 | - | - | - | 0.6020 |
 | cached-paired local R3 bc1 | 4096 | 40960 | -0.0098 | 0.478 | 0.6066 |
+| cached-paired local R3 bc1 | 4096 | 122880 | -0.0151 | 0.471 | 0.6000 |
 
 The matched validation manifest had identical initial distance (`1.0671`), so
-the one-update cached-paired policy is slightly worse than frozen locally. The
-implementation is now ready for a longer learning-dynamics check, but the first
-signal is negative.
+the one-update cached-paired policy was slightly worse than frozen locally. The
+three-update checkpoint was slightly better on the held-out local manifest
+(`final distance 0.6000` vs frozen `0.6020`), but the effect is tiny and the
+training paired-improvement signal became more negative across updates. This is
+mechanically useful infrastructure, not yet a convincing RL improvement.
 
 ## Current Best Policies
 
@@ -467,11 +470,12 @@ The next useful directions are:
    Paired terminal reward is cleaner and improved local raw reduction in the
    `bc=10` training window, but the 40k exact serial check was success-neutral.
    Cached local-reset paired reward is now implemented and avoids simultaneous
-   branch desync, but the first 4096-env update was slightly worse than frozen.
-   The next objective check should scale this cached mode for several updates
-   and stop early if paired improvement remains negative; otherwise move toward
-   a more task-aligned signal than local reachability-distance improvement
-   alone.
+   branch desync, but three 4096-env updates still showed negative training
+   paired improvement and only a tiny held-out local gain. The next objective
+   check should change the cached paired formulation, not simply scale it:
+   remove/retune dense progress in paired mode, lower LR/action noise, broaden
+   the reset bank, or move toward a more task-aligned signal than local
+   reachability-distance improvement alone.
    The privileged direct hard-start check shows that large selected-local gains
    can still hurt closed-loop deployment, so checkpoint selection needs
    deployment evidence or a better local-to-task proxy.
