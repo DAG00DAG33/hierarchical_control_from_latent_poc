@@ -277,6 +277,36 @@ BC1 increased mean raw local reduction but did not create a larger action shift
 or better task success. This points away from "just reduce BC weight" and toward
 changing the reward target/objective itself.
 
+### Paired terminal reward is the next objective candidate
+
+I added an R3 `--reward-mode paired` option that clones a frozen low-level
+branch at each synchronized segment start and rewards:
+
+```text
+base_next_distance - tuned_next_distance
+```
+
+This directly optimizes improvement over the frozen segment policy instead of
+absolute terminal distance. A first 10240-step diagnostic was small but
+positive:
+
+| run | mean paired improvement | improved segments | tuned terminal | base terminal | direct delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| paired R3 bc10 | 0.01234 | 0.522 | 0.5767 | 0.5890 | 0.0294 |
+
+On an exact 20-seed serial smoke window (`4504000..4504019`):
+
+| policy | success | improvements | regressions | net |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.500 | - | - | - |
+| paired R3 10k | 0.600 | 3 | 1 | +2 |
+
+This is not enough evidence to update the main best-policy claim, but it is the
+first reward-target change in this sequence with both a positive paired
+train-time signal and a matching small exact-serial task signal. The next
+compute should scale this paired objective to the 40k setting and validate on a
+larger exact serial window before broad vector eval.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -316,8 +346,9 @@ The next useful directions are:
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not
-   solve this. A better objective should optimize task-relevant local
-   improvement rather than absolute terminal `D_phi` distance.
+   solve this. The new paired terminal reward is the current best candidate:
+   scale it from the 10240-step diagnostic to the 40k setting and validate on
+   at least a 50-seed exact serial window.
 
 3. Revisit horizon/representation only after the gate/objective question.
    The current effect32 interface is goal-dependent, so the main bottleneck is
@@ -368,4 +399,7 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/paired_segments_vs_frozen_serial50_seed4503000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1/train_metrics.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1_serial50_seed4503000/serial_eval_50_seed4503000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/train_metrics.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/serial_eval_20_seed4504000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/paired_vs_frozen_serial20_seed4504000.json
 ```

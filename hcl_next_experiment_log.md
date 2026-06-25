@@ -9228,3 +9228,94 @@ local improvement but still more harmful than helpful paired segments.
 This suggests the current R3 formulation is not BC-weight limited at this scale.
 The next objective experiment should change the reward target itself, not just
 the BC coefficient.
+
+## 2026-06-25 - Paired terminal reward smoke
+
+After BC-weight reduction failed, I added an R3 `--reward-mode paired` option.
+Instead of rewarding absolute terminal selected distance, the tuned branch is
+compared against a frozen low-level branch cloned from the same segment start
+and held goal. The terminal reward is:
+
+```text
+base_next_distance - tuned_next_distance
+```
+
+This keeps the reward local, but removes the pressure to improve already-easy
+segments in absolute terms.
+
+### Smoke checks
+
+Implementation checks:
+
+```bash
+uv run ruff check src/hcl_poc/low_level_rl.py --select F,E501
+uv run python -m compileall -q src/hcl_poc/low_level_rl.py src/hcl_poc/cli.py
+```
+
+Both passed. A tiny 640-step smoke also completed and wrote paired metrics.
+
+I then ran one larger diagnostic update:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_paired_10240_bc10 \
+  --steps 10240 \
+  --num-envs 1024 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 3e-5 \
+  --initial-logstd -4.0 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --reward-mode paired \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Training metrics:
+
+| run | global step | mean paired improvement | improved segments | tuned terminal | base terminal | direct delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| paired R3 bc10 | 10240 | 0.01234 | 0.522 | 0.5767 | 0.5890 | 0.0294 |
+
+Small exact serial eval on `4504000..4504019`:
+
+| policy | success | raw local reduction | selected reduction | residual L2 |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.500 | 0.301 | 0.031 | 0.000000 |
+| paired R3 10k | 0.600 | 0.247 | 0.044 | 0.000983 |
+
+Exact paired counts:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| paired R3 10k | 3 | 1 | +2 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial20_seed4504000/serial_eval_20_seed4504000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/serial_eval_20_seed4504000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/paired_vs_frozen_serial20_seed4504000.json`
+
+### Interpretation
+
+The paired reward is a better objective candidate than simply lowering BC
+weight: it produced a positive train-time paired improvement and a small
+positive exact-serial success delta after only one diagnostic update. The sample
+is too small to call this a policy improvement, and the action shift is still
+tiny, but this is the first objective change in this sequence that directly
+optimizes improvement over the frozen segment policy and shows a matching
+positive small-window task signal.
+
+Next step: run a full 40k paired R3 train and validate on at least a 50-seed
+exact serial window before spending compute on broad vector eval.
