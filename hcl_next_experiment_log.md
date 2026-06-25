@@ -8246,3 +8246,92 @@ direction: a tiny action-delta gate reduces disruptive R3 updates while keeping
 much of the upside. The next validation should test nearby thresholds and more
 evaluation windows before promoting gated R3 as the best real-compatible
 policy.
+
+## Effect32 FiLM R3 residual-L2 gate third-bank validation
+
+I evaluated the same residual-L2 gate on a third fresh 500-episode bank
+(`seed_start=3700000`) to check whether the gate generalizes beyond the first
+held-out bank.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final500_seed3700000 \
+  --episodes 500 \
+  --seed-start 3700000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --residual-l2-gate-max 0.00121 \
+  --distance-metric reachability \
+  --force
+```
+
+Matched frozen and ungated R3 evals were also run on the same bank:
+
+- `hcl_next_effect32_dphi_frozen_final500_seed3700000`
+- `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3700000`
+
+### Three-bank result
+
+| eval seed start | policy | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | frozen | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.0000 |
+| 3500000 | R3 ungated | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | 0.0010 |
+| 3500000 | R3 residual gate | 0.684 | 0.773 | 0.398 | 0.733 | 0.806 | 0.0004 |
+| 3600000 | frozen | 0.662 | 0.760 | 0.389 | 0.725 | 0.805 | 0.0000 |
+| 3600000 | R3 ungated | 0.638 | 0.743 | 0.389 | 0.720 | 0.800 | 0.0010 |
+| 3600000 | R3 residual gate | 0.668 | 0.765 | 0.393 | 0.738 | 0.814 | 0.0004 |
+| 3700000 | frozen | 0.622 | 0.729 | 0.393 | 0.715 | 0.811 | 0.0000 |
+| 3700000 | R3 ungated | 0.638 | 0.740 | 0.399 | 0.714 | 0.789 | 0.0010 |
+| 3700000 | R3 residual gate | 0.650 | 0.746 | 0.389 | 0.719 | 0.792 | 0.0004 |
+
+Aggregate:
+
+| policy | success values | mean success | mean max reward |
+| --- | --- | ---: | ---: |
+| frozen | 0.634, 0.662, 0.622 | 0.639 | 0.743 |
+| R3 ungated | 0.684, 0.638, 0.638 | 0.653 | 0.752 |
+| R3 residual gate | 0.684, 0.668, 0.650 | 0.667 | 0.761 |
+
+Paired against frozen:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| R3 ungated | 338 | 317 | +21 |
+| R3 residual gate | 346 | 304 | +42 |
+
+Per-bank paired net:
+
+| eval seed start | R3 ungated net | R3 residual gate net |
+| ---: | ---: | ---: |
+| 3500000 | +25 | +25 |
+| 3600000 | -12 | +3 |
+| 3700000 | +8 | +14 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final500_seed3700000/eval_500_seed3700000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3700000/eval_500_seed3700000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final500_seed3700000/eval_500_seed3700000.json`
+
+### Interpretation
+
+The third bank supports the residual-L2 gate. The gate is positive on all three
+500-episode windows and doubles the paired net win count relative to ungated R3
+(`+42` versus `+21`). It also gives the best three-bank mean success observed
+for the real-compatible effect32 path so far:
+
+```text
+frozen:             0.639
+ungated R3 seed0:   0.653
+residual-gated R3:  0.667
+```
+
+This is still a modest effect, but it is now more stable than the ungated R3
+checkpoint. The next sensible check is a small threshold sweep around `0.00121`
+on held-out banks to ensure the gain is not an overly sharp threshold artifact.
