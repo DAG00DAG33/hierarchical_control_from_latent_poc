@@ -7953,3 +7953,79 @@ This revises the effect32 R3 conclusion:
 - future work should prioritize either better selection signals or a formulation
   that yields a larger effect size before spending more compute on long PPO
   training.
+
+## Effect32 FiLM R3 paired episode-transition audit
+
+The two-bank aggregate only shows mean success. Since the eval banks use matched
+episode order, I compared per-episode success transitions between frozen and
+each R3 PPO seed. This asks whether R3 consistently fixes frozen failures, or
+whether it trades off gains and regressions on different episodes.
+
+### Paired transitions versus frozen
+
+| eval seed start | policy | frozen fail -> tuned success | frozen success -> tuned fail | net paired wins |
+| ---: | --- | ---: | ---: | ---: |
+| 3500000 | R3 seed 0 | 127 | 102 | +25 |
+| 3500000 | R3 seed 1 | 123 | 109 | +14 |
+| 3500000 | R3 seed 2 | 103 | 115 | -12 |
+| 3600000 | R3 seed 0 | 102 | 114 | -12 |
+| 3600000 | R3 seed 1 | 105 | 113 | -8 |
+| 3600000 | R3 seed 2 | 98 | 109 | -11 |
+
+Combined over both 500-episode banks:
+
+| policy | improvements | regressions | net | discordant episodes | normal approx z |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| R3 seed 0 | 229 | 216 | +13 | 445 | 0.616 |
+| R3 seed 1 | 228 | 222 | +6 | 450 | 0.283 |
+| R3 seed 2 | 201 | 224 | -23 | 425 | -1.116 |
+
+### Multi-seed diversity upper bound
+
+The three R3 seeds are highly complementary, but without a selector this is not
+deployable:
+
+| constructed outcome over R3 seeds | combined success | improvements vs frozen | regressions vs frozen | net |
+| --- | ---: | ---: | ---: | ---: |
+| any R3 seed succeeds | 0.947 | 324 | 25 | +299 |
+| at least two R3 seeds succeed | 0.714 | 243 | 177 | +66 |
+| all R3 seeds succeed | 0.279 | 91 | 460 | -369 |
+
+The oracle `any R3 seed succeeds` number is not a policy; it is only an upper
+bound showing that the PPO seeds fail on different episodes. This is useful
+because it suggests there is real behavioral diversity, but the current
+evaluation artifacts do not contain enough per-episode state/reward detail to
+train a practical selector.
+
+### Evaluator schema update
+
+I updated `low-level-rl eval` to save:
+
+- `episode_final_reward`
+- `episode_max_reward`
+
+alongside the existing `episode_success`. A 20-episode schema smoke confirmed
+that the arrays are present and aggregate correctly:
+
+| field | length | mean |
+| --- | ---: | ---: |
+| episode_success | 20 | 0.400 |
+| episode_final_reward | 20 | 0.000 |
+| episode_max_reward | 20 | 0.549 |
+
+Artifact:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_detail_smoke_20_seed3700000/eval_20_seed3700000.json`
+
+### Interpretation
+
+The tuned R3 seeds do not consistently improve the same matched episodes. Each
+seed creates many wins, but nearly as many regressions. That explains why mean
+success is unstable across evaluation windows and why a small train-distance
+improvement is not enough to promote a recipe.
+
+The immediate next requirement for robust improvement is not a longer PPO run;
+it is a selector/gating signal that can distinguish when the tuned low level is
+likely to help. The new per-episode reward arrays are a small step toward that
+diagnostic, but future evaluator work should also record compact initial-state
+and high-level goal features if we want to train an actual gate.

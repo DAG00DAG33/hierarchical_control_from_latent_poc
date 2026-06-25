@@ -862,6 +862,8 @@ def evaluate_residual_rl(
         "action_saturation_rate": saturation / max(action_count, 1),
         "residual_l2_mean": float(np.mean(residual_magnitudes)),
         "episode_success": successes[:count],
+        "episode_final_reward": finals[:count],
+        "episode_max_reward": maxima[:count],
     }
     write_json(output, payload)
     return output
