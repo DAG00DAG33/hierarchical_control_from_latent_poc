@@ -2656,6 +2656,8 @@ def train_direct_low_rl(
             paired_improvements: list[float] = []
             delta_values: list[float] = []
             saturation_count = 0
+            paired_resync_events = 0
+            paired_desynced_envs = 0
             for step in range(rollout_steps):
                 condition, base_action, distance, replan = rollout.condition()
                 if base_rollout is not None:
@@ -2698,11 +2700,17 @@ def train_direct_low_rl(
                         0.0,
                         np.zeros(num_envs, dtype=np.float32),
                     )
-                    if not np.array_equal(metrics["segment_end"], base_metrics["segment_end"]):
-                        raise RuntimeError("paired branch segment boundaries diverged")
-                    if not np.array_equal(done.astype(bool), base_done.astype(bool)):
-                        raise RuntimeError("paired branch done flags diverged")
-                    segment_end = metrics["segment_end"].astype(bool)
+                    segment_mismatch = metrics["segment_end"] != base_metrics["segment_end"]
+                    done_mismatch = done.astype(bool) != base_done.astype(bool)
+                    desynced = np.logical_or(segment_mismatch, done_mismatch)
+                    if np.any(desynced):
+                        paired_resync_events += 1
+                        paired_desynced_envs += int(desynced.sum())
+                    segment_end = np.logical_and(
+                        metrics["segment_end"].astype(bool),
+                        base_metrics["segment_end"].astype(bool),
+                    )
+                    segment_end = np.logical_and(segment_end, ~desynced)
                     paired_improvement = (
                         base_metrics["next_distance"] - metrics["next_distance"]
                     ).astype(np.float32)
@@ -2715,6 +2723,8 @@ def train_direct_low_rl(
                         base_metrics["next_distance"][segment_end].tolist()
                     )
                     paired_improvements.extend(paired_improvement[segment_end].tolist())
+                    if np.any(desynced):
+                        base_rollout.copy_branch_from(rollout)
                 reward_buf[step] = torch.from_numpy(reward).to(device)
                 local_done = done.astype(bool)
                 if bool(config.get("low_level_rl.segment_terminates_gae", True)):
@@ -2818,6 +2828,12 @@ def train_direct_low_rl(
                 else None,
                 "fraction_paired_improved": float(np.mean(np.asarray(paired_improvements) > 0.0))
                 if paired_improvements
+                else None,
+                "paired_resync_events": paired_resync_events
+                if base_rollout is not None
+                else None,
+                "paired_desynced_envs": paired_desynced_envs
+                if base_rollout is not None
                 else None,
                 "mean_direct_delta_l2": float(np.mean(delta_values)),
                 "action_saturation_rate": saturation_count / batch_size,
