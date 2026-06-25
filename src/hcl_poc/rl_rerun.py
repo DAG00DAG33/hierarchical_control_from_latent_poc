@@ -2519,6 +2519,7 @@ def train_rl_rerun_local_r3(
     total_steps: int = 32_768,
     bc_weight: float = 1.0,
     terminal_weight: float = 1.0,
+    dense_progress_weight: float = 1.0,
     reward_mode: str = "progress",
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
@@ -2543,6 +2544,8 @@ def train_rl_rerun_local_r3(
         raise ValueError("goal_sensitivity_weight must be non-negative")
     if goal_sensitivity_margin <= 0:
         raise ValueError("goal_sensitivity_margin must be positive")
+    if dense_progress_weight < 0.0:
+        raise ValueError("dense_progress_weight must be non-negative")
     if reward_mode not in {"progress", "paired"}:
         raise ValueError("reward_mode must be one of {'progress', 'paired'}")
 
@@ -2672,6 +2675,8 @@ def train_rl_rerun_local_r3(
         )
     if reward_mode == "paired":
         recipe["reward_mode"] = reward_mode
+    if dense_progress_weight != 1.0:
+        recipe["dense_progress_weight"] = dense_progress_weight
     global_step = 0
     history: list[dict[str, Any]] = []
     if latest.exists() and not force:
@@ -2802,7 +2807,7 @@ def train_rl_rerun_local_r3(
         next_z = _encode_rerun_frames(frozen, next_frames, device)
         next_distance = np.mean(np.square(next_z - goal_z), axis=-1).astype(np.float32)
         segment_end = local_step == horizon - 1
-        reward = previous_distance - next_distance
+        reward = dense_progress_weight * (previous_distance - next_distance)
         if segment_end:
             if reward_mode == "paired":
                 reward += terminal_weight * (base_terminal_distance - next_distance)

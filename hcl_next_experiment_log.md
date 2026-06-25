@@ -9708,3 +9708,77 @@ optimization so training paired improvement becomes positive, for example by
 removing dense progress from paired mode, lowering the learning rate/action
 noise, or training/evaluating on a broader reset bank before attempting
 closed-loop deployment.
+
+## 2026-06-25 - Cached paired terminal-only local-R3 check
+
+I added `--dense-progress-weight` to `rl-rerun train-local-r3`, defaulting to
+`1.0` so existing progress and paired runs keep their old recipe unless the
+argument is explicitly set. This lets cached paired local-R3 train on terminal
+paired improvement only:
+
+```bash
+uv run hcl-poc rl-rerun train-local-r3 ... \
+  --reward-mode paired \
+  --dense-progress-weight 0.0
+```
+
+I first ran a 512-env smoke. It completed and recorded
+`dense_progress_weight=0.0` in the recipe.
+
+Then I ran the 4096-env terminal-only paired check by resuming the same run to
+three updates:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name paired_cached_terminalonly_n4096_1update_bc1 \
+  --steps 122880 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --dense-progress-weight 0.0 \
+  --reward-mode paired \
+  --num-minibatches 8 \
+  --checkpoint-every-updates 1
+```
+
+Training signal compared with the dense-progress cached paired run:
+
+| mode | step | paired improvement | fraction improved | terminal distance | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense progress | 40960 | -0.0098 | 0.478 | 0.6089 | 0.0293 |
+| dense progress | 81920 | -0.0107 | 0.476 | 0.6099 | 0.0291 |
+| dense progress | 122880 | -0.0151 | 0.471 | 0.6245 | 0.0292 |
+| terminal only | 40960 | -0.0098 | 0.478 | 0.6089 | 0.0293 |
+| terminal only | 81920 | -0.0067 | 0.487 | 0.6058 | 0.0293 |
+| terminal only | 122880 | -0.0103 | 0.482 | 0.6094 | 0.0292 |
+
+Terminal-only paired training improved the on-policy paired metric relative to
+dense-progress paired mode, but it was still negative.
+
+Matched validation on
+`results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json`:
+
+| policy | initial distance | final distance | reduction | reduction fraction |
+| --- | ---: | ---: | ---: | ---: |
+| frozen n500 | 1.0671 | 0.6020 | 0.4651 | 0.7969 |
+| dense-progress cached paired 3 updates | 1.0671 | 0.6000 | 0.4671 | 0.7996 |
+| terminal-only cached paired 3 updates | 1.0671 | 0.6086 | 0.4585 | 0.7896 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_1update_bc1/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_1update_bc1/eval_local_n4096_val_b1_manifest.json`
+
+Interpretation:
+
+Removing dense progress makes the training objective more purely paired and
+less negative, but it hurts held-out local validation after three updates. Dense
+progress is not the sole cause of the weak cached-paired result. The remaining
+failure looks like a weak/unstable local optimization signal: action changes
+stay tiny, paired improvement remains below zero, and held-out effects are at
+the noise scale. Next objective work should try lower LR/noise or broader reset
+coverage, but this branch still does not justify closed-loop deployment.

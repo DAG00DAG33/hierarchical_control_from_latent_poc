@@ -418,15 +418,18 @@ One 4096-env update is mechanically successful but not yet useful:
 | run | envs | steps | train paired improvement | train fraction improved | validation final distance |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | frozen local n500 | 4096 | - | - | - | 0.6020 |
-| cached-paired local R3 bc1 | 4096 | 40960 | -0.0098 | 0.478 | 0.6066 |
-| cached-paired local R3 bc1 | 4096 | 122880 | -0.0151 | 0.471 | 0.6000 |
+| cached-paired local R3 bc1 dense | 4096 | 40960 | -0.0098 | 0.478 | 0.6066 |
+| cached-paired local R3 bc1 dense | 4096 | 122880 | -0.0151 | 0.471 | 0.6000 |
+| cached-paired local R3 bc1 terminal-only | 4096 | 122880 | -0.0103 | 0.482 | 0.6086 |
 
 The matched validation manifest had identical initial distance (`1.0671`), so
 the one-update cached-paired policy was slightly worse than frozen locally. The
-three-update checkpoint was slightly better on the held-out local manifest
-(`final distance 0.6000` vs frozen `0.6020`), but the effect is tiny and the
-training paired-improvement signal became more negative across updates. This is
-mechanically useful infrastructure, not yet a convincing RL improvement.
+three-update dense-progress checkpoint was slightly better on the held-out local
+manifest (`final distance 0.6000` vs frozen `0.6020`), but the effect is tiny
+and the training paired-improvement signal became more negative across updates.
+Terminal-only paired training improved the training paired metric relative to
+dense progress, but failed held-out validation. This is mechanically useful
+infrastructure, not yet a convincing RL improvement.
 
 ## Current Best Policies
 
@@ -471,11 +474,12 @@ The next useful directions are:
    `bc=10` training window, but the 40k exact serial check was success-neutral.
    Cached local-reset paired reward is now implemented and avoids simultaneous
    branch desync, but three 4096-env updates still showed negative training
-   paired improvement and only a tiny held-out local gain. The next objective
-   check should change the cached paired formulation, not simply scale it:
-   remove/retune dense progress in paired mode, lower LR/action noise, broaden
-   the reset bank, or move toward a more task-aligned signal than local
-   reachability-distance improvement alone.
+   paired improvement and only a tiny held-out local gain. Terminal-only paired
+   reward improved the training signal but regressed validation. The next
+   objective check should change the optimization/data regime, not simply scale
+   the same formulation: lower LR/action noise, broaden the reset bank, or move
+   toward a more task-aligned signal than local reachability-distance
+   improvement alone.
    The privileged direct hard-start check shows that large selected-local gains
    can still hurt closed-loop deployment, so checkpoint selection needs
    deployment evidence or a better local-to-task proxy.
