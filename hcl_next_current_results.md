@@ -543,24 +543,28 @@ nearest-neighbor test. The low-level remains the sharper failure: even a large
 predicted-vs-replay goal difference causes only a tiny action change.
 
 An existing R3 checkpoint trained with explicit goal-swap sensitivity
-regularization is now the first positive `rl-rerun` learned-goal transfer lead:
+regularization initially looked like the first positive `rl-rerun` learned-goal
+transfer lead:
 
 ```text
 artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt
 ```
 
-Fresh closed-loop checks:
+Broader fresh closed-loop checks:
 
 | seed start | goal source | frozen success | tuned success | success delta | max-reward delta |
 | ---: | --- | ---: | ---: | ---: | ---: |
 | 4800000 | learned | 0.306 | 0.324 | +0.018 | +0.0088 |
 | 4800000 | oracle | 0.328 | 0.340 | +0.012 | +0.0068 |
 | 4900000 | learned | 0.294 | 0.296 | +0.002 | +0.0040 |
+| 5000000 | learned | 0.340 | 0.342 | +0.002 | +0.0009 |
+| 5100000 | learned | 0.306 | 0.286 | -0.020 | -0.0099 |
 
-Across the two learned-goal windows, the mean delta is `+0.010` success and
-`+0.0064` max reward. This is small, but it is the first positive fresh-window
-sign for the VAE512 `rl-rerun` learned-goal branch and is directionally better
-than the task-reward-debug checkpoint.
+Across the four learned-goal windows, the mean delta is only `+0.001` success
+and `+0.0010` max reward. This is effectively neutral, not a robust policy
+improvement. It is still better than the task-reward-debug checkpoint's
+negative learned-goal transfer, but it should be treated as a diagnostic lead
+rather than a deployable improvement.
 
 I trained a five-update version of the same sensitivity objective. It stayed
 positive on the checked learned-goal window, but was weaker than the one-update
@@ -571,8 +575,10 @@ checkpoint:
 | one-update sensitivity, seed 4800000 | +0.018 | +0.0088 | 0.000973 |
 | five-update sensitivity, seed 4800000 | +0.004 | +0.0017 | 0.002954 |
 
-So the current lead is the one-update sensitivity checkpoint, not simply longer
-training of the same local objective.
+So the current conclusion is narrower: sensitivity regularization reduces the
+damage relative to the task-reward-debug branch, but neither the one-update nor
+the five-update sensitivity checkpoint establishes reliable learned-goal
+improvement.
 
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.

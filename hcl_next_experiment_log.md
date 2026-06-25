@@ -10523,6 +10523,53 @@ For now, the one-update sensitivity checkpoint remains the best VAE512
 the same objective; it should either tune the sensitivity target/BC tradeoff or
 validate the one-update checkpoint on more deployment windows.
 
+## 2026-06-26 - Broader validation of one-update sensitivity R3
+
+I added two more fresh learned-goal 500-episode windows for the one-update
+goal-sensitivity checkpoint:
+
+```text
+artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt
+```
+
+Four-window learned-goal transfer:
+
+| seed start | frozen success | tuned success | success delta | frozen max reward | tuned max reward | max-reward delta | action delta L2 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4800000 | 0.306 | 0.324 | +0.018 | 0.4954 | 0.5042 | +0.0088 | 0.000973 |
+| 4900000 | 0.294 | 0.296 | +0.002 | 0.4793 | 0.4833 | +0.0040 | 0.000940 |
+| 5000000 | 0.340 | 0.342 | +0.002 | 0.5155 | 0.5165 | +0.0009 | 0.000965 |
+| 5100000 | 0.306 | 0.286 | -0.020 | 0.4851 | 0.4752 | -0.0099 | 0.000969 |
+
+Aggregate:
+
+| metric | mean |
+| --- | ---: |
+| success delta | +0.001 |
+| max-reward delta | +0.0010 |
+| action delta L2 | 0.000962 |
+| action saturation rate | 0.0477 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/closed_loop_learned_500_seed5000000.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/closed_loop_learned_500_seed5100000.json`
+
+Interpretation:
+
+The sensitivity-regularized checkpoint is not a robust learned-goal improvement
+after broader validation. The first two fresh windows looked positive, but the
+fourth window is negative enough to reduce the four-window mean to essentially
+neutral. This is still better than the task-reward-debug checkpoint's clearly
+negative learned-goal transfer, but it is not evidence of a deployable policy
+improvement.
+
+The practical conclusion changes again: goal-sensitivity regularization is a
+useful diagnostic and may reduce harm, but this specific one-update recipe
+should be treated as neutral. The next experiment should adjust the
+sensitivity/BC tradeoff or representation/conditioning, with deployment
+validation as the primary selector.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:
