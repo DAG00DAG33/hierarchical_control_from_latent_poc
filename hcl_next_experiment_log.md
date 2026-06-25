@@ -8503,3 +8503,81 @@ The next useful work should either:
 - validate the gate on a larger final bank after fixing the threshold, or
 - improve the gate from a scalar action-delta threshold to a state/goal-aware
   selector trained from the per-episode diagnostics now emitted by eval.
+
+## Effect32 FiLM R3 residual-L2 gate fresh 1000-episode check
+
+After selecting and validating the `0.00121` residual-L2 gate on five
+500-episode windows, I ran a larger fresh 1000-episode check at
+`seed_start=4000000`. This is a stricter final-style check because the gate
+threshold was already fixed before this bank was evaluated.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final1000_seed4000000 \
+  --episodes 1000 \
+  --seed-start 4000000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --residual-l2-gate-max 0.00121 \
+  --distance-metric reachability \
+  --force
+```
+
+Matched frozen and ungated R3 runs were evaluated on the same seed window:
+
+- `hcl_next_effect32_dphi_frozen_final1000_seed4000000`
+- `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final1000_seed4000000`
+
+### Result
+
+| policy | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.667 | 0.761 | 0.409 | 0.720 | 0.804 | 0.0000 |
+| R3 ungated | 0.632 | 0.733 | 0.395 | 0.708 | 0.809 | 0.0010 |
+| R3 residual gate | 0.643 | 0.744 | 0.392 | 0.716 | 0.812 | 0.0004 |
+
+Paired against frozen:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| R3 ungated | 212 | 247 | -35 |
+| R3 residual gate | 210 | 234 | -24 |
+
+Combining the earlier five 500-episode banks with this fresh 1000-episode bank
+gives a total of 3500 matched episodes:
+
+| policy | total episodes | success |
+| --- | ---: | ---: |
+| frozen | 3500 | 0.656 |
+| R3 ungated | 3500 | 0.646 |
+| R3 residual gate | 3500 | 0.657 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final1000_seed4000000/eval_1000_seed4000000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final1000_seed4000000/eval_1000_seed4000000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final1000_seed4000000/eval_1000_seed4000000.json`
+
+### Interpretation
+
+This is a negative final-style validation. The residual-L2 gate reduces the
+damage relative to ungated R3 on this fresh 1000-episode window, but it still
+underperforms frozen (`0.643` versus `0.667`). Over all 3500 matched episodes,
+gated R3 is effectively tied with frozen (`0.657` versus `0.656`), while
+ungated R3 is worse (`0.646`).
+
+This revises the previous promotion:
+
+- the residual gate is diagnostically useful and does reduce R3 regressions;
+- it is not robust enough to claim a real deployment improvement over frozen;
+- the effect32 R3 result should be reported as "small, unstable, and mostly
+  neutral after final-style validation";
+- the next meaningful step is a state/goal-aware selector or a different
+  objective that creates larger action improvements, not more scalar threshold
+  tuning.
