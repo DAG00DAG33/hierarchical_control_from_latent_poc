@@ -476,6 +476,12 @@ current local R3 update transfer. The problem is not only raw latent distance;
 the current one-segment local update/selection loop is not deployment-aligned
 enough.
 
+The `rl-rerun` closed-loop evaluator now emits per-episode action-delta,
+policy-saturation, replan goal-distance, and high-level-decision diagnostics
+alongside episode success/reward. This does not improve the policy by itself,
+but it is the right substrate for the next gate: any selector should be fit and
+validated against paired closed-loop wins/regressions, not local reset metrics.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:

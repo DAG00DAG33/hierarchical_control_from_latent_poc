@@ -3561,6 +3561,12 @@ def evaluate_rl_rerun_closed_loop_r1(
         final_rewards: list[float] = []
         max_rewards: list[float] = []
         residual_norms: list[float] = []
+        episode_action_delta_l2_mean: list[float] = []
+        episode_action_delta_l2_max: list[float] = []
+        episode_policy_saturation_rate: list[float] = []
+        episode_goal_l2_initial: list[float] = []
+        episode_goal_l2_mean: list[float] = []
+        episode_high_level_decisions: list[float] = []
         recovered: list[float] = []
         recovery_times: list[int] = []
         replay_errors: list[float] = []
@@ -3634,6 +3640,14 @@ def evaluate_rl_rerun_closed_loop_r1(
             recovery_time_batch = np.full(batch_envs, -1, dtype=np.int32)
             batch_final = np.zeros(batch_envs, dtype=np.float32)
             batch_max = np.full(batch_envs, -np.inf, dtype=np.float32)
+            current_action_delta_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_action_delta_max = np.zeros(batch_envs, dtype=np.float32)
+            current_policy_saturation_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_action_count = np.zeros(batch_envs, dtype=np.float32)
+            current_goal_l2_initial = np.full(batch_envs, np.nan, dtype=np.float32)
+            current_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_goal_l2_count = np.zeros(batch_envs, dtype=np.float32)
+            current_high_decisions = np.zeros(batch_envs, dtype=np.float32)
             policy_action_history: list[np.ndarray] = []
             previous_executed = np.zeros((batch_envs, 3), dtype=np.float32)
             bias_noise = np.zeros_like(previous_executed)
@@ -3728,6 +3742,25 @@ def evaluate_rl_rerun_closed_loop_r1(
                             )
                         countdown[replan] = frozen.update_period
                         high_decisions += int(np.sum(replan))
+                        replan_indices = np.flatnonzero(replan)
+                        current_high_decisions[replan_indices] += 1.0
+                        current_goal_for_distance = _encode_rerun_frames(
+                            frozen,
+                            frames,
+                            device,
+                        )
+                        goal_l2 = np.linalg.norm(
+                            current_goal_for_distance[replan] - held_goal[replan],
+                            axis=-1,
+                        ).astype(np.float32)
+                        current_goal_l2_sum[replan_indices] += goal_l2
+                        current_goal_l2_count[replan_indices] += 1.0
+                        missing_initial = np.isnan(
+                            current_goal_l2_initial[replan_indices]
+                        )
+                        current_goal_l2_initial[
+                            replan_indices[missing_initial]
+                        ] = goal_l2[missing_initial]
 
                     if frozen.conditioning in {"delta", "relation"} or (
                         use_residual and not is_direct and residual_condition_mode != "full"
@@ -3805,6 +3838,30 @@ def evaluate_rl_rerun_closed_loop_r1(
                         )
                     else:
                         unclipped = base_action
+                    action_delta_np = (
+                        torch.linalg.vector_norm(unclipped - base_action, dim=-1)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32)
+                    )
+                    policy_saturation_np = (
+                        torch.any(
+                            unclipped != torch.clamp(unclipped, action_low, action_high),
+                            dim=-1,
+                        )
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32)
+                    )
+                    current_action_delta_sum[active] += action_delta_np[active]
+                    current_action_delta_max[active] = np.maximum(
+                        current_action_delta_max[active],
+                        action_delta_np[active],
+                    )
+                    current_policy_saturation_sum[active] += policy_saturation_np[active]
+                    current_action_count[active] += 1.0
                     unclipped_np = unclipped.detach().cpu().numpy().astype(np.float32)
                     executed_np = unclipped_np.copy()
                     policy_action_history.append(unclipped_np.copy())
@@ -3890,6 +3947,28 @@ def evaluate_rl_rerun_closed_loop_r1(
             successes.extend(success_once.astype(float).tolist())
             final_rewards.extend(batch_final.astype(float).tolist())
             max_rewards.extend(batch_max.astype(float).tolist())
+            action_denominator = np.maximum(current_action_count, 1.0)
+            goal_denominator = np.maximum(current_goal_l2_count, 1.0)
+            episode_action_delta_l2_mean.extend(
+                (current_action_delta_sum / action_denominator).astype(float).tolist()
+            )
+            episode_action_delta_l2_max.extend(
+                current_action_delta_max.astype(float).tolist()
+            )
+            episode_policy_saturation_rate.extend(
+                (current_policy_saturation_sum / action_denominator)
+                .astype(float)
+                .tolist()
+            )
+            episode_goal_l2_initial.extend(
+                current_goal_l2_initial.astype(float).tolist()
+            )
+            episode_goal_l2_mean.extend(
+                (current_goal_l2_sum / goal_denominator).astype(float).tolist()
+            )
+            episode_high_level_decisions.extend(
+                current_high_decisions.astype(float).tolist()
+            )
             if disturbed:
                 recovered.extend(recovered_batch.astype(float).tolist())
                 recovery_times.extend(recovery_time_batch[recovery_time_batch >= 0].tolist())
@@ -3906,6 +3985,12 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_success": successes,
             "episode_final_reward": final_rewards,
             "episode_max_reward": max_rewards,
+            "episode_action_delta_l2_mean": episode_action_delta_l2_mean,
+            "episode_action_delta_l2_max": episode_action_delta_l2_max,
+            "episode_policy_saturation_rate": episode_policy_saturation_rate,
+            "episode_goal_l2_initial": episode_goal_l2_initial,
+            "episode_goal_l2_mean": episode_goal_l2_mean,
+            "episode_high_level_decisions": episode_high_level_decisions,
         }
         if goal_source == "oracle":
             result.update(

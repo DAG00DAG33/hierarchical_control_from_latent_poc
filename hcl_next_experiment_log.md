@@ -10074,3 +10074,50 @@ closed-loop decision distribution, so further local objective sweeps should be
 deprioritized in favor of a structurally different training target, stronger
 deployment-aligned selection, or a representation/objective that produces much
 larger closed-loop-consistent action changes.
+
+## 2026-06-25 - rl-rerun closed-loop per-episode diagnostics
+
+The next selector/gate work should train against closed-loop outcomes, not local
+reset proxies. I extended `rl-rerun eval-closed-loop-r{1,2,3}` outputs with
+per-episode deployment diagnostics for both frozen and tuned branches:
+
+- `episode_action_delta_l2_mean`
+- `episode_action_delta_l2_max`
+- `episode_policy_saturation_rate`
+- `episode_goal_l2_initial`
+- `episode_goal_l2_mean`
+- `episode_high_level_decisions`
+
+These arrays line up with `episode_success`, `episode_final_reward`, and
+`episode_max_reward`, so a selector can now fit directly on paired closed-loop
+wins/regressions instead of inferring from local latent-distance deltas.
+
+Smoke command:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 8 \
+  --eval-seed-start 4610000 \
+  --num-envs 8 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_diag_smoke_8_seed4610000.json
+```
+
+Smoke verification:
+
+| branch | success | max reward | action-delta mean entries | goal-distance entries |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.375 | 0.559 | 8 | 8 |
+| task-reward debug | 0.125 | 0.399 | 8 | 8 |
+
+The frozen branch reports zero policy action delta, while the tuned branch
+reports nonzero per-episode action deltas. This validates the JSON shape needed
+for the next deployment-aligned selector analysis.
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_diag_smoke_8_seed4610000.json`
