@@ -10121,3 +10121,50 @@ for the next deployment-aligned selector analysis.
 Artifact:
 
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_diag_smoke_8_seed4610000.json`
+
+I then reran the same 500-episode task-reward-debug transfer window with these
+diagnostics enabled:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4600000 \
+  --num-envs 64 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_diag_500_seed4600000.json
+```
+
+Aggregate result matched the previous transfer check:
+
+| policy | success | final reward | max reward | mean action delta |
+| --- | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.334 | 0.4776 | 0.5061 | 0.0000 |
+| task-reward debug 1 update | 0.306 | 0.4601 | 0.4867 | 0.0005 |
+
+Paired outcomes: 60 tuned wins, 74 tuned regressions, and 366 ties.
+
+Feature separation on the 134 discordant episodes:
+
+| tuned-branch feature | AUC for tuned win | oriented AUC | direction |
+| --- | ---: | ---: | --- |
+| action delta mean | 0.876 | 0.876 | high = win |
+| action delta max | 0.570 | 0.570 | high = win |
+| policy saturation rate | 0.749 | 0.749 | high = win |
+| initial goal L2 | 0.455 | 0.545 | low = win |
+| mean goal L2 | 0.702 | 0.702 | high = win |
+| high-level decisions | 0.008 | 0.992 | low = win |
+
+The high-level-decision feature is mostly an outcome/episode-length proxy, not a
+clean selector input. The important result is that initial goal distance is
+again weak, while online/trajectory features such as action delta and saturation
+carry much stronger signal. This supports the current direction: any next gate
+should be an online deployment-evaluated policy, not a pre-episode selector and
+not an offline local-reset selector.
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_diag_500_seed4600000.json`

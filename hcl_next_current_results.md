@@ -482,6 +482,14 @@ alongside episode success/reward. This does not improve the policy by itself,
 but it is the right substrate for the next gate: any selector should be fit and
 validated against paired closed-loop wins/regressions, not local reset metrics.
 
+On the 500-episode task-reward-debug diagnostic bank, the tuned branch had 60
+wins, 74 regressions, and 366 ties versus frozen. Initial goal distance was weak
+for separating wins from regressions (`0.545` oriented AUC), while online or
+trajectory features were stronger: mean action delta `0.876`, policy saturation
+rate `0.749`, and mean goal distance `0.702`. This reinforces that a one-shot
+initial gate is the wrong tool; a candidate gate must be online and evaluated
+directly in closed loop.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
