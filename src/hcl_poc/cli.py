@@ -12,6 +12,7 @@ from rich.console import Console
 from hcl_poc.config import load_config
 from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps, record_videos
+from hcl_poc.goal_diagnostics import learned_interface_goal_diagnostics
 from hcl_poc.incremental import (
     collect_phase1_query_dataset,
     collect_phase2_dagger_queries,
@@ -107,9 +108,24 @@ from hcl_poc.low_level_rl import (
     train_residual_rl,
 )
 from hcl_poc.privileged_z import (
+    collect_privileged_z_closed_loop_action_search_bank,
+    collect_privileged_z_closed_loop_preserve_bank,
+    create_privileged_z_hard_case_manifest,
+    evaluate_privileged_z_local_action_search,
+    evaluate_privileged_z_local_paired,
     evaluate_privileged_z_hierarchy,
+    evaluate_privileged_z_goal_validity,
+    evaluate_privileged_z_branch_outcomes,
+    filter_privileged_z_action_search_bank,
+    reweight_privileged_z_action_search_bank,
+    train_privileged_z_local_replay_distill,
+    train_privileged_z_direct_rl,
     train_privileged_z_hierarchy,
     train_privileged_z_residual_rl,
+)
+from hcl_poc.reachability import (
+    evaluate_reachability_distance,
+    train_reachability_distance,
 )
 from hcl_poc.report import build_report
 from hcl_poc.rl import collect_ppo_dataset, evaluate_ppo, ppo_status, train_ppo
@@ -152,6 +168,7 @@ from hcl_poc.vae_scaling import (
     evaluate_vae_scaling_point,
     extend_vae_scaling_dataset,
     train_vae_scaling_point,
+    vae_scaling_config,
     validate_nested_vae_scaling_manifests,
 )
 
@@ -162,16 +179,46 @@ def add_config_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default="configs/pusht.yaml")
 
 
+def _low_level_config_with_overrides(config: Config, args: argparse.Namespace) -> Config:
+    raw = copy.deepcopy(config.raw)
+    low = raw.setdefault("low_level_rl", {})
+    for arg_name, config_name in [
+        ("num_envs", "num_envs"),
+        ("rollout_steps", "rollout_steps"),
+        ("num_minibatches", "num_minibatches"),
+        ("update_epochs", "update_epochs"),
+        ("residual_penalty_weight", "residual_penalty_weight"),
+    ]:
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            low[config_name] = value
+    learning_rate = getattr(args, "learning_rate", None)
+    if learning_rate is not None:
+        key = (
+            "direct_learning_rate"
+            if getattr(args, "low_level_rl_command", "") == "train-r3"
+            else "learning_rate"
+        )
+        low[key] = learning_rate
+    initial_logstd = getattr(args, "initial_logstd", None)
+    if initial_logstd is not None:
+        key = (
+            "direct_initial_logstd"
+            if getattr(args, "low_level_rl_command", "") == "train-r3"
+            else "initial_logstd"
+        )
+        low[key] = initial_logstd
+    if getattr(args, "no_segment_terminate_gae", False):
+        low["segment_terminates_gae"] = False
+    return type(config)(raw=raw, path=config.path)
+
+
 def low_level_rl_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.low_level_rl_command == "audit":
         console.print(audit_low_level_rl(config, args.n_demo, args.seed))
     elif args.low_level_rl_command == "train-r1":
-        run_config = config
-        if args.no_segment_terminate_gae:
-            raw = copy.deepcopy(config.raw)
-            raw.setdefault("low_level_rl", {})["segment_terminates_gae"] = False
-            run_config = type(config)(raw=raw, path=config.path)
+        run_config = _low_level_config_with_overrides(config, args)
         console.print(
             train_residual_rl(
                 run_config,
@@ -181,17 +228,20 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 total_steps=args.steps,
                 alpha=args.alpha,
                 terminal_weight=args.terminal_weight,
+                distance_progress_weight=args.distance_progress_weight,
                 task_reward_weight=args.task_reward_weight,
                 task_progress_weight=args.task_progress_weight,
+                distance_metric=args.distance_metric,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
+                candidate=args.candidate,
+                rl_seed_offset=args.rl_seed_offset,
                 force=args.force,
             )
         )
     elif args.low_level_rl_command == "train-r3":
-        run_config = config
-        if args.no_segment_terminate_gae:
-            raw = copy.deepcopy(config.raw)
-            raw.setdefault("low_level_rl", {})["segment_terminates_gae"] = False
-            run_config = type(config)(raw=raw, path=config.path)
+        run_config = _low_level_config_with_overrides(config, args)
         console.print(
             train_direct_low_rl(
                 run_config,
@@ -201,8 +251,15 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 total_steps=args.steps,
                 bc_weight=args.bc_weight,
                 terminal_weight=args.terminal_weight,
+                distance_progress_weight=args.distance_progress_weight,
                 task_reward_weight=args.task_reward_weight,
                 task_progress_weight=args.task_progress_weight,
+                distance_metric=args.distance_metric,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
+                candidate=args.candidate,
+                rl_seed_offset=args.rl_seed_offset,
                 force=args.force,
             )
         )
@@ -215,7 +272,12 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 run_name=args.run_name,
                 episodes=args.episodes,
                 seed_start=args.seed_start,
+                candidate=args.candidate,
                 checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+                distance_metric=args.distance_metric,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
                 force=args.force,
             )
         )
@@ -535,6 +597,243 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 residual_checkpoint_path=Path(args.residual_checkpoint)
                 if args.residual_checkpoint
                 else None,
+                tuned_gate_mode=args.tuned_gate_mode,
+                tuned_gate_max_degradation_mse=args.tuned_gate_max_degradation_mse,
+                high_goal_delta_scale=args.high_goal_delta_scale,
+                high_goal_projection=args.high_goal_projection,
+                high_goal_branch_bank_path=Path(args.high_goal_branch_bank)
+                if args.high_goal_branch_bank
+                else None,
+                high_goal_branch_selector_path=Path(args.high_goal_branch_selector)
+                if args.high_goal_branch_selector
+                else None,
+                high_goal_projection_state_weight=args.high_goal_projection_state_weight,
+                high_goal_projection_goal_weight=args.high_goal_projection_goal_weight,
+                high_goal_bank_episodes=args.high_goal_bank_episodes,
+                high_goal_bank_seed_start=args.high_goal_bank_seed_start,
+                high_goal_bank_num_envs=args.high_goal_bank_num_envs,
+                output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-privileged-z-local-paired":
+        console.print(
+            evaluate_privileged_z_local_paired(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                manifest_path=Path(args.manifest),
+                residual_checkpoint_path=Path(args.residual_checkpoint)
+                if args.residual_checkpoint
+                else None,
+                output_path=Path(args.output) if args.output else None,
+                goal_source=args.goal_source,
+                success_epsilon=args.success_epsilon,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-privileged-z-goal-validity":
+        console.print(
+            evaluate_privileged_z_goal_validity(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                episodes=args.episodes,
+                seed_start=args.seed_start,
+                num_envs=args.num_envs,
+                output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-privileged-z-local-action-search":
+        console.print(
+            evaluate_privileged_z_local_action_search(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                manifest_path=Path(args.manifest),
+                output_path=Path(args.output) if args.output else None,
+                goal_source=args.goal_source,
+                random_candidates=args.random_candidates,
+                random_noise_std=args.random_noise_std,
+                success_epsilon=args.success_epsilon,
+                seed=args.seed,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "create-privileged-z-hard-case-manifest":
+        console.print(
+            create_privileged_z_hard_case_manifest(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                manifest_path=Path(args.manifest),
+                output_path=Path(args.output),
+                goal_source=args.goal_source,
+                threshold_mse=args.threshold_mse,
+                max_envs_per_entry=args.max_envs_per_entry,
+                seed=args.seed,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "filter-privileged-z-action-search-bank":
+        console.print(
+            filter_privileged_z_action_search_bank(
+                Path(args.input),
+                output_path=Path(args.output),
+                min_base_mse=args.min_base_mse,
+                max_base_mse=args.max_base_mse,
+                min_best_mse=args.min_best_mse,
+                max_best_mse=args.max_best_mse,
+                min_improvement_mse=args.min_improvement_mse,
+                max_improvement_mse=args.max_improvement_mse,
+                max_action_delta_l2=args.max_action_delta_l2,
+                max_oracle_delta_mse=args.max_oracle_delta_mse,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "reweight-privileged-z-action-search-bank":
+        console.print(
+            reweight_privileged_z_action_search_bank(
+                Path(args.input),
+                output_path=Path(args.output),
+                mode=args.mode,
+                success_epsilon=args.success_epsilon,
+                improvement_scale=args.improvement_scale,
+                min_weight=args.min_weight,
+                max_weight=args.max_weight,
+                normalize_mean=not args.no_normalize_mean,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "train-privileged-z-local-replay-distill":
+        console.print(
+            train_privileged_z_local_replay_distill(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                manifest_path=Path(args.manifest),
+                preserve_manifest_path=Path(args.preserve_manifest)
+                if args.preserve_manifest
+                else None,
+                preserve_npz_path=Path(args.preserve_npz) if args.preserve_npz else None,
+                improve_npz_path=Path(args.improve_npz) if args.improve_npz else None,
+                replay_weight=args.replay_weight,
+                preserve_weight=args.preserve_weight,
+                preserve_npz_weight=args.preserve_npz_weight,
+                improve_npz_weight=args.improve_npz_weight,
+                run_tag=args.run_tag,
+                seed=args.seed,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                train_scope=args.train_scope,
+                initial_logstd=args.initial_logstd,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "collect-privileged-z-closed-loop-action-search-bank":
+        console.print(
+            collect_privileged_z_closed_loop_action_search_bank(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                mode=args.mode,
+                episodes=args.episodes,
+                seed_start=args.seed_start,
+                num_envs=args.num_envs,
+                random_candidates=args.random_candidates,
+                random_noise_std=args.random_noise_std,
+                min_improvement_mse=args.min_improvement_mse,
+                max_base_mse=args.max_base_mse,
+                max_action_delta_l2=args.max_action_delta_l2,
+                oracle_gate_max_degradation_mse=args.oracle_gate_max_degradation_mse,
+                success_epsilon=args.success_epsilon,
+                max_search_batches=args.max_search_batches,
+                output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "collect-privileged-z-closed-loop-preserve-bank":
+        console.print(
+            collect_privileged_z_closed_loop_preserve_bank(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                mode=args.mode,
+                episodes=args.episodes,
+                seed_start=args.seed_start,
+                num_envs=args.num_envs,
+                output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-privileged-z-branch-outcomes":
+        console.print(
+            evaluate_privileged_z_branch_outcomes(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                episodes=args.episodes,
+                seed_start=args.seed_start,
+                num_envs=args.num_envs,
+                random_candidates=args.random_candidates,
+                random_noise_std=args.random_noise_std,
+                branch_source=args.branch_source,
+                branch_condition_goal_source=args.branch_condition_goal_source,
+                min_improvement_mse=args.min_improvement_mse,
+                max_action_delta_l2=args.max_action_delta_l2,
+                max_branch_batches=args.max_branch_batches,
+                max_rollout_steps=args.max_rollout_steps,
+                bank_output_path=Path(args.bank_output) if args.bank_output else None,
+                bank_min_success_delta=args.bank_min_success_delta,
+                bank_min_return_delta=args.bank_min_return_delta,
+                output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "train-reachability-distance":
+        run_config = (
+            vae_scaling_config(config, args.n_demo)
+            if args.n_demo is not None
+            else config
+        )
+        console.print(
+            train_reachability_distance(
+                run_config,
+                candidate=args.candidate,
+                seed=args.seed,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                batches_per_epoch=args.batches_per_epoch,
+                hidden_dim=args.hidden_dim,
+                depth=args.depth,
+                lr=args.lr,
+                horizon_steps=args.horizon_steps,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "eval-reachability-distance":
+        run_config = (
+            vae_scaling_config(config, args.n_demo)
+            if args.n_demo is not None
+            else config
+        )
+        console.print(
+            evaluate_reachability_distance(
+                run_config,
+                candidate=args.candidate,
+                seed=args.seed,
+                checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+                samples=args.samples,
+                output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "goal-diagnostics":
+        if args.representation != "vae512":
+            raise ValueError("Only representation=vae512 is implemented for goal-diagnostics")
+        horizons = tuple(int(value) for value in args.horizons.split(",") if value)
+        console.print(
+            learned_interface_goal_diagnostics(
+                config,
+                n_demo=args.n_demo,
+                candidate=args.candidate,
+                seed=args.seed,
+                samples=args.samples,
+                horizons=horizons,
                 output_path=Path(args.output) if args.output else None,
                 force=args.force,
             )
@@ -558,6 +857,35 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 initial_logstd=args.initial_logstd,
                 residual_action_mode=args.residual_action_mode,
                 residual_goal_source=args.residual_goal_source,
+                reward_mode=args.reward_mode,
+                dense_progress_weight=args.dense_progress_weight,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "train-privileged-z-direct":
+        console.print(
+            train_privileged_z_direct_rl(
+                config,
+                checkpoint_path=Path(args.checkpoint),
+                init_dataset_path=Path(args.init_dataset),
+                run_tag=args.run_tag,
+                direct_init_checkpoint_path=Path(args.direct_init_checkpoint)
+                if args.direct_init_checkpoint
+                else None,
+                seed=args.seed,
+                total_steps=args.steps,
+                terminal_weight=args.terminal_weight,
+                learning_rate=args.learning_rate,
+                num_minibatches=args.num_minibatches,
+                update_epochs=args.update_epochs,
+                checkpoint_every_updates=args.checkpoint_every_updates,
+                initial_logstd=args.initial_logstd,
+                train_scope=args.train_scope,
+                goal_source=args.goal_source,
+                reward_mode=args.reward_mode,
+                dense_progress_weight=args.dense_progress_weight,
+                bc_weight=args.bc_weight,
+                min_base_terminal_mse=args.min_base_terminal_mse,
                 force=args.force,
             )
         )
@@ -1450,6 +1778,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             goal_source=args.goal_source,
             seed=args.seed,
             episodes=args.episodes,
+            eval_seed_start=args.eval_seed_start,
             force=args.force,
         )
     elif args.incremental_command == "learned-interface-run":
@@ -1534,35 +1863,74 @@ def build_parser() -> argparse.ArgumentParser:
     audit.set_defaults(func=low_level_rl_cmd)
     train_r1 = low_level_rl_sub.add_parser("train-r1")
     train_r1.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    train_r1.add_argument("--candidate", default="vae512_w2048_b1e6")
     train_r1.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
     train_r1.add_argument("--run-name", required=True)
     train_r1.add_argument("--steps", type=int, required=True)
     train_r1.add_argument("--alpha", type=float, default=0.1)
     train_r1.add_argument("--terminal-weight", type=float, default=1.0)
+    train_r1.add_argument("--distance-progress-weight", type=float, default=1.0)
     train_r1.add_argument("--task-reward-weight", type=float, default=0.0)
     train_r1.add_argument("--task-progress-weight", type=float, default=0.0)
+    train_r1.add_argument(
+        "--distance-metric",
+        choices=["raw_l2", "reachability"],
+        default="raw_l2",
+    )
+    train_r1.add_argument("--reachability-checkpoint")
+    train_r1.add_argument("--num-envs", type=int)
+    train_r1.add_argument("--rollout-steps", type=int)
+    train_r1.add_argument("--num-minibatches", type=int)
+    train_r1.add_argument("--update-epochs", type=int)
+    train_r1.add_argument("--learning-rate", type=float)
+    train_r1.add_argument("--initial-logstd", type=float)
+    train_r1.add_argument("--residual-penalty-weight", type=float)
+    train_r1.add_argument("--rl-seed-offset", type=int, default=0)
     train_r1.add_argument("--no-segment-terminate-gae", action="store_true")
     train_r1.add_argument("--force", action="store_true")
     train_r1.set_defaults(func=low_level_rl_cmd)
     train_r3 = low_level_rl_sub.add_parser("train-r3")
     train_r3.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    train_r3.add_argument("--candidate", default="vae512_w2048_b1e6")
     train_r3.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
     train_r3.add_argument("--run-name", required=True)
     train_r3.add_argument("--steps", type=int, required=True)
     train_r3.add_argument("--bc-weight", type=float, default=1.0)
     train_r3.add_argument("--terminal-weight", type=float, default=1.0)
+    train_r3.add_argument("--distance-progress-weight", type=float, default=1.0)
     train_r3.add_argument("--task-reward-weight", type=float, default=0.0)
     train_r3.add_argument("--task-progress-weight", type=float, default=0.0)
+    train_r3.add_argument(
+        "--distance-metric",
+        choices=["raw_l2", "reachability"],
+        default="raw_l2",
+    )
+    train_r3.add_argument("--reachability-checkpoint")
+    train_r3.add_argument("--num-envs", type=int)
+    train_r3.add_argument("--rollout-steps", type=int)
+    train_r3.add_argument("--num-minibatches", type=int)
+    train_r3.add_argument("--update-epochs", type=int)
+    train_r3.add_argument("--learning-rate", type=float)
+    train_r3.add_argument("--initial-logstd", type=float)
+    train_r3.add_argument("--residual-penalty-weight", type=float)
+    train_r3.add_argument("--rl-seed-offset", type=int, default=0)
     train_r3.add_argument("--no-segment-terminate-gae", action="store_true")
     train_r3.add_argument("--force", action="store_true")
     train_r3.set_defaults(func=low_level_rl_cmd)
     low_eval = low_level_rl_sub.add_parser("eval")
     low_eval.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    low_eval.add_argument("--candidate", default="vae512_w2048_b1e6")
     low_eval.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
     low_eval.add_argument("--run-name", required=True)
     low_eval.add_argument("--episodes", type=int, required=True)
     low_eval.add_argument("--seed-start", type=int, required=True)
     low_eval.add_argument("--checkpoint")
+    low_eval.add_argument(
+        "--distance-metric",
+        choices=["raw_l2", "reachability"],
+        default="raw_l2",
+    )
+    low_eval.add_argument("--reachability-checkpoint")
     low_eval.add_argument("--force", action="store_true")
     low_eval.set_defaults(func=low_level_rl_cmd)
     low_video = low_level_rl_sub.add_parser("video")
@@ -1840,8 +2208,47 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["oracle", "predicted", "oracle_to_predicted"],
         default="oracle",
     )
+    train_priv_z_residual.add_argument(
+        "--reward-mode",
+        choices=["progress", "paired"],
+        default="progress",
+    )
+    train_priv_z_residual.add_argument("--dense-progress-weight", type=float, default=0.0)
     train_priv_z_residual.add_argument("--force", action="store_true")
     train_priv_z_residual.set_defaults(func=rl_rerun_cmd)
+    train_priv_z_direct = rl_rerun_sub.add_parser("train-privileged-z-direct")
+    train_priv_z_direct.add_argument("--checkpoint", required=True)
+    train_priv_z_direct.add_argument("--init-dataset", required=True)
+    train_priv_z_direct.add_argument("--run-tag", required=True)
+    train_priv_z_direct.add_argument("--direct-init-checkpoint")
+    train_priv_z_direct.add_argument("--seed", type=int, default=0)
+    train_priv_z_direct.add_argument("--steps", type=int, default=32_768)
+    train_priv_z_direct.add_argument("--terminal-weight", type=float, default=1.0)
+    train_priv_z_direct.add_argument("--learning-rate", type=float, default=3e-5)
+    train_priv_z_direct.add_argument("--num-minibatches", type=int, default=8)
+    train_priv_z_direct.add_argument("--update-epochs", type=int, default=4)
+    train_priv_z_direct.add_argument("--checkpoint-every-updates", type=int, default=5)
+    train_priv_z_direct.add_argument("--initial-logstd", type=float, default=-4.0)
+    train_priv_z_direct.add_argument(
+        "--train-scope",
+        choices=["final_layer", "all"],
+        default="final_layer",
+    )
+    train_priv_z_direct.add_argument(
+        "--goal-source",
+        choices=["oracle", "predicted", "oracle_to_predicted"],
+        default="oracle",
+    )
+    train_priv_z_direct.add_argument(
+        "--reward-mode",
+        choices=["progress", "paired"],
+        default="paired",
+    )
+    train_priv_z_direct.add_argument("--dense-progress-weight", type=float, default=0.0)
+    train_priv_z_direct.add_argument("--bc-weight", type=float, default=0.0)
+    train_priv_z_direct.add_argument("--min-base-terminal-mse", type=float)
+    train_priv_z_direct.add_argument("--force", action="store_true")
+    train_priv_z_direct.set_defaults(func=rl_rerun_cmd)
     eval_priv_z = rl_rerun_sub.add_parser("eval-privileged-z")
     eval_priv_z.add_argument("--checkpoint", required=True)
     eval_priv_z.add_argument("--residual-checkpoint")
@@ -1853,9 +2260,256 @@ def build_parser() -> argparse.ArgumentParser:
     eval_priv_z.add_argument("--episodes", type=int, default=100)
     eval_priv_z.add_argument("--seed-start", type=int, default=9_900_000)
     eval_priv_z.add_argument("--num-envs", type=int, default=64)
+    eval_priv_z.add_argument("--high-goal-delta-scale", type=float, default=1.0)
+    eval_priv_z.add_argument(
+        "--high-goal-projection",
+        choices=[
+            "none",
+            "nearest_oracle_bank",
+            "nearest_branch_goal_bank",
+            "learned_branch_goal_selector",
+        ],
+        default="none",
+    )
+    eval_priv_z.add_argument("--high-goal-branch-bank")
+    eval_priv_z.add_argument("--high-goal-branch-selector")
+    eval_priv_z.add_argument("--high-goal-projection-state-weight", type=float, default=0.5)
+    eval_priv_z.add_argument("--high-goal-projection-goal-weight", type=float, default=0.5)
+    eval_priv_z.add_argument("--high-goal-bank-episodes", type=int, default=200)
+    eval_priv_z.add_argument("--high-goal-bank-seed-start", type=int, default=9_800_000)
+    eval_priv_z.add_argument("--high-goal-bank-num-envs", type=int, default=200)
+    eval_priv_z.add_argument(
+        "--tuned-gate-mode",
+        choices=["always", "local_oracle"],
+        default="always",
+    )
+    eval_priv_z.add_argument("--tuned-gate-max-degradation-mse", type=float, default=0.0)
     eval_priv_z.add_argument("--output")
     eval_priv_z.add_argument("--force", action="store_true")
     eval_priv_z.set_defaults(func=rl_rerun_cmd)
+    eval_priv_z_goal_validity = rl_rerun_sub.add_parser(
+        "eval-privileged-z-goal-validity"
+    )
+    eval_priv_z_goal_validity.add_argument("--checkpoint", required=True)
+    eval_priv_z_goal_validity.add_argument("--episodes", type=int, default=200)
+    eval_priv_z_goal_validity.add_argument("--seed-start", type=int, default=9_900_000)
+    eval_priv_z_goal_validity.add_argument("--num-envs", type=int, default=200)
+    eval_priv_z_goal_validity.add_argument("--output")
+    eval_priv_z_goal_validity.add_argument("--force", action="store_true")
+    eval_priv_z_goal_validity.set_defaults(func=rl_rerun_cmd)
+    eval_priv_z_local = rl_rerun_sub.add_parser("eval-privileged-z-local-paired")
+    eval_priv_z_local.add_argument("--checkpoint", required=True)
+    eval_priv_z_local.add_argument("--manifest", required=True)
+    eval_priv_z_local.add_argument("--residual-checkpoint")
+    eval_priv_z_local.add_argument(
+        "--goal-source",
+        choices=["replay", "predicted"],
+        default="replay",
+    )
+    eval_priv_z_local.add_argument("--success-epsilon", type=float, default=0.05)
+    eval_priv_z_local.add_argument("--output")
+    eval_priv_z_local.add_argument("--force", action="store_true")
+    eval_priv_z_local.set_defaults(func=rl_rerun_cmd)
+    eval_priv_z_action_search = rl_rerun_sub.add_parser(
+        "eval-privileged-z-local-action-search"
+    )
+    eval_priv_z_action_search.add_argument("--checkpoint", required=True)
+    eval_priv_z_action_search.add_argument("--manifest", required=True)
+    eval_priv_z_action_search.add_argument(
+        "--goal-source",
+        choices=["replay", "predicted"],
+        default="replay",
+    )
+    eval_priv_z_action_search.add_argument("--random-candidates", type=int, default=32)
+    eval_priv_z_action_search.add_argument("--random-noise-std", type=float, default=0.05)
+    eval_priv_z_action_search.add_argument("--success-epsilon", type=float, default=0.05)
+    eval_priv_z_action_search.add_argument("--seed", type=int, default=0)
+    eval_priv_z_action_search.add_argument("--output")
+    eval_priv_z_action_search.add_argument("--force", action="store_true")
+    eval_priv_z_action_search.set_defaults(func=rl_rerun_cmd)
+    hard_priv_z_manifest = rl_rerun_sub.add_parser(
+        "create-privileged-z-hard-case-manifest"
+    )
+    hard_priv_z_manifest.add_argument("--checkpoint", required=True)
+    hard_priv_z_manifest.add_argument("--manifest", required=True)
+    hard_priv_z_manifest.add_argument("--output", required=True)
+    hard_priv_z_manifest.add_argument(
+        "--goal-source",
+        choices=["replay", "predicted"],
+        default="replay",
+    )
+    hard_priv_z_manifest.add_argument("--threshold-mse", type=float, default=0.05)
+    hard_priv_z_manifest.add_argument("--max-envs-per-entry", type=int)
+    hard_priv_z_manifest.add_argument("--seed", type=int, default=0)
+    hard_priv_z_manifest.add_argument("--force", action="store_true")
+    hard_priv_z_manifest.set_defaults(func=rl_rerun_cmd)
+    filter_priv_z_search_bank = rl_rerun_sub.add_parser(
+        "filter-privileged-z-action-search-bank"
+    )
+    filter_priv_z_search_bank.add_argument("--input", required=True)
+    filter_priv_z_search_bank.add_argument("--output", required=True)
+    filter_priv_z_search_bank.add_argument("--min-base-mse", type=float)
+    filter_priv_z_search_bank.add_argument("--max-base-mse", type=float)
+    filter_priv_z_search_bank.add_argument("--min-best-mse", type=float)
+    filter_priv_z_search_bank.add_argument("--max-best-mse", type=float)
+    filter_priv_z_search_bank.add_argument("--min-improvement-mse", type=float)
+    filter_priv_z_search_bank.add_argument("--max-improvement-mse", type=float)
+    filter_priv_z_search_bank.add_argument("--max-action-delta-l2", type=float)
+    filter_priv_z_search_bank.add_argument("--max-oracle-delta-mse", type=float)
+    filter_priv_z_search_bank.add_argument("--force", action="store_true")
+    filter_priv_z_search_bank.set_defaults(func=rl_rerun_cmd)
+    reweight_priv_z_search_bank = rl_rerun_sub.add_parser(
+        "reweight-privileged-z-action-search-bank"
+    )
+    reweight_priv_z_search_bank.add_argument("--input", required=True)
+    reweight_priv_z_search_bank.add_argument("--output", required=True)
+    reweight_priv_z_search_bank.add_argument(
+        "--mode",
+        choices=["base_mse", "improvement_mse", "base_x_improvement"],
+        default="base_x_improvement",
+    )
+    reweight_priv_z_search_bank.add_argument("--success-epsilon", type=float, default=0.05)
+    reweight_priv_z_search_bank.add_argument("--improvement-scale", type=float, default=0.05)
+    reweight_priv_z_search_bank.add_argument("--min-weight", type=float, default=0.25)
+    reweight_priv_z_search_bank.add_argument("--max-weight", type=float, default=4.0)
+    reweight_priv_z_search_bank.add_argument("--no-normalize-mean", action="store_true")
+    reweight_priv_z_search_bank.add_argument("--force", action="store_true")
+    reweight_priv_z_search_bank.set_defaults(func=rl_rerun_cmd)
+    distill_priv_z = rl_rerun_sub.add_parser(
+        "train-privileged-z-local-replay-distill"
+    )
+    distill_priv_z.add_argument("--checkpoint", required=True)
+    distill_priv_z.add_argument("--manifest", required=True)
+    distill_priv_z.add_argument("--preserve-manifest")
+    distill_priv_z.add_argument("--preserve-npz")
+    distill_priv_z.add_argument("--improve-npz")
+    distill_priv_z.add_argument("--replay-weight", type=float, default=1.0)
+    distill_priv_z.add_argument("--preserve-weight", type=float, default=0.0)
+    distill_priv_z.add_argument("--preserve-npz-weight", type=float, default=0.0)
+    distill_priv_z.add_argument("--improve-npz-weight", type=float, default=0.0)
+    distill_priv_z.add_argument("--run-tag", required=True)
+    distill_priv_z.add_argument("--seed", type=int, default=0)
+    distill_priv_z.add_argument("--epochs", type=int, default=200)
+    distill_priv_z.add_argument("--batch-size", type=int, default=512)
+    distill_priv_z.add_argument("--learning-rate", type=float, default=1e-4)
+    distill_priv_z.add_argument(
+        "--train-scope",
+        choices=["final_layer", "all"],
+        default="all",
+    )
+    distill_priv_z.add_argument("--initial-logstd", type=float, default=-4.0)
+    distill_priv_z.add_argument("--force", action="store_true")
+    distill_priv_z.set_defaults(func=rl_rerun_cmd)
+    collect_priv_z_preserve = rl_rerun_sub.add_parser(
+        "collect-privileged-z-closed-loop-preserve-bank"
+    )
+    collect_priv_z_preserve.add_argument("--checkpoint", required=True)
+    collect_priv_z_preserve.add_argument(
+        "--mode",
+        choices=["hierarchy", "oracle_hierarchy"],
+        default="hierarchy",
+    )
+    collect_priv_z_preserve.add_argument("--episodes", type=int, default=512)
+    collect_priv_z_preserve.add_argument("--seed-start", type=int, default=9_900_000)
+    collect_priv_z_preserve.add_argument("--num-envs", type=int, default=64)
+    collect_priv_z_preserve.add_argument("--output")
+    collect_priv_z_preserve.add_argument("--force", action="store_true")
+    collect_priv_z_preserve.set_defaults(func=rl_rerun_cmd)
+    collect_priv_z_search = rl_rerun_sub.add_parser(
+        "collect-privileged-z-closed-loop-action-search-bank"
+    )
+    collect_priv_z_search.add_argument("--checkpoint", required=True)
+    collect_priv_z_search.add_argument(
+        "--mode",
+        choices=["hierarchy", "oracle_hierarchy"],
+        default="hierarchy",
+    )
+    collect_priv_z_search.add_argument("--episodes", type=int, default=256)
+    collect_priv_z_search.add_argument("--seed-start", type=int, default=9_900_000)
+    collect_priv_z_search.add_argument("--num-envs", type=int, default=64)
+    collect_priv_z_search.add_argument("--random-candidates", type=int, default=32)
+    collect_priv_z_search.add_argument("--random-noise-std", type=float, default=0.05)
+    collect_priv_z_search.add_argument("--min-improvement-mse", type=float, default=0.01)
+    collect_priv_z_search.add_argument("--max-base-mse", type=float)
+    collect_priv_z_search.add_argument("--max-action-delta-l2", type=float)
+    collect_priv_z_search.add_argument("--oracle-gate-max-degradation-mse", type=float)
+    collect_priv_z_search.add_argument("--success-epsilon", type=float, default=0.05)
+    collect_priv_z_search.add_argument("--max-search-batches", type=int)
+    collect_priv_z_search.add_argument("--output")
+    collect_priv_z_search.add_argument("--force", action="store_true")
+    collect_priv_z_search.set_defaults(func=rl_rerun_cmd)
+    branch_outcomes = rl_rerun_sub.add_parser("eval-privileged-z-branch-outcomes")
+    branch_outcomes.add_argument("--checkpoint", required=True)
+    branch_outcomes.add_argument("--episodes", type=int, default=100)
+    branch_outcomes.add_argument("--seed-start", type=int, default=9_900_000)
+    branch_outcomes.add_argument("--num-envs", type=int, default=100)
+    branch_outcomes.add_argument("--random-candidates", type=int, default=16)
+    branch_outcomes.add_argument("--random-noise-std", type=float, default=0.05)
+    branch_outcomes.add_argument(
+        "--branch-source",
+        choices=["random_search", "oracle_low_level"],
+        default="random_search",
+    )
+    branch_outcomes.add_argument(
+        "--branch-condition-goal-source",
+        choices=["learned_high", "oracle_goal"],
+        default="learned_high",
+    )
+    branch_outcomes.add_argument("--min-improvement-mse", type=float, default=0.01)
+    branch_outcomes.add_argument("--max-action-delta-l2", type=float, default=0.25)
+    branch_outcomes.add_argument("--max-branch-batches", type=int, default=4)
+    branch_outcomes.add_argument("--max-rollout-steps", type=int, default=120)
+    branch_outcomes.add_argument("--bank-output")
+    branch_outcomes.add_argument("--bank-min-success-delta", type=float)
+    branch_outcomes.add_argument("--bank-min-return-delta", type=float)
+    branch_outcomes.add_argument("--output")
+    branch_outcomes.add_argument("--force", action="store_true")
+    branch_outcomes.set_defaults(func=rl_rerun_cmd)
+    train_reachability = rl_rerun_sub.add_parser("train-reachability-distance")
+    train_reachability.add_argument(
+        "--candidate", default="vae512_w2048_b1e6"
+    )
+    train_reachability.add_argument("--n-demo", type=int, choices=[100, 500, 1000, 1800, 4000, 8200])
+    train_reachability.add_argument("--seed", type=int, default=0)
+    train_reachability.add_argument("--epochs", type=int)
+    train_reachability.add_argument("--batch-size", type=int)
+    train_reachability.add_argument("--batches-per-epoch", type=int)
+    train_reachability.add_argument("--hidden-dim", type=int)
+    train_reachability.add_argument("--depth", type=int)
+    train_reachability.add_argument("--lr", type=float)
+    train_reachability.add_argument("--horizon-steps", type=int)
+    train_reachability.add_argument("--force", action="store_true")
+    train_reachability.set_defaults(func=rl_rerun_cmd)
+    eval_reachability = rl_rerun_sub.add_parser("eval-reachability-distance")
+    eval_reachability.add_argument(
+        "--candidate", default="vae512_w2048_b1e6"
+    )
+    eval_reachability.add_argument("--n-demo", type=int, choices=[100, 500, 1000, 1800, 4000, 8200])
+    eval_reachability.add_argument("--seed", type=int, default=0)
+    eval_reachability.add_argument("--checkpoint")
+    eval_reachability.add_argument("--samples", type=int)
+    eval_reachability.add_argument("--output")
+    eval_reachability.add_argument("--force", action="store_true")
+    eval_reachability.set_defaults(func=rl_rerun_cmd)
+    goal_diag = rl_rerun_sub.add_parser("goal-diagnostics")
+    goal_diag.add_argument(
+        "--representation",
+        choices=["vae512"],
+        default="vae512",
+    )
+    goal_diag.add_argument("--candidate", default="vae512_w2048_b1e6")
+    goal_diag.add_argument(
+        "--n-demo",
+        type=int,
+        choices=[100, 500, 1000, 1800, 4000, 8200],
+        required=True,
+    )
+    goal_diag.add_argument("--seed", type=int, default=0)
+    goal_diag.add_argument("--samples", type=int, default=5000)
+    goal_diag.add_argument("--horizons", default="2,5,10")
+    goal_diag.add_argument("--output")
+    goal_diag.add_argument("--force", action="store_true")
+    goal_diag.set_defaults(func=rl_rerun_cmd)
     throughput = rl_rerun_sub.add_parser("throughput-benchmark")
     throughput.add_argument(
         "--num-envs",
@@ -2477,10 +3131,9 @@ def build_parser() -> argparse.ArgumentParser:
         if command in {"learned-interface-eval", "learned-interface-record"}:
             learned_interface.add_argument(
                 "--goal-source",
-                choices=["learned", "oracle"],
+                choices=["learned", "oracle", "shuffled"],
                 required=True,
             )
-        if command == "learned-interface-record":
             learned_interface.add_argument("--eval-seed-start", type=int)
         learned_interface.set_defaults(func=incremental_cmd)
 

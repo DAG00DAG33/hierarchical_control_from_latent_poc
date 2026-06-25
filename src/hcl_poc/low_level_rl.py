@@ -16,10 +16,16 @@ from tqdm import trange
 from hcl_poc.config import Config
 from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs, _rl_backend
 from hcl_poc.learned_interface import (
+    _encode_effect_array,
     _load_hierarchy,
     _load_representation,
     _low_condition_array,
     train_learned_interface_hierarchy,
+)
+from hcl_poc.reachability import (
+    ReachabilityDistance,
+    _load_reachability_latents,
+    load_reachability_distance,
 )
 from hcl_poc.rl import layer_init
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
@@ -98,12 +104,16 @@ class DirectLowActorCritic(nn.Module):
         self.low_model = copy.deepcopy(low_model)
         for parameter in self.low_model.parameters():
             parameter.requires_grad_(False)
-        try:
-            last = self.low_model.policy.net[-1]
-        except AttributeError as exc:
-            raise ValueError(
-                "R3 last-layer tuning currently requires concat/delta low policy"
-            ) from exc
+        if hasattr(self.low_model, "output_layer"):
+            last = self.low_model.output_layer
+        else:
+            try:
+                last = self.low_model.policy.net[-1]
+            except AttributeError as exc:
+                raise ValueError(
+                    "R3 last-layer tuning requires a low policy with policy.net "
+                    "or output_layer"
+                ) from exc
         if not isinstance(last, nn.Linear):
             raise ValueError("Expected final low-policy module to be nn.Linear")
         for parameter in last.parameters():
@@ -152,33 +162,43 @@ class FrozenHierarchy:
     horizon_steps: int
     update_period: int
     conditioning: str
+    encoder_type: str
     frame_dim: int
     goal_dim: int
     checkpoint_path: Path
 
 
-def _paths(config: Config, n_demo: int, seed: int, run_name: str) -> tuple[Path, Path]:
+def _paths(
+    config: Config, n_demo: int, seed: int, run_name: str, candidate: str = VAE_CANDIDATE
+) -> tuple[Path, Path]:
+    demo_label = f"n{n_demo}" if candidate == VAE_CANDIDATE else candidate
     artifact = ensure_dir(
         config.path_value("paths.incremental_artifact_dir")
         / "low_level_rl"
-        / f"n{n_demo}"
+        / demo_label
         / f"seed{seed}"
         / run_name
     )
     result = ensure_dir(
         config.path_value("paths.incremental_results_dir")
         / "low_level_rl"
-        / f"n{n_demo}"
+        / demo_label
         / f"seed{seed}"
         / run_name
     )
     return artifact, result
 
 
-def _load_frozen(config: Config, n_demo: int, seed: int, device: torch.device) -> FrozenHierarchy:
-    point_config = vae_scaling_config(config, n_demo)
+def _load_frozen(
+    config: Config,
+    n_demo: int,
+    seed: int,
+    device: torch.device,
+    candidate: str = VAE_CANDIDATE,
+) -> FrozenHierarchy:
+    point_config = vae_scaling_config(config, n_demo) if candidate == VAE_CANDIDATE else config
     hierarchy_path = train_learned_interface_hierarchy(
-        point_config, VAE_CANDIDATE, seed=seed, force=False
+        point_config, candidate, seed=seed, force=False
     )
     checkpoint = torch.load(hierarchy_path, map_location="cpu", weights_only=False)
     high_model, low_model = _load_hierarchy(checkpoint, device)
@@ -200,6 +220,7 @@ def _load_frozen(config: Config, n_demo: int, seed: int, device: torch.device) -
         horizon_steps=int(checkpoint["horizon_steps"]),
         update_period=int(checkpoint["update_period"]),
         conditioning=str(checkpoint.get("conditioning", "concat")),
+        encoder_type=str(representation["encoder_type"]),
         frame_dim=int(checkpoint["frame_dim"]),
         goal_dim=int(checkpoint["goal_dim"]),
         checkpoint_path=Path(hierarchy_path),
@@ -208,9 +229,31 @@ def _load_frozen(config: Config, n_demo: int, seed: int, device: torch.device) -
 
 @torch.inference_mode()
 def _encode_frames(frozen: FrozenHierarchy, frames: np.ndarray, device: torch.device) -> np.ndarray:
+    if frozen.encoder_type == "effect":
+        raise ValueError("Effect-code representations require an anchor frame")
     normalized = frozen.representation_frame_norm.transform(frames)
     latent = frozen.encoder(torch.from_numpy(normalized).to(device).float())
     return frozen.goal_norm.transform(latent.cpu().numpy().astype(np.float32))
+
+
+@torch.inference_mode()
+def _encode_effect_progress(
+    frozen: FrozenHierarchy,
+    anchor_frames: np.ndarray,
+    frames: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    if frozen.encoder_type != "effect":
+        return _encode_frames(frozen, frames, device)
+    effect = _encode_effect_array(
+        frozen.encoder,
+        frozen.representation_frame_norm,
+        anchor_frames,
+        frames,
+        np.ones(len(frames), dtype=np.float32),
+        device,
+    )
+    return frozen.goal_norm.transform(effect.astype(np.float32))
 
 
 def _visual_env(config: Config, num_envs: int):
@@ -234,6 +277,67 @@ def _visual_env(config: Config, num_envs: int):
     )
 
 
+def _default_reachability_checkpoint(config: Config, n_demo: int, seed: int) -> Path:
+    point_config = vae_scaling_config(config, n_demo)
+    return (
+        point_config.path_value("paths.incremental_artifact_dir")
+        / "reachability_distance"
+        / VAE_CANDIDATE
+        / f"seed{seed}"
+        / "d_phi.pt"
+    )
+
+
+def _candidate_reachability_checkpoint(config: Config, candidate: str, seed: int) -> Path:
+    return (
+        config.path_value("paths.incremental_artifact_dir")
+        / "reachability_distance"
+        / candidate
+        / f"seed{seed}"
+        / "d_phi.pt"
+    )
+
+
+def _condition_dim(frozen: FrozenHierarchy) -> int:
+    if frozen.conditioning == "relation":
+        return frozen.frame_dim + 2 * frozen.goal_dim + 4
+    return frozen.frame_dim + frozen.goal_dim + 4
+
+
+@torch.inference_mode()
+def _reachability_distance_values(
+    model: ReachabilityDistance,
+    distance_goal_norm: Standardizer,
+    frozen: FrozenHierarchy,
+    current_latent_norm: np.ndarray,
+    goal_latent_norm: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    current_raw = frozen.goal_norm.inverse(current_latent_norm)
+    goal_raw = frozen.goal_norm.inverse(goal_latent_norm)
+    current = distance_goal_norm.transform(current_raw).astype(np.float32)
+    goal = distance_goal_norm.transform(goal_raw).astype(np.float32)
+    values = model(
+        torch.from_numpy(current).to(device).float(),
+        torch.from_numpy(goal).to(device).float(),
+    )
+    return values.cpu().numpy().astype(np.float32)
+
+
+def _binary_auc(scores: np.ndarray, labels: np.ndarray) -> float | None:
+    labels_bool = labels.astype(bool)
+    positives = scores[labels_bool]
+    negatives = scores[~labels_bool]
+    if len(positives) == 0 or len(negatives) == 0:
+        return None
+    return float(
+        (
+            (positives[:, None] > negatives[None, :]).mean()
+            + 0.5 * (positives[:, None] == negatives[None, :]).mean()
+        )
+    )
+
+
 class HierarchyRollout:
     def __init__(
         self,
@@ -242,12 +346,29 @@ class HierarchyRollout:
         num_envs: int,
         seed_start: int,
         device: torch.device,
+        distance_metric: str = "raw_l2",
+        reachability_checkpoint_path: Path | None = None,
     ) -> None:
+        if distance_metric not in {"raw_l2", "reachability"}:
+            raise ValueError(f"Unknown low-level distance metric: {distance_metric}")
         self.config = config
         self.frozen = frozen
         self.num_envs = num_envs
         self.seed_start = seed_start
         self.device = device
+        self.distance_metric = distance_metric
+        self.reachability_model: ReachabilityDistance | None = None
+        self.reachability_goal_norm: Standardizer | None = None
+        self.reachability_checkpoint_path = reachability_checkpoint_path
+        if distance_metric == "reachability":
+            if reachability_checkpoint_path is None:
+                raise ValueError("reachability distance metric requires a checkpoint")
+            model, goal_norm, _checkpoint = load_reachability_distance(
+                reachability_checkpoint_path, device
+            )
+            model.requires_grad_(False)
+            self.reachability_model = model
+            self.reachability_goal_norm = goal_norm
         self.env = _visual_env(config, num_envs)
         self.dino = _phase4_dino_from_config(config, device)
         low = np.asarray(self.env.single_action_space.low, dtype=np.float32)
@@ -259,12 +380,31 @@ class HierarchyRollout:
         self.obs: dict[str, Any]
         self.frames: np.ndarray
         self.normalized_frames: np.ndarray
+        self.anchor_frames: np.ndarray
         self.current_latent: np.ndarray
         self.previous_action: np.ndarray
         self.held_goal: np.ndarray
         self.countdown: np.ndarray
         self.previous_env_reward: np.ndarray
         self.reset()
+
+    def distance(self, current_latent: np.ndarray, goal_latent: np.ndarray) -> np.ndarray:
+        if self.distance_metric == "raw_l2":
+            return self.raw_distance(current_latent, goal_latent)
+        if self.reachability_model is None or self.reachability_goal_norm is None:
+            raise RuntimeError("Reachability distance model was not initialized")
+        return _reachability_distance_values(
+            self.reachability_model,
+            self.reachability_goal_norm,
+            self.frozen,
+            current_latent,
+            goal_latent,
+            self.device,
+        )
+
+    @staticmethod
+    def raw_distance(current_latent: np.ndarray, goal_latent: np.ndarray) -> np.ndarray:
+        return np.mean(np.square(current_latent - goal_latent), axis=-1).astype(np.float32)
 
     def reset(self) -> None:
         seeds = [self.seed_start + self.episode_offset + index for index in range(self.num_envs)]
@@ -274,7 +414,10 @@ class HierarchyRollout:
             self.obs, self.dino, int(self.config.get("dino.batch_size", 64))
         )
         self.normalized_frames = self.frozen.frame_norm.transform(self.frames)
-        self.current_latent = _encode_frames(self.frozen, self.frames, self.device)
+        self.anchor_frames = self.frames.copy()
+        self.current_latent = _encode_effect_progress(
+            self.frozen, self.anchor_frames, self.frames, self.device
+        )
         self.previous_action = np.repeat(self.zero_previous[None], self.num_envs, axis=0)
         self.held_goal = np.zeros((self.num_envs, self.frozen.goal_dim), dtype=np.float32)
         self.countdown = np.zeros(self.num_envs, dtype=np.int32)
@@ -293,6 +436,13 @@ class HierarchyRollout:
                 .numpy()
             )
             self.held_goal[replan] = predicted[replan]
+            self.anchor_frames[replan] = self.frames[replan]
+            self.current_latent[replan] = _encode_effect_progress(
+                self.frozen,
+                self.anchor_frames[replan],
+                self.frames[replan],
+                self.device,
+            )
             self.countdown[replan] = self.frozen.update_period
         remaining = np.maximum(self.countdown, 1).astype(np.float32)
         condition_np = _low_condition_array(
@@ -308,9 +458,7 @@ class HierarchyRollout:
         base_action = torch.from_numpy(
             self.frozen.action_norm.inverse(normalized_base.cpu().numpy())
         ).to(self.device)
-        distance = np.mean(np.square(self.current_latent - self.held_goal), axis=-1).astype(
-            np.float32
-        )
+        distance = self.distance(self.current_latent, self.held_goal)
         return condition, base_action, distance, replan
 
     @torch.inference_mode()
@@ -319,6 +467,7 @@ class HierarchyRollout:
         executed_action: torch.Tensor,
         previous_distance: np.ndarray,
         terminal_weight: float,
+        distance_progress_weight: float,
         task_reward_weight: float,
         task_progress_weight: float,
         residual_penalty: np.ndarray,
@@ -329,11 +478,14 @@ class HierarchyRollout:
         next_frames = _phase4_frame_inputs(
             next_obs, self.dino, int(self.config.get("dino.batch_size", 64))
         )
-        next_latent = _encode_frames(self.frozen, next_frames, self.device)
-        next_distance = np.mean(np.square(next_latent - self.held_goal), axis=-1).astype(np.float32)
+        next_latent = _encode_effect_progress(
+            self.frozen, self.anchor_frames, next_frames, self.device
+        )
+        next_distance = self.distance(next_latent, self.held_goal)
+        raw_next_distance = self.raw_distance(next_latent, self.held_goal)
         segment_end = self.countdown == 1
         env_progress = env_reward_np - self.previous_env_reward
-        reward = previous_distance - next_distance
+        reward = distance_progress_weight * (previous_distance - next_distance)
         reward -= residual_penalty
         reward -= terminal_weight * next_distance * segment_end.astype(np.float32)
         reward += task_reward_weight * env_reward_np
@@ -358,6 +510,7 @@ class HierarchyRollout:
             self.previous_env_reward[done] = 0.0
         metrics = {
             "next_distance": next_distance,
+            "raw_next_distance": raw_next_distance,
             "segment_end": segment_end,
             "done": done,
             "env_reward": env_reward_np,
@@ -370,19 +523,49 @@ class HierarchyRollout:
         self.env.close()
 
 
-def _teacher_goal_threshold(config: Config, n_demo: int, seed: int) -> dict[str, float]:
-    point = vae_scaling_config(config, n_demo)
+def _teacher_goal_threshold(
+    config: Config, n_demo: int, seed: int, candidate: str = VAE_CANDIDATE
+) -> dict[str, float]:
+    point = vae_scaling_config(config, n_demo) if candidate == VAE_CANDIDATE else config
     path = (
         point.path_value("paths.incremental_artifact_dir")
         / "learned_interface"
-        / VAE_CANDIDATE
+        / candidate
         / f"seed{seed}"
         / "encoded_episodes.pt"
     )
-    payload = torch.load(path, map_location="cpu", weights_only=False)
     hierarchy = torch.load(path.parent / "hierarchy.pt", map_location="cpu", weights_only=False)
     norm = Standardizer.from_state_dict(hierarchy["goal_norm"])
     horizon = int(hierarchy["horizon_steps"])
+    representation = torch.load(
+        hierarchy["representation_checkpoint"], map_location="cpu", weights_only=False
+    )
+    if representation["encoder_type"] == "effect":
+        _train_raw, validation_raw, _encoded_path, _encoder_type = _load_reachability_latents(
+            point, candidate, seed=seed, horizon_steps=horizon, force=False
+        )
+        one_step_distances = []
+        initial_distances = []
+        for episode in validation_raw:
+            z = norm.transform(np.asarray(episode, dtype=np.float32))
+            if len(z) < 2:
+                continue
+            initial_distances.append(
+                np.mean((z[0:1] - z[-1:]) ** 2, axis=-1)
+            )
+            one_step_distances.append(
+                np.mean((z[-2:-1] - z[-1:]) ** 2, axis=-1)
+            )
+        initial = np.concatenate(initial_distances)
+        one_step = np.concatenate(one_step_distances)
+        return {
+            "teacher_initial_distance_mean": float(initial.mean()),
+            "teacher_initial_distance_median": float(np.median(initial)),
+            "teacher_one_step_distance_mean": float(one_step.mean()),
+            "goal_threshold": float(np.quantile(one_step, 0.90)),
+            "segments": int(len(initial)),
+        }
+    payload = torch.load(path, map_location="cpu", weights_only=False)
     one_step_distances: list[np.ndarray] = []
     initial_distances: list[np.ndarray] = []
     for goals in payload["validation_goals"]:
@@ -407,7 +590,7 @@ def audit_low_level_rl(config: Config, n_demo: int, seed: int) -> Path:
     device = default_device()
     frozen = _load_frozen(config, n_demo, seed, device)
     threshold = _teacher_goal_threshold(config, n_demo, seed)
-    condition_dim = frozen.frame_dim + frozen.goal_dim + 4
+    condition_dim = _condition_dim(frozen)
     agent = ResidualActorCritic(condition_dim)
     zero_condition = torch.zeros((32, condition_dim))
     with torch.no_grad():
@@ -508,15 +691,18 @@ def evaluate_residual_rl(
     run_name: str,
     episodes: int,
     seed_start: int,
+    candidate: str = VAE_CANDIDATE,
     checkpoint_path: Path | None = None,
+    distance_metric: str = "raw_l2",
+    reachability_checkpoint_path: Path | None = None,
     force: bool = False,
 ) -> Path:
-    artifact, result = _paths(config, n_demo, seed, run_name)
+    artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     output = result / f"eval_{episodes}_seed{seed_start}.json"
     if output.exists() and not force:
         return output
     device = default_device()
-    frozen = _load_frozen(config, n_demo, seed, device)
+    frozen = _load_frozen(config, n_demo, seed, device, candidate)
     checkpoint_path = checkpoint_path or artifact / "latest.pt"
     residual_agent: ResidualActorCritic | None = None
     direct_agent: DirectLowActorCritic | None = None
@@ -524,34 +710,62 @@ def evaluate_residual_rl(
     global_step = 0
     if checkpoint_path.exists():
         raw_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        method = str(raw_checkpoint.get("recipe", {}).get("method", "r1_residual_deterministic"))
+        recipe = raw_checkpoint.get("recipe", {})
+        method = str(recipe.get("method", "r1_residual_deterministic"))
+        distance_metric = str(recipe.get("distance_metric", "raw_l2"))
+        raw_reachability_checkpoint = recipe.get("reachability_checkpoint")
+        if raw_reachability_checkpoint is not None:
+            reachability_checkpoint_path = Path(str(raw_reachability_checkpoint))
         if method == "r3_direct_last_layer":
             direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
         else:
             residual_agent, checkpoint = _load_residual(checkpoint_path, device)
             alpha = float(checkpoint["recipe"]["alpha"])
         global_step = int(checkpoint["global_step"])
+    elif distance_metric == "reachability" and reachability_checkpoint_path is None:
+        reachability_checkpoint_path = (
+            _default_reachability_checkpoint(config, n_demo, seed)
+            if candidate == VAE_CANDIDATE
+            else _candidate_reachability_checkpoint(config, candidate, seed)
+        )
     num_envs = min(int(config.get("low_level_rl.eval_num_envs", 32)), episodes)
-    rollout = HierarchyRollout(config, frozen, num_envs, seed_start, device)
-    threshold = _teacher_goal_threshold(config, n_demo, seed)["goal_threshold"]
+    rollout = HierarchyRollout(
+        config,
+        frozen,
+        num_envs,
+        seed_start,
+        device,
+        distance_metric=distance_metric,
+        reachability_checkpoint_path=reachability_checkpoint_path,
+    )
+    threshold = _teacher_goal_threshold(config, n_demo, seed, candidate)["goal_threshold"]
     successes: list[float] = []
     finals: list[float] = []
     maxima: list[float] = []
     initial_distances: list[float] = []
     final_distances: list[float] = []
+    raw_initial_distances: list[float] = []
+    raw_final_distances: list[float] = []
     reached: list[float] = []
+    selected_metric_terminal_scores: list[float] = []
     saturation = 0
     action_count = 0
     residual_magnitudes: list[float] = []
     current_segment_initial: np.ndarray | None = None
+    current_segment_raw_initial: np.ndarray | None = None
     current_final = np.zeros(num_envs, dtype=np.float32)
     current_max = np.full(num_envs, -np.inf, dtype=np.float32)
     while len(successes) < episodes:
         condition, base_action, distance, replan = rollout.condition()
+        raw_distance = rollout.raw_distance(rollout.current_latent, rollout.held_goal)
         if current_segment_initial is None:
             current_segment_initial = distance.copy()
+            current_segment_raw_initial = raw_distance.copy()
         else:
             current_segment_initial[replan] = distance[replan]
+            if current_segment_raw_initial is None:
+                raise RuntimeError("Raw segment distance state was not initialized")
+            current_segment_raw_initial[replan] = raw_distance[replan]
         if direct_agent is not None:
             unclipped = direct_agent.get_action_and_value(condition, deterministic=True)[0]
             residual = unclipped - base_action
@@ -571,18 +785,29 @@ def evaluate_residual_rl(
             action,
             distance,
             terminal_weight=0.0,
+            distance_progress_weight=1.0,
             task_reward_weight=0.0,
             task_progress_weight=0.0,
             residual_penalty=np.zeros(num_envs, dtype=np.float32),
         )
         segment_end = metrics["segment_end"]
         if np.any(segment_end):
+            if current_segment_raw_initial is None:
+                raise RuntimeError("Raw segment distance state was not initialized")
             initial_distances.extend(current_segment_initial[segment_end].tolist())
             final_distances.extend(metrics["next_distance"][segment_end].tolist())
-            reached.extend(
-                (metrics["next_distance"][segment_end] < threshold).astype(float).tolist()
+            raw_initial_distances.extend(
+                current_segment_raw_initial[segment_end].tolist()
+            )
+            raw_final = metrics["raw_next_distance"][segment_end]
+            raw_final_distances.extend(raw_final.tolist())
+            reached_np = (raw_final < threshold).astype(np.float32)
+            reached.extend(reached_np.tolist())
+            selected_metric_terminal_scores.extend(
+                (-metrics["next_distance"][segment_end]).tolist()
             )
             current_segment_initial[segment_end] = metrics["next_distance"][segment_end]
+            current_segment_raw_initial[segment_end] = raw_final
         info = metrics["info"]
         current_final = metrics["env_reward"].astype(np.float32)
         current_max = np.maximum(current_max, current_final)
@@ -601,12 +826,21 @@ def evaluate_residual_rl(
     count = min(len(successes), episodes)
     initial_np = np.asarray(initial_distances, dtype=np.float32)
     final_np = np.asarray(final_distances, dtype=np.float32)
+    raw_initial_np = np.asarray(raw_initial_distances, dtype=np.float32)
+    raw_final_np = np.asarray(raw_final_distances, dtype=np.float32)
+    reached_np = np.asarray(reached, dtype=np.float32)
+    selected_scores_np = np.asarray(selected_metric_terminal_scores, dtype=np.float32)
     payload = {
         "n_demo": n_demo,
+        "candidate": candidate,
         "seed": seed,
         "run_name": run_name,
         "checkpoint": str(checkpoint_path)
         if (residual_agent is not None or direct_agent is not None)
+        else None,
+        "distance_metric": distance_metric,
+        "reachability_checkpoint": str(reachability_checkpoint_path)
+        if reachability_checkpoint_path is not None
         else None,
         "rl_steps": global_step,
         "episodes": count,
@@ -617,7 +851,13 @@ def evaluate_residual_rl(
         "segment_initial_distance": float(initial_np.mean()),
         "segment_final_distance": float(final_np.mean()),
         "segment_distance_reduction": float((initial_np - final_np).mean()),
-        "segment_goal_reach_rate": float(np.mean(reached)),
+        "raw_segment_initial_distance": float(raw_initial_np.mean()),
+        "raw_segment_final_distance": float(raw_final_np.mean()),
+        "raw_segment_distance_reduction": float((raw_initial_np - raw_final_np).mean()),
+        "segment_goal_reach_rate": float(np.mean(reached)) if reached else None,
+        "selected_metric_terminal_reach_auc": _binary_auc(
+            selected_scores_np, reached_np
+        ),
         "goal_threshold": threshold,
         "action_saturation_rate": saturation / max(action_count, 1),
         "residual_l2_mean": float(np.mean(residual_magnitudes)),
@@ -785,28 +1025,45 @@ def train_residual_rl(
     total_steps: int,
     alpha: float,
     terminal_weight: float,
+    distance_progress_weight: float = 1.0,
     task_reward_weight: float = 0.0,
     task_progress_weight: float = 0.0,
+    distance_metric: str = "raw_l2",
+    reachability_checkpoint_path: Path | None = None,
+    candidate: str = VAE_CANDIDATE,
+    rl_seed_offset: int = 0,
     force: bool = False,
 ) -> Path:
-    if n_demo not in {500, 1000}:
+    if rl_seed_offset < 0:
+        raise ValueError("rl_seed_offset must be non-negative")
+    if candidate == VAE_CANDIDATE and n_demo not in {500, 1000}:
         raise ValueError("Low-level RL currently supports N_demo in {500, 1000}")
-    artifact, result = _paths(config, n_demo, seed, run_name)
+    artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     latest = artifact / "latest.pt"
     best_train_latent = artifact / "best_train_latent.pt"
     if force:
         latest.unlink(missing_ok=True)
         best_train_latent.unlink(missing_ok=True)
     device = default_device()
-    set_seed(seed + 50_000)
-    frozen = _load_frozen(config, n_demo, seed, device)
+    set_seed(seed + 50_000 + rl_seed_offset)
+    frozen = _load_frozen(config, n_demo, seed, device, candidate)
+    if distance_metric == "reachability" and reachability_checkpoint_path is None:
+        reachability_checkpoint_path = (
+            _default_reachability_checkpoint(config, n_demo, seed)
+            if candidate == VAE_CANDIDATE
+            else _candidate_reachability_checkpoint(config, candidate, seed)
+        )
+    if distance_metric == "reachability" and not reachability_checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Reachability checkpoint not found: {reachability_checkpoint_path}"
+        )
     if any(
         parameter.requires_grad
         for module in (frozen.encoder, frozen.high_model, frozen.low_model)
         for parameter in module.parameters()
     ):
         raise RuntimeError("Frozen hierarchy unexpectedly has trainable parameters")
-    condition_dim = frozen.frame_dim + frozen.goal_dim + 4
+    condition_dim = _condition_dim(frozen)
     width = int(config.get("low_level_rl.residual_width", 256))
     depth = int(config.get("low_level_rl.residual_depth", 2))
     agent = ResidualActorCritic(
@@ -821,11 +1078,18 @@ def train_residual_rl(
     recipe = {
         "method": "r1_residual_deterministic",
         "n_demo": n_demo,
+        "candidate": candidate,
         "seed": seed,
+        "rl_seed_offset": rl_seed_offset,
         "alpha": alpha,
         "terminal_weight": terminal_weight,
+        "distance_progress_weight": distance_progress_weight,
         "task_reward_weight": task_reward_weight,
         "task_progress_weight": task_progress_weight,
+        "distance_metric": distance_metric,
+        "reachability_checkpoint": str(reachability_checkpoint_path)
+        if reachability_checkpoint_path is not None
+        else None,
         "residual_penalty_weight": float(config.get("low_level_rl.residual_penalty_weight", 0.01)),
         "segment_terminates_gae": bool(config.get("low_level_rl.segment_terminates_gae", True)),
         "rollout_mode": "full_hierarchy_segment_reward",
@@ -855,8 +1119,12 @@ def train_residual_rl(
         config,
         frozen,
         num_envs,
-        int(config.get("low_level_rl.train_seed_start", 3_000_000)) + seed * 100_000,
+        int(config.get("low_level_rl.train_seed_start", 3_000_000))
+        + seed * 100_000
+        + rl_seed_offset * 100_000,
         device,
+        distance_metric=distance_metric,
+        reachability_checkpoint_path=reachability_checkpoint_path,
     )
     condition_buf = torch.zeros((rollout_steps, num_envs, condition_dim), device=device)
     raw_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
@@ -902,7 +1170,13 @@ def train_residual_rl(
                     residual_penalty_weight * torch.mean(residual.square(), dim=-1).cpu().numpy()
                 )
                 reward, done, metrics = rollout.step(
-                    action, distance, terminal_weight, task_reward_weight, task_progress_weight, penalty
+                    action,
+                    distance,
+                    terminal_weight,
+                    distance_progress_weight,
+                    task_reward_weight,
+                    task_progress_weight,
+                    penalty,
                 )
                 reward_buf[step] = torch.from_numpy(reward).to(device)
                 # Each held goal defines a local 10-step MDP. Do not carry
@@ -1035,28 +1309,45 @@ def train_direct_low_rl(
     total_steps: int,
     bc_weight: float,
     terminal_weight: float,
+    distance_progress_weight: float = 1.0,
     task_reward_weight: float = 0.0,
     task_progress_weight: float = 0.0,
+    distance_metric: str = "raw_l2",
+    reachability_checkpoint_path: Path | None = None,
+    candidate: str = VAE_CANDIDATE,
+    rl_seed_offset: int = 0,
     force: bool = False,
 ) -> Path:
-    if n_demo not in {500, 1000}:
+    if rl_seed_offset < 0:
+        raise ValueError("rl_seed_offset must be non-negative")
+    if candidate == VAE_CANDIDATE and n_demo not in {500, 1000}:
         raise ValueError("Low-level RL currently supports N_demo in {500, 1000}")
-    artifact, result = _paths(config, n_demo, seed, run_name)
+    artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     latest = artifact / "latest.pt"
     best_train_latent = artifact / "best_train_latent.pt"
     if force:
         latest.unlink(missing_ok=True)
         best_train_latent.unlink(missing_ok=True)
     device = default_device()
-    set_seed(seed + 60_000)
-    frozen = _load_frozen(config, n_demo, seed, device)
+    set_seed(seed + 60_000 + rl_seed_offset)
+    frozen = _load_frozen(config, n_demo, seed, device, candidate)
+    if distance_metric == "reachability" and reachability_checkpoint_path is None:
+        reachability_checkpoint_path = (
+            _default_reachability_checkpoint(config, n_demo, seed)
+            if candidate == VAE_CANDIDATE
+            else _candidate_reachability_checkpoint(config, candidate, seed)
+        )
+    if distance_metric == "reachability" and not reachability_checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Reachability checkpoint not found: {reachability_checkpoint_path}"
+        )
     if any(
         parameter.requires_grad
         for module in (frozen.encoder, frozen.high_model, frozen.low_model)
         for parameter in module.parameters()
     ):
         raise RuntimeError("Frozen hierarchy unexpectedly has trainable parameters")
-    condition_dim = frozen.frame_dim + frozen.goal_dim + 4
+    condition_dim = _condition_dim(frozen)
     width = int(config.get("low_level_rl.residual_width", 256))
     depth = int(config.get("low_level_rl.residual_depth", 2))
     agent = DirectLowActorCritic(
@@ -1077,11 +1368,18 @@ def train_direct_low_rl(
     recipe = {
         "method": "r3_direct_last_layer",
         "n_demo": n_demo,
+        "candidate": candidate,
         "seed": seed,
+        "rl_seed_offset": rl_seed_offset,
         "bc_weight": bc_weight,
         "terminal_weight": terminal_weight,
+        "distance_progress_weight": distance_progress_weight,
         "task_reward_weight": task_reward_weight,
         "task_progress_weight": task_progress_weight,
+        "distance_metric": distance_metric,
+        "reachability_checkpoint": str(reachability_checkpoint_path)
+        if reachability_checkpoint_path is not None
+        else None,
         "segment_terminates_gae": bool(config.get("low_level_rl.segment_terminates_gae", True)),
         "rollout_mode": "full_hierarchy_segment_reward",
         "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
@@ -1111,8 +1409,12 @@ def train_direct_low_rl(
         config,
         frozen,
         num_envs,
-        int(config.get("low_level_rl.train_seed_start", 3_000_000)) + seed * 100_000,
+        int(config.get("low_level_rl.train_seed_start", 3_000_000))
+        + seed * 100_000
+        + rl_seed_offset * 100_000,
         device,
+        distance_metric=distance_metric,
+        reachability_checkpoint_path=reachability_checkpoint_path,
     )
     condition_buf = torch.zeros((rollout_steps, num_envs, condition_dim), device=device)
     raw_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
@@ -1157,6 +1459,7 @@ def train_direct_low_rl(
                     action,
                     distance,
                     terminal_weight,
+                    distance_progress_weight,
                     task_reward_weight,
                     task_progress_weight,
                     np.zeros(num_envs, dtype=np.float32),

@@ -7,6 +7,7 @@ import torch
 from hcl_poc.config import Config
 from hcl_poc.eval import horizon_steps
 from hcl_poc.flow import flow_matching_loss, sample_flow
+from hcl_poc.goal_diagnostics import _build_conditions, _condition_blocks
 from hcl_poc.incremental import (
     _pre_rl_phase_b_goal,
     action_alignment_metrics,
@@ -24,6 +25,16 @@ from hcl_poc.learned_interface import (
 from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic
 from hcl_poc.models import FlowModel, ObservationEncoder, RepresentationWorldModel
 from hcl_poc.privileged_z import _privileged_z_samples
+from hcl_poc.privileged_z import _nearest_goal_distances
+from hcl_poc.privileged_z import _nearest_goal_prototypes
+from hcl_poc.privileged_z import filter_privileged_z_action_search_bank
+from hcl_poc.privileged_z import reweight_privileged_z_action_search_bank
+from hcl_poc.reachability import (
+    ReachabilityDistance,
+    _build_effect_progress_episodes,
+    _sample_reachability_batch,
+    _spearman,
+)
 from hcl_poc.rl import PPOAgent
 from hcl_poc.utils import Standardizer
 from hcl_poc.vae_scaling import (
@@ -99,6 +110,26 @@ def test_direct_low_actor_trains_only_final_low_layer() -> None:
     assert value.shape == (4,)
 
 
+def test_direct_low_actor_supports_film_final_layer() -> None:
+    low = _GoalConditionedLowPolicy(5, 3, 8, "film")
+    actor = DirectLowActorCritic(
+        low,
+        action_mean=np.zeros(3, dtype=np.float32),
+        action_std=np.ones(3, dtype=np.float32),
+        condition_dim=12,
+        width=8,
+        depth=1,
+    )
+    low_trainable = [
+        name for name, parameter in actor.low_model.named_parameters() if parameter.requires_grad
+    ]
+    assert low_trainable == ["output_layer.weight", "output_layer.bias"]
+    action, logprob, _entropy, value = actor.get_action_and_value(torch.randn(4, 12))
+    assert action.shape == (4, 3)
+    assert logprob.shape == (4,)
+    assert value.shape == (4,)
+
+
 def test_vae_free_bits_apply_per_dimension() -> None:
     mean = torch.zeros(2, 4)
     logvar = torch.zeros(2, 4)
@@ -151,6 +182,174 @@ def test_privileged_z_goal_samples_cover_all_remaining_offsets() -> None:
     expected_goal = state_norm.transform(states[10:11])[0]
     np.testing.assert_allclose(x[:, 2:4], np.repeat(expected_goal[None], 10, axis=0))
     np.testing.assert_allclose(y, action_norm.transform(actions[:10]))
+
+
+def test_filter_privileged_z_action_search_bank_preserves_horizon_rows(tmp_path) -> None:
+    horizon_steps = 2
+    branches = 4
+    condition_dim = 3
+    action_dim = 2
+    conditions = np.arange(
+        horizon_steps * branches * condition_dim,
+        dtype=np.float32,
+    ).reshape(horizon_steps * branches, condition_dim)
+    actions = np.arange(
+        horizon_steps * branches * action_dim,
+        dtype=np.float32,
+    ).reshape(horizon_steps * branches, action_dim)
+    input_path = tmp_path / "bank.npz"
+    output_path = tmp_path / "filtered.npz"
+    np.savez_compressed(
+        input_path,
+        conditions=conditions,
+        actions=actions,
+        selected_base_mse=np.asarray([0.01, 0.08, 0.20, 0.03], dtype=np.float32),
+        selected_best_mse=np.asarray([0.005, 0.03, 0.04, 0.02], dtype=np.float32),
+        selected_improvement_mse=np.asarray([0.005, 0.05, 0.16, 0.01], dtype=np.float32),
+        selected_action_delta_l2=np.asarray([0.1, 0.2, 0.3, 0.1], dtype=np.float32),
+        selected_branch_indices=np.arange(branches, dtype=np.int64),
+        horizon_steps=np.asarray(horizon_steps, dtype=np.int64),
+        mode=np.asarray("hierarchy"),
+    )
+
+    filter_privileged_z_action_search_bank(
+        input_path,
+        output_path=output_path,
+        min_base_mse=0.05,
+        max_best_mse=0.05,
+        force=True,
+    )
+
+    with np.load(output_path) as filtered:
+        kept_conditions = filtered["conditions"]
+        kept_actions = filtered["actions"]
+        kept_indices = filtered["selected_branch_indices"]
+    expected_conditions = (
+        conditions.reshape(horizon_steps, branches, condition_dim)[:, [1, 2]]
+        .reshape(-1, condition_dim)
+    )
+    expected_actions = (
+        actions.reshape(horizon_steps, branches, action_dim)[:, [1, 2]]
+        .reshape(-1, action_dim)
+    )
+    np.testing.assert_array_equal(kept_conditions, expected_conditions)
+    np.testing.assert_array_equal(kept_actions, expected_actions)
+    np.testing.assert_array_equal(kept_indices, np.asarray([1, 2]))
+
+
+def test_reweight_privileged_z_action_search_bank_writes_row_weights(tmp_path) -> None:
+    horizon_steps = 2
+    branches = 3
+    input_path = tmp_path / "bank.npz"
+    output_path = tmp_path / "weighted.npz"
+    np.savez_compressed(
+        input_path,
+        conditions=np.zeros((horizon_steps * branches, 4), dtype=np.float32),
+        actions=np.zeros((horizon_steps * branches, 2), dtype=np.float32),
+        selected_base_mse=np.asarray([0.05, 0.20, 0.05], dtype=np.float32),
+        selected_improvement_mse=np.asarray([0.05, 0.05, 0.20], dtype=np.float32),
+        horizon_steps=np.asarray(horizon_steps, dtype=np.int64),
+    )
+
+    reweight_privileged_z_action_search_bank(
+        input_path,
+        output_path=output_path,
+        mode="base_x_improvement",
+        success_epsilon=0.05,
+        improvement_scale=0.05,
+        min_weight=0.25,
+        max_weight=4.0,
+        normalize_mean=True,
+        force=True,
+    )
+
+    with np.load(output_path) as weighted:
+        branch_weights = weighted["branch_sample_weights"]
+        sample_weights = weighted["sample_weights"]
+    np.testing.assert_allclose(np.mean(branch_weights), 1.0, atol=1e-6)
+    expected = np.repeat(branch_weights[None, :], horizon_steps, axis=0).reshape(-1)
+    np.testing.assert_allclose(sample_weights, expected)
+
+
+def test_nearest_goal_distances_supports_leave_one_out() -> None:
+    goals = np.asarray(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [3.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    mse, l2 = _nearest_goal_distances(goals, goals, exclude_self=True)
+
+    np.testing.assert_allclose(mse, np.asarray([0.5, 0.5, 2.0], dtype=np.float32))
+    np.testing.assert_allclose(l2, np.asarray([1.0, 1.0, 2.0], dtype=np.float32))
+
+
+def test_nearest_goal_prototypes_returns_bank_rows() -> None:
+    queries = np.asarray([[0.1, 0.0], [2.6, 0.0]], dtype=np.float32)
+    bank = np.asarray([[0.0, 0.0], [1.0, 0.0], [3.0, 0.0]], dtype=np.float32)
+
+    prototypes, mse, l2 = _nearest_goal_prototypes(queries, bank)
+
+    np.testing.assert_allclose(prototypes, np.asarray([[0.0, 0.0], [3.0, 0.0]]))
+    np.testing.assert_allclose(mse, np.asarray([0.005, 0.08], dtype=np.float32), atol=1e-6)
+    np.testing.assert_allclose(l2, np.asarray([0.1, 0.4], dtype=np.float32), atol=1e-6)
+
+
+def test_reachability_batch_samples_temporal_targets() -> None:
+    episodes = [
+        np.arange(8 * 2, dtype=np.float32).reshape(8, 2),
+        np.arange(20, 20 + 8 * 2, dtype=np.float32).reshape(8, 2),
+    ]
+
+    starts, goals, targets = _sample_reachability_batch(
+        episodes,
+        batch_size=32,
+        horizon_steps=4,
+        rng=np.random.default_rng(7),
+        forward_probability=1.0,
+        reverse_probability=0.0,
+    )
+
+    assert starts.shape == (32, 2)
+    assert goals.shape == (32, 2)
+    assert targets.shape == (32,)
+    assert np.all(targets > 0.0)
+    assert np.all(targets <= 1.0)
+    assert np.all(goals[:, 0] > starts[:, 0])
+
+
+def test_reachability_distance_outputs_bounded_scores() -> None:
+    model = ReachabilityDistance(latent_dim=3, hidden_dim=8, depth=1)
+    start = torch.randn(5, 3)
+    goal = torch.randn(5, 3)
+    out = model(start, goal)
+
+    assert out.shape == (5,)
+    assert torch.all(out >= 0.0)
+    assert torch.all(out <= 1.0)
+    assert _spearman(np.asarray([1.0, 2.0, 3.0]), np.asarray([3.0, 2.0, 1.0])) < 0.0
+
+
+def test_goal_diagnostic_condition_blocks_match_conditioning_layouts() -> None:
+    concat = _condition_blocks(4, 3, 2, "concat")
+    assert concat == {
+        "frame": slice(0, 4),
+        "goal": slice(4, 7),
+        "previous_action": slice(7, 9),
+        "remaining": slice(9, 10),
+    }
+
+    relation = _condition_blocks(4, 3, 2, "relation")
+    assert relation == {
+        "frame": slice(0, 4),
+        "current_latent": slice(4, 7),
+        "goal": slice(7, 10),
+        "previous_action": slice(10, 12),
+        "remaining": slice(12, 13),
+    }
 
 
 def test_goal_conditioning_variants_have_consistent_policy_outputs() -> None:
@@ -227,6 +426,59 @@ def test_effect_dataset_uses_one_fixed_pair_for_held_goal() -> None:
     encoder = _EffectEncoder(input_dim=4, effect_dim=8, hidden_dim=16)
     pair = torch.cat([sample["x_start"], sample["x_future"], torch.ones(1)])[None]
     assert encoder(pair).shape == (1, 8)
+
+
+def test_effect_goal_diagnostic_builds_current_future_pair() -> None:
+    frames = np.arange(12 * 4, dtype=np.float32).reshape(12, 4)
+    actions = np.arange(11 * 3, dtype=np.float32).reshape(11, 3)
+    stored_goals = np.full((12, 2), -100.0, dtype=np.float32)
+    encoder = torch.nn.Linear(9, 2, bias=False)
+    with torch.no_grad():
+        encoder.weight.zero_()
+        encoder.weight[0, 0] = 1.0
+        encoder.weight[1, 4] = 1.0
+    condition, target = _build_conditions(
+        Standardizer(np.zeros(4, dtype=np.float32), np.ones(4, dtype=np.float32)),
+        Standardizer(np.zeros(2, dtype=np.float32), np.ones(2, dtype=np.float32)),
+        Standardizer(np.zeros(3, dtype=np.float32), np.ones(3, dtype=np.float32)),
+        [{"frames": frames, "actions": actions}],
+        [stored_goals],
+        [(0, 1)],
+        horizon=2,
+        base_horizon=10,
+        conditioning="film",
+        encoder_type="effect",
+        encoder=encoder,
+        representation_frame_norm=Standardizer(
+            np.zeros(4, dtype=np.float32), np.ones(4, dtype=np.float32)
+        ),
+        device=torch.device("cpu"),
+    )
+    np.testing.assert_array_equal(condition[0, :4], frames[1])
+    np.testing.assert_array_equal(condition[0, 4:6], [frames[1, 0], frames[3, 0]])
+    np.testing.assert_array_equal(target[0], actions[1])
+
+
+def test_effect_progress_episodes_share_one_anchor() -> None:
+    frames = np.arange(5 * 4, dtype=np.float32).reshape(5, 4)
+    encoder = torch.nn.Linear(9, 2, bias=False)
+    with torch.no_grad():
+        encoder.weight.zero_()
+        encoder.weight[0, 0] = 1.0
+        encoder.weight[1, 4] = 1.0
+
+    episodes = _build_effect_progress_episodes(
+        [{"frames": frames}],
+        encoder,
+        Standardizer(np.zeros(4, dtype=np.float32), np.ones(4, dtype=np.float32)),
+        torch.device("cpu"),
+        anchor_stride=2,
+        max_span=3,
+    )
+
+    assert len(episodes) == 2
+    np.testing.assert_array_equal(episodes[0], [[0.0, 0.0], [0.0, 4.0], [0.0, 8.0]])
+    np.testing.assert_array_equal(episodes[1], [[8.0, 8.0], [8.0, 12.0], [8.0, 16.0]])
 
 
 def test_vae_scaling_budget_config_is_isolated() -> None:

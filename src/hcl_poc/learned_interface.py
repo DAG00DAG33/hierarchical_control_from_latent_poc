@@ -2276,9 +2276,10 @@ def evaluate_learned_interface_hierarchy(
     goal_source: str,
     seed: int = 0,
     episodes: int | None = None,
+    eval_seed_start: int | None = None,
     force: bool = False,
 ) -> Path:
-    if goal_source not in {"learned", "oracle"}:
+    if goal_source not in {"learned", "oracle", "shuffled"}:
         raise ValueError(f"Unknown goal source: {goal_source}")
     eval_episodes = int(
         episodes
@@ -2288,10 +2289,17 @@ def evaluate_learned_interface_hierarchy(
             else config.get("learned_interface.evaluation.screening_episodes", 20)
         )
     )
-    output_path = (
-        _result_dir(config, candidate, seed)
-        / f"{goal_source}_hierarchy_eval_{eval_episodes}.json"
+    seed_start = int(
+        eval_seed_start
+        if eval_seed_start is not None
+        else config.get("learned_interface.evaluation.seed_start", 2_100_000)
     )
+    output_suffix = (
+        f"{goal_source}_hierarchy_eval_{eval_episodes}"
+        if eval_seed_start is None
+        else f"{goal_source}_hierarchy_eval_{eval_episodes}_seed{seed_start}"
+    )
+    output_path = _result_dir(config, candidate, seed) / f"{output_suffix}.json"
     if output_path.exists() and not force:
         console.print(f"Learned-interface evaluation exists: {output_path}")
         return output_path
@@ -2323,15 +2331,13 @@ def evaluate_learned_interface_hierarchy(
         int(config.get("learned_interface.evaluation.num_envs", 16)),
         eval_episodes,
     )
-    seed_start = int(
-        config.get("learned_interface.evaluation.seed_start", 2_100_000)
-    )
     successes: list[float] = []
     final_rewards: list[float] = []
     max_rewards: list[float] = []
     teacher_maes: list[float] = []
     goal_errors: list[float] = []
     replay_errors: list[float] = []
+    shuffled_goal_l2: list[float] = []
     saturated_actions = 0
     active_actions = 0
     high_decisions = 0
@@ -2466,6 +2472,20 @@ def evaluate_learned_interface_hierarchy(
                             ).tolist()
                         )
                         selected_goal = oracle_goal
+                    if goal_source == "shuffled":
+                        replan_indices = np.flatnonzero(replan)
+                        if len(replan_indices) > 1:
+                            order = np.roll(replan_indices, 1)
+                            shuffled = selected_goal.copy()
+                            shuffled[replan_indices] = selected_goal[order]
+                            shuffled_goal_l2.extend(
+                                np.linalg.norm(
+                                    selected_goal[replan_indices]
+                                    - shuffled[replan_indices],
+                                    axis=-1,
+                                ).tolist()
+                            )
+                            selected_goal = shuffled
                     held_goal[replan] = selected_goal[replan]
                     countdown[replan] = update_period
                     high_decisions += int(np.sum(replan))
@@ -2588,6 +2608,9 @@ def evaluate_learned_interface_hierarchy(
         "high_level_decisions_per_episode": high_decisions / eval_episodes,
         "normalized_goal_prediction_l2": (
             float(np.mean(goal_errors)) if goal_errors else None
+        ),
+        "shuffled_goal_l2": (
+            float(np.mean(shuffled_goal_l2)) if shuffled_goal_l2 else None
         ),
         "replay_current_state_error_max": (
             float(np.max(replay_errors)) if replay_errors else None

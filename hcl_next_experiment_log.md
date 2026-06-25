@@ -1,0 +1,7882 @@
+# HCL next experiments log
+
+## 2026-06-25 - Phase 0 manifests and VAE512 goal-use smoke
+
+### Hypothesis
+
+Before launching more RL, the project needs fixed `N=500` and `N=1800`
+manifests/local reset banks and a fresh goal-identifiability check on the
+existing VAE512 hierarchy.
+
+### Commands
+
+```bash
+uv run hcl-poc doctor
+uv run hcl-poc incremental vae-scaling-manifests --config configs/pusht_incremental.yaml
+uv run python scripts/prepare_hcl_next_phase0.py
+uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 2048 \
+  --batch-size 512 \
+  --horizons 2,5,10,20 \
+  --reference-horizon 10 \
+  --output results/hcl_next_phase0/goal_valid_sensitivity_n500_seed0_h2_5_10_20.json
+uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 256 \
+  --batch-size 128 \
+  --horizons 2,5,10,20 \
+  --reference-horizon 10 \
+  --output results/hcl_next_phase0/goal_valid_sensitivity_n500_seed0_h2_5_10_20_smoke256.json
+uv run python scripts/rl_rerun_condition_block_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 256 \
+  --batch-size 128 \
+  --horizon 10 \
+  --output results/hcl_next_phase0/condition_block_sensitivity_n500_seed0_k10_smoke256.json
+```
+
+The 2048-sample valid-goal run was interrupted after several minutes. The
+bottleneck was random HDF5 reads from the large 4096-env DINO feature dataset,
+not model inference. The 256-sample result below is a smoke/debug gate, not a
+final diagnostic.
+
+### Setup
+
+- git commit: `d218d205325d16fcdd37a0d1e2f1dd1cb9abc150`
+- git dirty: yes
+- machine/GPU: NVIDIA GeForce RTX 4060 Ti, 15.57 GiB total VRAM
+- free disk before runs: about 22 GiB
+- config: `configs/pusht_incremental.yaml`
+- N trajectories: 500 and 1800 manifests created; diagnostics run for N=500
+- representation: VAE512 future-state latent
+- architecture: existing concat low level
+- horizon k: fixed banks for 2, 5, 10, 20; condition-block smoke at k=10
+- num_envs: fixed local reset banks use 4096-env validation vector dataset
+- goal source: replay/oracle future states from held-out vector dataset
+- result level: smoke/debug for diagnostics because samples=256
+
+### Initial results
+
+Environment and manifest validation passed:
+
+| check | result |
+| --- | --- |
+| `hcl-poc doctor` | PushT-v1 OK, CUDA available |
+| VAE scaling manifests | nested fixed-validation manifests valid |
+| Phase 0 manifest files | 14 files written under `data/manifests/` |
+
+Created fixed files:
+
+| file group | count | notes |
+| --- | ---: | --- |
+| `pusht_n{500,1800}_seed0_{train,val,eval}.json` | 6 | eval is a simulator seed bank, not reused validation trajectories |
+| `local_reset_bank_n{500,1800}_seed0_k{2,5,10,20}.json` | 8 | each bank references 4096 local reset episodes |
+
+Fresh N=500 VAE512 goal-use smoke:
+
+| metric | value |
+| --- | ---: |
+| mean latent goal L2, k2 vs k10 | 26.48 |
+| mean latent goal L2, k5 vs k10 | 24.45 |
+| mean latent goal L2, k20 vs k10 | 23.79 |
+| mean action L2, k2 vs k10 | 0.024 |
+| mean action L2, k5 vs k10 | 0.019 |
+| mean action L2, k20 vs k10 | 0.019 |
+| observation-shuffle action L2 | 0.818 |
+| goal-shuffle action L2 | 0.049 |
+| previous-action-shuffle action L2 | 0.077 |
+| remaining-time-shuffle action L2 | 0.000 |
+| observation/goal shuffle ratio | 16.73 |
+
+### Plots / artifacts
+
+- split and reset manifests: `data/manifests/`
+- preparation script: `scripts/prepare_hcl_next_phase0.py`
+- valid-goal smoke JSON:
+  `results/hcl_next_phase0/goal_valid_sensitivity_n500_seed0_h2_5_10_20_smoke256.json`
+- condition-block smoke JSON:
+  `results/hcl_next_phase0/condition_block_sensitivity_n500_seed0_k10_smoke256.json`
+
+### Interpretation
+
+The existing VAE512 concat low level still fails the goal-identifiability gate.
+Large changes in valid future-goal latent produce only about `0.02` action L2,
+while shuffling the current observation changes actions by about `0.82` L2.
+This is consistent with the previous diagnosis: the low level mostly ignores
+the future goal.
+
+The fixed manifest/reset-bank prerequisite is now in place for Phase 0, but
+expensive RL should still wait for either privileged/TCP sanity runs or a
+goal-conditioning architecture/representation that passes the gate.
+
+### Next action
+
+Run the Phase 1 RL sanity path with privileged/TCP state and oracle local goals,
+or implement the reusable goal-diagnostics module/FiLM low-level path so that
+VAE512 can be gated before any further learned-latent PPO.
+
+## 2026-06-25 - Phase 1 inventory: privileged/TCP sanity base
+
+### Hypothesis
+
+Before launching new learned-latent PPO, reuse existing privileged/TCP artifacts
+to determine whether the easier representation already gives a viable RL sanity
+base.
+
+### Command
+
+```bash
+find artifacts/incremental/privileged_z artifacts/rl_rerun results/incremental results/rl_rerun \
+  -path '*privileged_z*' -type f
+cat artifacts/incremental/privileged_z/clean_official_multioffset/n500/seed0/privileged_z_k10_metrics.json
+cat artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10_metrics.json
+cat artifacts/incremental/privileged_z/clean_official_multioffset/n500/seed0/privileged_z_k10_eval_hierarchy_n100.json
+cat artifacts/incremental/privileged_z/clean_official_multioffset/n500/seed0/privileged_z_k10_eval_oracle_hierarchy_n100.json
+cat artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10_eval_hierarchy_n100.json
+cat artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10_eval_oracle_hierarchy_n100.json
+```
+
+### Setup
+
+- git commit: `d218d205325d16fcdd37a0d1e2f1dd1cb9abc150`
+- config: `configs/pusht_incremental.yaml`
+- representation: 31D privileged Push-T observation state
+- architecture: existing privileged-z MLP hierarchy
+- horizon k: 10
+- low-level training: multi-offset held-goal training
+- data regimes inspected: `N=500`, `N=1800`
+- goal source eval: learned high-level and oracle privileged future state
+- result level: existing 100-episode development-bank artifacts, not new final eval
+
+### Results
+
+Clean official multi-offset supervised checkpoints:
+
+| N demos | goal MAE | flat MAE | k2 vs k10 action L2 | k5 vs k10 action L2 | learned success | oracle success |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 0.1002 | 0.2215 | 0.1271 | 0.0846 | 0.06 | 0.40 |
+| 1800 | 0.0628 | 0.1506 | 0.1099 | 0.0740 | 0.47 | 0.69 |
+
+Clean/disturbed multi-offset `N=1800` artifacts:
+
+| variant | learned success | oracle success | mean residual norm |
+| --- | ---: | ---: | ---: |
+| frozen base | 0.45 | 0.66 | 0.0000 |
+| residual `alpha=0.25` | 0.43 | 0.63 | 0.0053-0.0055 |
+
+### Plots / artifacts
+
+- `artifacts/incremental/privileged_z/clean_official_multioffset/n500/seed0/privileged_z_k10.pt`
+- `artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10.pt`
+- `artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- `artifacts/incremental/privileged_z_residual/B_clean_disturbed_n1800_residual_r1_n4096_alpha025/seed0/latest.pt`
+- eval tables under `artifacts/incremental/privileged_z_eval_tables/pz12_n1800/`
+
+### Interpretation
+
+Privileged/TCP multi-offset training is a much healthier control interface than
+the VAE512 concat low level. The `N=1800` privileged base is already strong
+enough to serve as the RL sanity base: learned high-level success is about
+`0.45-0.47`, and oracle-goal success is about `0.66-0.69`.
+
+The existing residual PPO artifact with `alpha=0.25` does not improve the
+`N=1800` clean/disturbed base on the 100-episode development bank. It slightly
+reduces both learned and oracle success. This suggests the next RL sanity run
+should focus on paired-improvement reward/local metrics, not just another
+absolute-distance residual run.
+
+### Next action
+
+Implement or expose paired-improvement local evaluation for privileged/TCP
+rollouts, using the fixed `data/manifests/local_reset_bank_*` files. After that,
+rerun residual PPO only if the local paired metric shows the reward is aligned
+with frozen-base improvement.
+
+## 2026-06-25 - Phase 1 paired local evaluation for privileged/TCP residual
+
+### Hypothesis
+
+The existing privileged/TCP residual PPO run should only be promoted if it
+improves local goal reaching over the frozen imitation base from the exact same
+reset and replay/oracle goal.
+
+### Command
+
+Implemented:
+
+```text
+uv run hcl-poc rl-rerun eval-privileged-z-local-paired
+```
+
+Smoke command:
+
+```bash
+uv run hcl-poc --config configs/pusht_incremental.yaml \
+  rl-rerun eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_residual/B_clean_disturbed_n1800_residual_r1_n4096_alpha025/seed0/latest.pt \
+  --manifest results/rl_rerun/local_eval_manifest_n512_val_b1_seed20260623.json \
+  --output results/hcl_next_phase1/privileged_z_local_paired_clean_disturbed_n1800_alpha025_n512_smoke.json \
+  --force
+```
+
+Fixed-bank command:
+
+```bash
+uv run hcl-poc --config configs/pusht_incremental.yaml \
+  rl-rerun eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_residual/B_clean_disturbed_n1800_residual_r1_n4096_alpha025/seed0/latest.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --output results/hcl_next_phase1/privileged_z_local_paired_clean_disturbed_n1800_alpha025_k10_4096.json \
+  --force
+```
+
+### Setup
+
+- config: `configs/pusht_incremental.yaml`
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- residual checkpoint: `B_clean_disturbed_n1800_residual_r1_n4096_alpha025/seed0/latest.pt`
+- low-level training: multi-offset held-goal training
+- local goal source: replay/oracle future state
+- horizon k: 10
+- fixed local bank: `data/manifests/local_reset_bank_n1800_seed0_k10.json`
+- fixed-bank local episodes: 4096
+- success epsilon: terminal normalized-state MSE `< 0.05`
+
+### Results
+
+| eval bank | episodes | mean paired improvement MSE | median paired improvement MSE | fraction improved | base eps success | tuned eps success | action delta L2 mean | residual norm mean | saturation mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 smoke | 512 | -0.5035 | -0.0000415 | 0.4746 | 0.9043 | 0.8867 | 0.0163 | 0.00545 | 0.00436 |
+| 4096 fixed | 4096 | 0.0441 | -0.0000089 | 0.4844 | 0.8943 | 0.8923 | 0.0144 | 0.00520 | 0.00095 |
+
+The positive mean on the 4096 bank is caused by extreme outliers:
+
+| metric | base | tuned |
+| --- | ---: | ---: |
+| terminal MSE median | 0.00187 | 0.00196 |
+| terminal MSE p90 | 0.05421 | 0.05479 |
+| terminal MSE max | 1322.6 | 1136.7 |
+
+### Plots / artifacts
+
+- evaluator code: `src/hcl_poc/privileged_z.py`
+- CLI wiring: `src/hcl_poc/cli.py`
+- smoke JSON:
+  `results/hcl_next_phase1/privileged_z_local_paired_clean_disturbed_n1800_alpha025_n512_smoke.json`
+- fixed-bank JSON:
+  `results/hcl_next_phase1/privileged_z_local_paired_clean_disturbed_n1800_alpha025_k10_4096.json`
+
+### Interpretation
+
+The existing absolute-distance residual PPO checkpoint fails the paired local
+promotion gate. It improves fewer than half of fixed-bank local rollouts, makes
+median terminal distance slightly worse, and slightly lowers success within the
+epsilon threshold. Action saturation is low, so this is not primarily a clamp
+artifact; the learned residual is just too small or misaligned to produce a
+reliable paired improvement.
+
+This supports the plan's recommendation to add an explicit paired-improvement
+reward before running more expensive residual PPO. Another absolute-distance
+residual run is unlikely to answer a new question.
+
+### Next action
+
+Implement paired-improvement reward for privileged/TCP local residual PPO:
+cache or compute the frozen base terminal distance from the same local reset and
+optimize `J_base - J_policy` with a small action-deviation penalty. Reuse
+`eval-privileged-z-local-paired` as the promotion gate.
+
+## 2026-06-25 - Phase 1 paired-reward PPO smoke
+
+### Hypothesis
+
+A paired terminal reward can be implemented in the privileged/TCP residual PPO
+loop by rolling the frozen base policy from the same local reset and goal, then
+rewarding `base_terminal_distance - policy_terminal_distance`.
+
+### Command
+
+Implemented new training options:
+
+```text
+uv run hcl-poc rl-rerun train-privileged-z-residual \
+  --reward-mode progress|paired \
+  --dense-progress-weight ...
+```
+
+Smoke command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-residual \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n512_b4.h5 \
+  --run-tag hcl_next_paired_reward_smoke_n512 \
+  --seed 0 \
+  --steps 5120 \
+  --alpha 0.25 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --residual-penalty-weight 0.01 \
+  --learning-rate 1e-4 \
+  --num-minibatches 8 \
+  --update-epochs 1 \
+  --checkpoint-every-updates 1 \
+  --force
+```
+
+Integration eval:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_residual/hcl_next_paired_reward_smoke_n512/seed0/latest.pt \
+  --manifest results/rl_rerun/local_eval_manifest_n512_val_b1_seed20260623.json \
+  --output results/hcl_next_phase1/privileged_z_local_paired_reward_smoke_n512_eval.json \
+  --force
+```
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- init dataset: `privileged_z_residual_init_B_clean_disturbed_n512_b4.h5`
+- reward mode: paired terminal improvement
+- dense progress weight: 0
+- residual penalty weight: 0.01
+- num_envs: 512
+- rollout steps: 10
+- total transitions: 5120, one PPO update
+- update epochs: 1
+- result level: implementation smoke only, not a scientific run
+
+### Results
+
+Training history after one update:
+
+| metric | value |
+| --- | ---: |
+| mean base terminal distance | 0.6369 |
+| mean policy terminal distance | 0.5672 |
+| mean paired improvement | 0.0697 |
+| fraction improved | 0.2773 |
+| mean residual norm | 0.0401 |
+| mean reward | 0.0070 |
+| clip fraction | 0.1123 |
+
+The smoke checkpoint evaluates through the paired local gate:
+
+| eval metric | value |
+| --- | ---: |
+| eval episodes | 512 |
+| mean paired improvement MSE | 0.0162 |
+| median paired improvement MSE | -0.000064 |
+| fraction improved | 0.4219 |
+| base epsilon success | 0.9043 |
+| tuned epsilon success | 0.8828 |
+
+### Plots / artifacts
+
+- paired-reward checkpoint:
+  `artifacts/incremental/privileged_z_residual/hcl_next_paired_reward_smoke_n512/seed0/latest.pt`
+- paired-reward history:
+  `results/incremental/privileged_z_residual/hcl_next_paired_reward_smoke_n512/seed0/history.json`
+- paired local eval:
+  `results/hcl_next_phase1/privileged_z_local_paired_reward_smoke_n512_eval.json`
+
+### Interpretation
+
+The paired-reward path is now executable and records the needed local metrics.
+The one-update smoke is not a pass: it improves fewer than half of validation
+local rollouts and worsens epsilon success. That is acceptable for this smoke;
+its purpose was to verify the reward computation, branch-env base rollout, PPO
+history schema, checkpoint save, and paired evaluator compatibility.
+
+One implementation detail matters for future commands: this CLI has both global
+and `rl-rerun`-level config arguments. For commands that need
+`paths.incremental_*`, use:
+
+```text
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml ...
+```
+
+Passing `--config` only before `rl-rerun` can be overwritten by the subcommand
+default.
+
+### Next action
+
+Run a real paired-reward dev point with `4096` envs and at least `1M`
+transitions, then evaluate with `eval-privileged-z-local-paired` on
+`data/manifests/local_reset_bank_n1800_seed0_k10.json` before doing any
+closed-loop task evaluation.
+
+## 2026-06-25 - Phase 1 paired-reward 4096-env dev run
+
+### Hypothesis
+
+A serious `4096`-env PPO run with paired terminal reward and privileged/TCP
+state may improve local goal reaching over the frozen multi-offset base, unlike
+the previous absolute-distance residual run.
+
+### Command
+
+Training:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-residual \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5 \
+  --run-tag hcl_next_paired_reward_n4096_alpha025_1m \
+  --seed 0 \
+  --steps 1024000 \
+  --alpha 0.25 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --residual-penalty-weight 0.01 \
+  --learning-rate 1e-4 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --checkpoint-every-updates 5 \
+  --force
+```
+
+Fixed-bank evaluation:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_residual/hcl_next_paired_reward_n4096_alpha025_1m/seed0/latest.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --output results/hcl_next_phase1/privileged_z_local_paired_reward_n4096_alpha025_1m_k10_4096.json \
+  --force
+```
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- init dataset: `privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5`
+- reward mode: paired terminal improvement
+- dense progress weight: 0
+- residual alpha: 0.25
+- residual penalty weight: 0.01
+- num_envs: 4096
+- rollout steps: 10
+- PPO batch: 40960 samples/update
+- total transitions: 1,024,000
+- updates: 25
+- result level: dev
+
+### Implementation Note
+
+The first attempt failed before training with a ManiSkill GPU camera-group
+buffer error because paired reward created two simultaneous `rgb+state`
+4096-env simulators. The privileged/TCP local trainer and local paired evaluator
+now use `obs_mode=state`, which is sufficient for 31D privileged-state reward
+and avoids camera allocation. Full closed-loop visual evaluators are unchanged.
+
+### Results
+
+Training completed in about 237 seconds. The final update history was:
+
+| metric | value |
+| --- | ---: |
+| final mean base terminal distance | 0.2101 |
+| final mean policy terminal distance | 0.2214 |
+| final mean paired improvement | -0.0113 |
+| final fraction improved | 0.3413 |
+| final mean residual norm | 0.0424 |
+| final reward | -0.00113 |
+
+Fixed 4096-bank local paired evaluation:
+
+| metric | value |
+| --- | ---: |
+| base terminal MSE mean | 0.5051 |
+| tuned terminal MSE mean | 0.4406 |
+| base terminal MSE median | 0.00187 |
+| tuned terminal MSE median | 0.00243 |
+| base terminal MSE p90 | 0.05421 |
+| tuned terminal MSE p90 | 0.05914 |
+| mean paired improvement MSE | 0.0644 |
+| median paired improvement MSE | -0.000139 |
+| fraction improved | 0.3840 |
+| base epsilon success | 0.8943 |
+| tuned epsilon success | 0.8835 |
+| action delta L2 mean | 0.0278 |
+| residual norm mean | 0.0154 |
+| action saturation mean | 0.00071 |
+
+### Plots / artifacts
+
+- checkpoint:
+  `artifacts/incremental/privileged_z_residual/hcl_next_paired_reward_n4096_alpha025_1m/seed0/latest.pt`
+- training history:
+  `results/incremental/privileged_z_residual/hcl_next_paired_reward_n4096_alpha025_1m/seed0/history.json`
+- fixed-bank eval:
+  `results/hcl_next_phase1/privileged_z_local_paired_reward_n4096_alpha025_1m_k10_4096.json`
+
+### Interpretation
+
+This paired-reward `alpha=0.25` dev run fails the local promotion gate. Mean MSE
+looks better because a small number of extreme failures improved, but the median
+rollout, p90 rollout, fraction improved, and epsilon success all worsened. The
+residual is active and action saturation is low, so the failure is not just
+clipping; the learned residual is not broadly improving local reachability.
+
+Do not run closed-loop task evaluation for this checkpoint. It does not satisfy
+the plan's local gate:
+
+```text
+fraction_improved > 0.55
+mean_paired_improvement > 0
+closed-loop success not worse
+```
+
+Only the mean-paired-improvement condition is superficially positive, and that
+is outlier-driven.
+
+### Next action
+
+Continue the prescribed residual-alpha sweep before changing representation:
+run the same paired-reward setup at a larger residual authority (`alpha=1.0` or
+`alpha=0.5`) and gate with the same fixed local paired bank. If larger alpha
+also worsens median/fraction-improved, stop residual PPO on privileged/TCP and
+debug reward/distance normalization or try direct/partially-unfrozen low-level
+training.
+
+## 2026-06-25 - Phase 1 paired-reward alpha sweep
+
+### Hypothesis
+
+The failed `alpha=0.25` paired-reward residual may simply have too little
+authority. Increasing residual authority should improve the fraction of local
+rollouts improved if the paired reward is aligned and the residual architecture
+is the right update mechanism.
+
+### Command
+
+The following command was run for `alpha=0.5` and `alpha=1.0`, changing only
+`--alpha` and `--run-tag`:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-residual \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5 \
+  --run-tag hcl_next_paired_reward_n4096_alpha05_1m \
+  --seed 0 \
+  --steps 1024000 \
+  --alpha 0.5 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --residual-penalty-weight 0.01 \
+  --learning-rate 1e-4 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --checkpoint-every-updates 5 \
+  --force
+```
+
+Each checkpoint was evaluated with:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint <checkpoint>/latest.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --output results/hcl_next_phase1/<result>.json \
+  --force
+```
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- init dataset: `privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5`
+- reward mode: paired terminal improvement
+- dense progress weight: 0
+- residual penalty weight: 0.01
+- num_envs: 4096
+- rollout steps: 10
+- total transitions per run: 1,024,000
+- fixed local eval bank: `data/manifests/local_reset_bank_n1800_seed0_k10.json`
+- base fixed-bank epsilon success: 0.8943
+- base fixed-bank terminal MSE median: 0.00187
+- base fixed-bank terminal MSE p90: 0.05421
+
+### Results
+
+| alpha | mean paired improvement | median paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE median | tuned terminal MSE p90 | action delta L2 mean | residual norm mean | saturation mean |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.25 | 0.0644 | -0.000139 | 0.3840 | 0.8835 | 0.00243 | 0.05914 | 0.0278 | 0.0154 | 0.00071 |
+| 0.50 | 0.1069 | -0.000340 | 0.3533 | 0.8816 | 0.00285 | 0.05932 | 0.0405 | 0.0240 | 0.00069 |
+| 1.00 | 0.0735 | -0.004005 | 0.1511 | 0.8108 | 0.00876 | 0.10508 | 0.0827 | 0.0640 | 0.00050 |
+
+### Plots / artifacts
+
+- `artifacts/incremental/privileged_z_residual/hcl_next_paired_reward_n4096_alpha025_1m/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_residual/hcl_next_paired_reward_n4096_alpha05_1m/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_residual/hcl_next_paired_reward_n4096_alpha10_1m/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_reward_n4096_alpha025_1m_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_reward_n4096_alpha05_1m_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_reward_n4096_alpha10_1m_k10_4096.json`
+
+### Interpretation
+
+The paired-reward residual alpha sweep fails. Larger residual authority makes
+the policy more active, but the local gate gets worse:
+
+- `fraction_improved` never exceeds 0.384, far below the `>0.55` pass criterion;
+- median paired improvement is negative for every alpha;
+- epsilon success is worse for every alpha;
+- alpha `1.0` damages the distribution badly, with p90 terminal MSE nearly
+  doubling versus the frozen base.
+
+The positive mean paired improvements are outlier-driven and are not sufficient
+evidence of a useful RL update. Action saturation remains very low, so the
+failure is not explained by clamping.
+
+### Decision
+
+Do not run closed-loop task evaluation for these residual checkpoints. The
+privileged/TCP residual PPO formulation, even with paired terminal reward,
+does not currently pass the local improvement gate.
+
+This is useful evidence: the problem is no longer only VAE goal ignoring. Even
+with a healthier privileged/TCP interface, residual PPO is not producing broad
+local improvements under this reward/architecture.
+
+### Next action
+
+Stop this residual branch and move to the next Phase 1 variant:
+
+1. direct or partially-unfrozen privileged/TCP low-level PPO with paired reward;
+2. add checkpoint-per-update outputs so local gate can select earlier updates
+   instead of only `latest.pt`;
+3. if direct/partial tuning also fails, debug reward/distance normalization with
+   an offline local optimizer or scratch PPO before returning to learned VAE
+   latents.
+
+## 2026-06-25 - Phase 1 direct privileged/TCP PPO implementation smoke
+
+### Hypothesis
+
+The residual formulation may be too constrained or poorly conditioned. Before
+running another serious 4096-env PPO branch, add a direct BC-initialized
+privileged/TCP low-level PPO variant and verify that it can train, checkpoint,
+and pass through the paired local evaluator.
+
+This is an implementation smoke only, not scientific evidence for or against
+the direct formulation.
+
+### Commands
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-direct \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n512_b4.h5 \
+  --run-tag hcl_next_direct_smoke_n512 \
+  --seed 0 \
+  --steps 5120 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --learning-rate 3e-5 \
+  --num-minibatches 4 \
+  --update-epochs 1 \
+  --checkpoint-every-updates 1 \
+  --train-scope final_layer \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct/hcl_next_direct_smoke_n512/seed0/latest.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --output results/hcl_next_phase1/privileged_z_local_paired_direct_smoke_n512_eval.json \
+  --force
+
+uv run pytest -q
+```
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- init dataset: `privileged_z_residual_init_B_clean_disturbed_n512_b4.h5`
+- reward mode: paired terminal improvement
+- dense progress weight: 0
+- train scope: final low-policy layer plus log std and critic
+- num_envs: 512
+- rollout steps: 10
+- total transitions: 5,120
+
+### Results
+
+Training smoke history:
+
+| metric | value |
+| --- | ---: |
+| mean paired improvement | -0.00478 |
+| fraction improved | 0.2988 |
+| mean terminal distance | 0.03679 |
+| mean base terminal distance | 0.03201 |
+| mean action delta L2 | 0.02925 |
+| action saturation rate | 0.00215 |
+| clip fraction | 0.00840 |
+
+Fixed-bank paired local eval:
+
+| metric | value |
+| --- | ---: |
+| base epsilon success | 0.8943 |
+| tuned epsilon success | 0.8943 |
+| mean paired improvement MSE | 0.0209 |
+| median paired improvement MSE | -0.0000067 |
+| fraction improved | 0.4731 |
+| tuned terminal MSE median | 0.00193 |
+| tuned terminal MSE p90 | 0.05454 |
+| action delta L2 mean | 0.00828 |
+| action saturation frac mean | 0.00103 |
+
+Verification:
+
+- `uv run python -m compileall -q src/hcl_poc/privileged_z.py src/hcl_poc/cli.py`
+- `uv run pytest -q`: 22 passed
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_smoke_n512/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_smoke_n512/seed0/checkpoints/step_000005120.pt`
+- `results/incremental/privileged_z_direct/hcl_next_direct_smoke_n512/seed0/history.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_smoke_n512_eval.json`
+
+### Interpretation
+
+The direct PPO path is now implemented and mechanically verified. The evaluator
+can compare either residual or direct tuned checkpoints against the same frozen
+base on the fixed local reset bank.
+
+The one-update 512-env direct smoke does not pass the local gate, as expected
+for a smoke run. It made very small action changes and left epsilon success
+unchanged.
+
+### Next action
+
+Run a serious 4096-env direct PPO dev run on the clean/disturbed init bank. Use
+the same fixed local gate before any closed-loop task evaluation. If final-layer
+tuning remains too weak, run `--train-scope all` with a small learning rate and
+compare checkpoint-per-update local-gate metrics.
+
+## 2026-06-25 - Phase 1 direct privileged/TCP final-layer dev run
+
+### Hypothesis
+
+Residual PPO may fail because the residual head is too disconnected from the
+BC low-level action distribution. Direct PPO on the BC low-level policy's final
+layer may allow useful goal-conditioned local corrections while keeping most of
+the supervised policy fixed.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-direct \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5 \
+  --run-tag hcl_next_direct_final_layer_n4096_1m \
+  --seed 0 \
+  --steps 1024000 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --learning-rate 3e-5 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --checkpoint-every-updates 5 \
+  --train-scope final_layer \
+  --force
+```
+
+Saved checkpoints at steps `204800`, `409600`, `614400`, `819200`, and
+`1024000` were evaluated on the fixed `local_reset_bank_n1800_seed0_k10.json`
+bank.
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- init dataset: `privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5`
+- reward mode: paired terminal improvement
+- dense progress weight: 0
+- train scope: final low-policy layer plus log std and critic
+- num_envs: 4096
+- rollout steps: 10
+- total transitions: 1,024,000
+- fixed-bank base epsilon success: 0.8943
+- fixed-bank base terminal MSE median: 0.00187
+- fixed-bank base terminal MSE p90: 0.05421
+
+### Results
+
+Fixed-bank local paired eval:
+
+| checkpoint step | mean paired improvement | median paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE median | tuned terminal MSE p90 | action delta L2 mean |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 204800 | 0.0317 | -0.0000078 | 0.4790 | 0.8943 | 0.00188 | 0.05437 | 0.0104 |
+| 409600 | 0.0190 | -0.0000059 | 0.4839 | 0.8901 | 0.00194 | 0.05519 | 0.0129 |
+| 614400 | 0.0426 | -0.0000341 | 0.4226 | 0.8953 | 0.00192 | 0.05255 | 0.0130 |
+| 819200 | 0.3637 | -0.0000180 | 0.4551 | 0.8958 | 0.00194 | 0.05481 | 0.0143 |
+| 1024000 | 0.0210 | -0.0000812 | 0.3811 | 0.8950 | 0.00211 | 0.05402 | 0.0158 |
+
+Training history final row:
+
+- mean paired improvement: -0.1290
+- fraction improved: 0.4167
+- mean action delta L2: 0.0297
+- action saturation rate: 0.1112
+- clip fraction: 0.0811
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_final_layer_n4096_1m/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_final_layer_n4096_1m/seed0/checkpoints/`
+- `results/incremental/privileged_z_direct/hcl_next_direct_final_layer_n4096_1m/seed0/history.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_final_layer_n4096_1m_step204800_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_final_layer_n4096_1m_step409600_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_final_layer_n4096_1m_step614400_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_final_layer_n4096_1m_step819200_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_final_layer_n4096_1m_latest_k10_4096.json`
+
+### Interpretation
+
+Final-layer direct PPO fails the local improvement gate. Some checkpoints
+improve the fixed-bank mean because a few catastrophic base rollouts get less
+bad, but the median paired improvement is negative at every saved checkpoint
+and `fraction_improved` never reaches 0.5, let alone the `>0.55` gate.
+
+The run does not justify closed-loop task evaluation. The failure is not simply
+that residual authority was too small; directly tuning the final BC action
+layer still does not produce broad local improvement.
+
+### Next action
+
+Run the next direct variant with `--train-scope all` and a smaller learning
+rate. If full low-level tuning also fails, stop privileged/TCP PPO variants and
+debug the reward/local-distance formulation with an offline optimizer or scratch
+local PPO before returning to learned VAE/effect latents.
+
+## 2026-06-25 - Phase 1 direct privileged/TCP all-layer dev run
+
+### Hypothesis
+
+Final-layer direct tuning may be too weak because the supervised policy's hidden
+features are still shaped for BC, not reachability improvement. Full low-level
+tuning with a lower learning rate and small BC penalty may give PPO enough
+capacity to improve the local reachability objective without immediately
+destroying the BC policy.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-direct \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5 \
+  --run-tag hcl_next_direct_all_layers_n4096_1m_lr1e5_bc001 \
+  --seed 0 \
+  --steps 1024000 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --learning-rate 1e-5 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --checkpoint-every-updates 5 \
+  --train-scope all \
+  --bc-weight 0.01 \
+  --force
+```
+
+Saved checkpoints at steps `204800`, `409600`, `614400`, `819200`, and
+`1024000` were evaluated on the fixed `local_reset_bank_n1800_seed0_k10.json`
+bank.
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- init dataset: `privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5`
+- reward mode: paired terminal improvement
+- dense progress weight: 0
+- train scope: all low-policy layers plus log std and critic
+- BC penalty weight: 0.01
+- num_envs: 4096
+- rollout steps: 10
+- total transitions: 1,024,000
+- fixed-bank base epsilon success: 0.8943
+- fixed-bank base terminal MSE median: 0.00187
+- fixed-bank base terminal MSE p90: 0.05421
+
+### Results
+
+Fixed-bank local paired eval:
+
+| checkpoint step | mean paired improvement | median paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE median | tuned terminal MSE p90 | action delta L2 mean |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 204800 | 0.0685 | -0.0000400 | 0.4392 | 0.8967 | 0.00198 | 0.05294 | 0.0157 |
+| 409600 | 0.0840 | -0.000693 | 0.2786 | 0.8801 | 0.00310 | 0.06287 | 0.0329 |
+| 614400 | 0.0747 | -0.000616 | 0.3066 | 0.8838 | 0.00320 | 0.06050 | 0.0319 |
+| 819200 | 0.0782 | -0.001134 | 0.2683 | 0.8833 | 0.00399 | 0.06328 | 0.0375 |
+| 1024000 | 0.0711 | -0.001511 | 0.2625 | 0.8738 | 0.00448 | 0.06686 | 0.0432 |
+
+Training history final row:
+
+- mean paired improvement: -0.0204
+- fraction improved: 0.3699
+- mean action delta L2: 0.0445
+- action saturation rate: 0.1161
+- clip fraction: 0.3000
+- approximate KL: 0.0874
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_all_layers_n4096_1m_lr1e5_bc001/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_all_layers_n4096_1m_lr1e5_bc001/seed0/checkpoints/`
+- `results/incremental/privileged_z_direct/hcl_next_direct_all_layers_n4096_1m_lr1e5_bc001/seed0/history.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_all_layers_n4096_1m_lr1e5_bc001_step204800_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_all_layers_n4096_1m_lr1e5_bc001_step409600_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_all_layers_n4096_1m_lr1e5_bc001_step614400_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_all_layers_n4096_1m_lr1e5_bc001_step819200_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_all_layers_n4096_1m_lr1e5_bc001_latest_k10_4096.json`
+
+### Interpretation
+
+All-layer direct PPO fails more clearly than final-layer tuning. It can make
+larger action changes, but those changes mostly degrade the already-good local
+distribution. The best checkpoint is early (`204800`) and only improves epsilon
+success by about 0.24 percentage points while still having negative median
+paired improvement and `fraction_improved = 0.4392`.
+
+Later checkpoints show reward hacking/outlier behavior: the mean paired
+improvement stays positive because severe base failures improve, but median
+behavior and epsilon success get worse. PPO diagnostics also become less
+healthy by the final update (`clip_fraction = 0.30`, `approx_kl = 0.087`).
+
+### Decision
+
+Do not run closed-loop task evaluation for the direct all-layer checkpoints.
+The privileged/TCP PPO branch has now failed in three forms:
+
+1. residual PPO with paired reward;
+2. direct final-layer PPO with paired reward;
+3. direct all-layer PPO with paired reward.
+
+This is strong evidence that the current local PPO/reward formulation is the
+next bottleneck, not just VAE goal ignoring or residual capacity.
+
+### Next action
+
+Stop launching PPO variants on the current reward. Before returning to learned
+latents, debug the local reachability objective directly:
+
+1. inspect distance normalization and per-dimension weights for the 31D state;
+2. add an offline local optimizer / random-shooting action-sequence sanity check
+   on the fixed reset bank to test whether the reward admits broad improvements;
+3. if the optimizer can improve the bank, use it to diagnose PPO credit
+   assignment; if it cannot, redesign the distance/reward before more PPO.
+
+## 2026-06-25 - Phase 1 privileged/TCP local action-search sanity check
+
+### Hypothesis
+
+The PPO failures may mean the current 31D normalized-state distance is a bad
+local objective, or they may mean PPO is failing to optimize an objective that
+does contain useful improvements. Compare the frozen base policy against two
+non-PPO references on the same fixed local bank:
+
+1. replay/demo action sequence from the source trajectory;
+2. best-of-32 random shooting around the frozen base action, including the base
+   action sequence as candidate zero.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-action-search \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --random-candidates 32 \
+  --random-noise-std 0.05 \
+  --output results/hcl_next_phase1/privileged_z_local_action_search_n1800_k10_random32_std005.json \
+  --force
+```
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- fixed local bank: `local_reset_bank_n1800_seed0_k10.json`
+- goal source: replay state at `t + k`
+- horizon: 10
+- random shooting: 32 candidates, action noise std 0.05, base included
+
+### Results
+
+| method | terminal MSE mean | terminal MSE median | terminal MSE p90 | success within epsilon |
+| --- | ---: | ---: | ---: | ---: |
+| frozen base | 0.5051 | 0.00187 | 0.05421 | 0.8943 |
+| replay/demo actions | 0.00642 | 0.0000107 | 0.000339 | 0.9958 |
+| best-of-32 random around base | 0.0699 | 0.00134 | 0.00912 | 0.9753 |
+
+Improvement over base:
+
+| method | mean improvement | median improvement | fraction improved |
+| --- | ---: | ---: | ---: |
+| replay/demo actions | 0.4986 | 0.00162 | 0.9729 |
+| best-of-32 random around base | 0.4351 | 0.00000 | 0.4829 |
+
+Verification:
+
+- `uv run python -m compileall -q src/hcl_poc/privileged_z.py src/hcl_poc/cli.py`
+- `uv run pytest -q`: 22 passed
+
+### Artifacts
+
+- `results/hcl_next_phase1/privileged_z_local_action_search_n1800_k10_random32_std005.json`
+
+### Interpretation
+
+The local target is not impossible. Replay/demo actions almost exactly reach
+the fixed replay goals, so the normalized privileged-state distance is at least
+consistent with the demonstration dynamics on this bank.
+
+Random shooting around the base also improves the hard tail substantially:
+epsilon success rises from `0.8943` to `0.9753`, and p90 terminal MSE drops from
+`0.05421` to `0.00912`. The median improvement is zero because the base is
+already very good on more than half of the bank and best-of-random keeps the
+base candidate for those cases.
+
+This reframes the PPO failure: useful action-sequence corrections exist, but
+the current PPO formulations are not finding them reliably. The fixed gate
+metric `fraction_improved > 0.55` may also be too strict for a base with
+`~0.89` epsilon success, because many already-easy cases cannot improve much.
+
+### Next action
+
+Use this action-search result to debug PPO credit assignment:
+
+1. train/evaluate on a hard-case subset where frozen base terminal MSE exceeds
+   the epsilon threshold;
+2. try supervised distillation from random-shooting/replay-improved actions into
+   the low-level policy before PPO;
+3. revise the local gate to include hard-tail metrics such as p90 terminal MSE
+   and epsilon success, not only fraction improved over all starts.
+
+## 2026-06-25 - Phase 1 hard-case subset diagnostic
+
+### Hypothesis
+
+The full-bank local gate may hide useful learning because the frozen base is
+already successful on about 89% of starts. A hard-case subset where frozen base
+terminal MSE exceeds the epsilon threshold should better reveal whether PPO is
+learning corrections for cases with meaningful room to improve.
+
+### Commands
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  create-privileged-z-hard-case-manifest \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --threshold-mse 0.05 \
+  --output data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct/hcl_next_direct_all_layers_n4096_1m_lr1e5_bc001/seed0/checkpoints/step_000204800.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --output results/hcl_next_phase1/privileged_z_local_paired_direct_all_layers_step204800_hard_mse_ge_0p05.json \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-paired \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct/hcl_next_direct_final_layer_n4096_1m/seed0/checkpoints/step_000204800.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --output results/hcl_next_phase1/privileged_z_local_paired_direct_final_layer_step204800_hard_mse_ge_0p05.json \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-local-action-search \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --random-candidates 32 \
+  --random-noise-std 0.05 \
+  --output results/hcl_next_phase1/privileged_z_local_action_search_n1800_k10_hard_mse_ge_0p05_random32_std005.json \
+  --force
+```
+
+### Setup
+
+- source fixed bank: `local_reset_bank_n1800_seed0_k10.json`
+- hard threshold: frozen base terminal MSE >= 0.05
+- selected hard local starts: 433 / 4096
+- hard-subset base terminal MSE median: 0.1159
+- hard-subset base terminal MSE p90: 0.8888
+
+### Results
+
+Hard-subset PPO comparison:
+
+| tuned checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 4.7270 | 0.1159 | 0.8888 | - | 0.0000 |
+| final-layer step 204800 | 4.4204 | 0.1089 | 0.8336 | 0.5242 | 0.0855 |
+| all-layer step 204800 | 3.8878 | 0.1050 | 0.6834 | 0.6074 | 0.1386 |
+
+Hard-subset non-PPO references:
+
+| method | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| replay/demo actions | 0.0469 | 0.0000053 | 0.00284 | 0.9954 | 0.9815 |
+| best-of-32 random around base | 0.6526 | 0.01237 | 0.1867 | 0.9792 | 0.7737 |
+
+### Artifacts
+
+- `data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_all_layers_step204800_hard_mse_ge_0p05.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_final_layer_step204800_hard_mse_ge_0p05.json`
+- `results/hcl_next_phase1/privileged_z_local_action_search_n1800_k10_hard_mse_ge_0p05_random32_std005.json`
+
+### Interpretation
+
+The hard-case subset changes the diagnosis. Early PPO checkpoints do learn some
+useful corrections for failed local starts, especially all-layer direct tuning:
+success rises from `0.0` to `0.1386`, and `fraction_improved` exceeds 0.60 on
+the selected hard cases. This was hidden by the full-bank metric, where the
+base is already good on most starts and broad perturbations hurt easy cases.
+
+The gap to non-PPO action search is still large. Best-of-32 random around the
+base reaches `0.7737` success on the same hard subset, and replay/demo actions
+reach `0.9815`. Therefore the current policy class/action interface can express
+better local behavior, but PPO is extracting only a small part of the available
+hard-tail improvement.
+
+### Next action
+
+Do not discard the privileged/TCP branch outright. Reframe the next experiment
+as hard-tail improvement:
+
+1. distill replay or best-of-random action sequences on the hard-case subset;
+2. evaluate the distilled policy on both hard and full banks to check whether
+   it preserves easy-case behavior;
+3. only then consider PPO initialized from that hard-tail-distilled policy.
+
+## 2026-06-25 - Phase 1 replay distillation diagnostic
+
+### Hypothesis
+
+Since replay/demo action sequences nearly solve the fixed local bank, supervised
+distillation from replay actions should be a stronger initializer than PPO for
+hard-tail local corrections. The key question is whether local replay
+distillation preserves closed-loop behavior or overfits to fixed replay branches.
+
+### Commands
+
+Hard-subset all-layer distillation:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --run-tag hcl_next_replay_distill_hard_mse_ge_0p05_all_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 512 \
+  --learning-rate 1e-4 \
+  --train-scope all \
+  --force
+```
+
+Full-bank all-layer distillation:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --run-tag hcl_next_replay_distill_full_k10_all_lr1e4_e100 \
+  --seed 0 \
+  --epochs 100 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope all \
+  --force
+```
+
+Full-bank final-layer distillation:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --run-tag hcl_next_replay_distill_full_k10_final_layer_lr1e4_e100 \
+  --seed 0 \
+  --epochs 100 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+Each distilled checkpoint was evaluated with `eval-privileged-z-local-paired`.
+The full-bank all-layer and final-layer checkpoints were also evaluated in
+closed-loop `hierarchy` and `oracle_hierarchy` modes for 200 episodes with
+`seed-start = 9900000`.
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- base checkpoint: `clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- target: replay executed actions for every held-goal offset
+- horizon: 10
+- optimizer: Adam, supervised action MSE
+- fixed-bank base success: 0.8943
+- hard-subset base success: 0.0
+- closed-loop base learned-high success: 0.395
+- closed-loop base oracle-goal success: 0.635
+
+### Local Results
+
+Full fixed bank:
+
+| checkpoint | train scope | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | - | 0.5051 | 0.00187 | 0.05421 | - | 0.8943 | - |
+| hard-only replay distill | all | 0.3571 | 0.00646 | 0.05034 | 0.2705 | 0.8997 | 0.0938 |
+| full replay distill | all | 0.1002 | 0.00104 | 0.03004 | 0.6636 | 0.9312 | 0.0594 |
+| full replay distill | final layer | 0.5331 | 0.00176 | 0.05036 | 0.5334 | 0.8989 | 0.0397 |
+
+Hard subset:
+
+| checkpoint | train scope | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| frozen base | - | 4.7270 | 0.1159 | 0.8888 | - | 0.0000 |
+| hard-only replay distill | all | 0.4201 | 0.02483 | 0.2978 | 0.8476 | 0.6236 |
+| full replay distill | all | 0.6767 | 0.03539 | 0.3129 | 0.8314 | 0.5635 |
+
+### Closed-Loop Results
+
+200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean action delta/residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| full replay distill, all layers | hierarchy | 0.215 | 23.35 | 0.229 |
+| full replay distill, final layer | hierarchy | 0.370 | 35.31 | 0.061 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| full replay distill, all layers | oracle_hierarchy | 0.255 | 23.83 | 0.259 |
+| full replay distill, final layer | oracle_hierarchy | 0.495 | 39.30 | 0.058 |
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_hard_mse_ge_0p05_all_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_full_k10_all_lr1e4_e100/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_full_k10_final_layer_lr1e4_e100/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_all_lr1e4_e200_hard_mse_ge_0p05.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_all_lr1e4_e200_full_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_full_all_lr1e4_e100_full_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_full_all_lr1e4_e100_hard_mse_ge_0p05.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_full_final_layer_lr1e4_e100_full_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_replay_distill_full_hierarchy_n1800_seed9900000_e200.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_replay_distill_full_oracle_hierarchy_n1800_seed9900000_e200.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_replay_distill_full_final_layer_hierarchy_n1800_seed9900000_e200.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_replay_distill_full_final_layer_oracle_hierarchy_n1800_seed9900000_e200.json`
+
+### Interpretation
+
+Replay distillation confirms that local branch supervision can produce the
+kind of improvement PPO failed to find. Full-bank all-layer replay distillation
+passes the local gate strongly: success improves from `0.8943` to `0.9312`,
+p90 MSE drops from `0.05421` to `0.03004`, and `fraction_improved = 0.6636`.
+
+However, the same all-layer checkpoint badly damages closed-loop performance,
+even with oracle high-level goals (`0.635 -> 0.255`). This means the local
+replay branch distribution is not enough by itself. It overfits to fixed replay
+states/goals and moves too far from the robust closed-loop action distribution.
+
+Final-layer distillation is safer but still not good enough: learned-high
+closed-loop success drops from `0.395` to `0.370`, and oracle-goal success drops
+from `0.635` to `0.495`.
+
+### Decision
+
+Do not use these replay-distilled checkpoints for final closed-loop claims or
+as-is PPO initialization. The useful result is diagnostic: supervised local
+branch correction works on the fixed local objective, but preserving the
+closed-loop state distribution requires either stronger regularization/mixing
+or training data collected from closed-loop states.
+
+### Next action
+
+The next privileged/TCP experiment should be distribution-aware distillation:
+
+1. mix replay-improvement targets with a strong base-action preservation loss;
+2. train only on hard cases or use sample weights so easy cases stay close to
+   the frozen base;
+3. evaluate local full/hard banks and closed-loop oracle-goal before any PPO.
+
+## 2026-06-25 - Distribution-Aware Replay Distillation
+
+### Code Changes
+
+`train-privileged-z-local-replay-distill` now supports weighted target mixes:
+
+- `--preserve-manifest`: additional manifest whose target is the frozen base
+  low-level action instead of the replay action.
+- `--replay-weight`: per-sample weight for replay-action targets.
+- `--preserve-weight`: per-sample weight for base-action preservation targets.
+
+I also created the complement manifest:
+
+- `data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json`
+
+This contains the 3,663 fixed-bank starts that are not in the
+`mse >= 0.05` hard manifest. The intent is to avoid directly asking the same
+hard states to both copy replay and preserve the failing base action.
+
+Verification after the code change:
+
+```bash
+uv run python -m compileall src/hcl_poc/privileged_z.py src/hcl_poc/cli.py
+uv run pytest -q
+```
+
+Result: `22 passed`.
+
+### Runs
+
+Full-bank preservation, all layers:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10.json \
+  --replay-weight 1.0 \
+  --preserve-weight 5.0 \
+  --run-tag hcl_next_replay_distill_hard_plus_full_preserve_w5_all_lr1e4_e200 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope all \
+  --force
+```
+
+Easy-case preservation, all layers:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --replay-weight 1.0 \
+  --preserve-weight 1.0 \
+  --run-tag hcl_next_replay_distill_hard_plus_easy_preserve_w1_all_lr1e4_e200 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope all \
+  --force
+```
+
+Easy-case preservation, final layer:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --replay-weight 1.0 \
+  --preserve-weight 1.0 \
+  --run-tag hcl_next_replay_distill_hard_plus_easy_preserve_w1_final_layer_lr1e4_e200 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Local Results
+
+Full fixed bank:
+
+| checkpoint | train scope | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | - | 0.5051 | 0.00187 | 0.05421 | - | 0.8943 | - |
+| hard + full preserve w5 | all | 0.2108 | 0.00201 | 0.05390 | 0.4512 | 0.8945 | 0.0181 |
+| hard + easy preserve w1 | all | 0.0466 | 0.00184 | 0.03535 | 0.4966 | 0.9287 | 0.0341 |
+| hard + easy preserve w1 | final layer | 0.2905 | 0.00201 | 0.05206 | 0.4902 | 0.8982 | 0.0299 |
+
+Hard subset:
+
+| checkpoint | train scope | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | - | 4.7270 | 0.1159 | 0.8888 | - | 0.0000 | - |
+| hard + full preserve w5 | all | 1.9242 | 0.1019 | 0.6579 | 0.6143 | 0.1501 | 0.0530 |
+| hard + easy preserve w1 | all | 0.3772 | 0.0510 | 0.3420 | 0.8176 | 0.4850 | 0.1556 |
+| hard + easy preserve w1 | final layer | 1.5418 | 0.0920 | 0.6332 | 0.6882 | 0.2610 | 0.0893 |
+
+### Closed-Loop Results
+
+200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean action delta/residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| hard + easy preserve w1, all layers | hierarchy | 0.225 | 25.11 | 0.168 |
+| hard + easy preserve w1, final layer | hierarchy | 0.340 | 34.63 | 0.063 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| hard + easy preserve w1, all layers | oracle_hierarchy | 0.300 | 27.30 | 0.203 |
+| hard + easy preserve w1, final layer | oracle_hierarchy | 0.515 | 39.69 | 0.065 |
+
+### Artifacts
+
+- `data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_hard_plus_full_preserve_w5_all_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_hard_plus_easy_preserve_w1_all_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_hard_plus_easy_preserve_w1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_plus_full_preserve_w5_all_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_plus_full_preserve_w5_all_hard.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_plus_easy_preserve_w1_all_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_plus_easy_preserve_w1_all_hard.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_replay_distill_hard_plus_easy_preserve_w1_all_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_replay_distill_hard_plus_easy_preserve_w1_all_200eps.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_plus_easy_preserve_w1_final_layer_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_plus_easy_preserve_w1_final_layer_hard.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_replay_distill_hard_plus_easy_preserve_w1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_replay_distill_hard_plus_easy_preserve_w1_final_layer_200eps.json`
+
+### Interpretation
+
+The easy-preservation variant is the best fixed-bank compromise so far. It
+raises full-bank success from `0.8943` to `0.9287` and hard-subset success from
+`0.0` to `0.4850`, while using a smaller mean action delta than full replay
+distillation (`0.0341` vs `0.0594` on the full bank).
+
+It still fails the real closed-loop gate. All-layer training damages both
+learned-high and oracle-high rollouts. Final-layer training reduces that damage
+but still underperforms the frozen base (`0.340 < 0.395` learned-high,
+`0.515 < 0.635` oracle-high).
+
+The failure is now sharper: fixed replay-reset supervision can be regularized
+enough to preserve easy fixed-bank states, but it still does not preserve the
+closed-loop state/goal distribution. More weight sweeps on the same fixed bank
+are unlikely to solve the main issue.
+
+### Next action
+
+Move from fixed replay-reset distillation to closed-loop-state supervision:
+
+1. collect states/goals reached by the frozen hierarchy during closed-loop
+   rollouts;
+2. label those states with base actions for preservation and only add replay or
+   search-improvement targets where a local diagnostic shows clear benefit;
+3. gate every candidate first on oracle-high closed-loop success, not only the
+   fixed local reset bank.
+
+## 2026-06-25 - Closed-Loop Preservation Bank
+
+### Code Changes
+
+Added `collect-privileged-z-closed-loop-preserve-bank`, which runs the frozen
+privileged hierarchy and saves the low-level condition plus the clipped frozen
+base action actually executed at each closed-loop step. The distillation trainer
+can now consume this NPZ through:
+
+- `--preserve-npz`
+- `--preserve-npz-weight`
+
+This makes closed-loop state/action preservation explicit instead of relying on
+fixed replay-reset states as a proxy.
+
+Verification:
+
+```bash
+uv run python -m compileall src/hcl_poc/privileged_z.py src/hcl_poc/cli.py
+uv run pytest -q
+```
+
+Result: `22 passed`.
+
+### Collection
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  collect-privileged-z-closed-loop-preserve-bank \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 512 \
+  --seed-start 9900000 \
+  --num-envs 64 \
+  --output data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --force
+```
+
+Collected 51,200 low-level samples. The frozen hierarchy success over this
+512-episode collection was `0.4473`.
+
+### Runs
+
+Final-layer distillation with closed-loop preservation weight 1.0:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --replay-weight 1.0 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --run-tag hcl_next_replay_distill_hard_easy_closedloop_preserve_w1_final_layer_lr1e4_e200 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+Final-layer distillation with closed-loop preservation weight 0.5:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --replay-weight 1.0 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 0.5 \
+  --run-tag hcl_next_replay_distill_hard_easy_closedloop_preserve_npz05_final_layer_lr1e4_e200 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Local Results
+
+Full fixed bank:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 0.5051 | 0.00187 | 0.05421 | - | 0.8943 | - |
+| hard + easy + closed preserve w1.0 | 0.4975 | 0.00187 | 0.05466 | 0.5146 | 0.8928 | 0.0203 |
+| hard + easy + closed preserve w0.5 | 0.4147 | 0.00190 | 0.05288 | 0.5059 | 0.8948 | 0.0225 |
+
+Hard subset:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 4.7270 | 0.1159 | 0.8888 | - | 0.0000 | - |
+| hard + easy + closed preserve w1.0 | 3.6872 | 0.0978 | 0.6499 | 0.6744 | 0.1594 | 0.0550 |
+| hard + easy + closed preserve w0.5 | 2.8461 | 0.0966 | 0.6033 | 0.6790 | 0.1917 | 0.0647 |
+
+### Closed-Loop Results
+
+200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean action delta/residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| hard + easy + closed preserve w1.0 | hierarchy | 0.425 | 38.40 | 0.011 |
+| hard + easy + closed preserve w0.5 | hierarchy | 0.420 | 38.08 | 0.015 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| hard + easy + closed preserve w1.0 | oracle_hierarchy | 0.630 | 45.06 | 0.016 |
+| hard + easy + closed preserve w0.5 | oracle_hierarchy | 0.635 | 45.12 | 0.020 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_hard_easy_closedloop_preserve_w1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_replay_distill_hard_easy_closedloop_preserve_npz05_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_easy_closedloop_preserve_w1_final_layer_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_easy_closedloop_preserve_w1_final_layer_hard.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_replay_distill_hard_easy_closedloop_preserve_w1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_replay_distill_hard_easy_closedloop_preserve_w1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_easy_closedloop_preserve_npz05_final_layer_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_replay_distill_hard_easy_closedloop_preserve_npz05_final_layer_hard.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_replay_distill_hard_easy_closedloop_preserve_npz05_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_replay_distill_hard_easy_closedloop_preserve_npz05_final_layer_200eps.json`
+
+### Interpretation
+
+Closed-loop preservation is the first variant that improves the actual
+learned-high hierarchy gate while keeping oracle-high at the frozen base level.
+The gains are small but qualitatively important:
+
+- learned-high success: `0.395 -> 0.425` for NPZ weight `1.0`
+- oracle-high success: `0.635 -> 0.630`
+- learned-high success: `0.395 -> 0.420` for NPZ weight `0.5`
+- oracle-high success: `0.635 -> 0.635`
+
+The tradeoff is that hard fixed-bank correction is much weaker than in
+fixed-bank-only distillation. That is acceptable for now because the previous
+strong local variants failed closed-loop deployment badly.
+
+### Decision
+
+Use closed-loop preservation as the gate for future low-level changes. The next
+step should collect a larger and more diverse closed-loop preservation bank,
+then add improvement targets from closed-loop states rather than only from the
+single fixed replay hard subset. A useful next candidate is to collect failure
+or near-failure closed-loop states, run local action search from those live
+states, and distill only action-search improvements that beat the frozen base.
+
+## 2026-06-25 - Closed-Loop Action-Search Improvement Bank
+
+### Code Changes
+
+Added `collect-privileged-z-closed-loop-action-search-bank`. The command runs
+the frozen hierarchy in closed loop, branches at live high-level decision
+states, random-shoots low-level action sequences in a separate resettable
+environment, and saves only branches where the best candidate improves terminal
+MSE by at least a threshold.
+
+The local replay distillation trainer can now consume improvement targets from
+NPZ files through:
+
+- `--improve-npz`
+- `--improve-npz-weight`
+
+This separates three roles in the same final-layer distillation run:
+
+- hard replay-reset correction;
+- easy and closed-loop base-action preservation;
+- closed-loop action-search improvement targets.
+
+### Collection
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  collect-privileged-z-closed-loop-action-search-bank \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 128 \
+  --seed-start 9900000 \
+  --num-envs 64 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-search-batches 32 \
+  --output data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001.npz \
+  --force
+```
+
+Summary:
+
+| metric | value |
+| --- | ---: |
+| condition rows | 7190 |
+| searched branches | 1280 |
+| selected branches | 719 |
+| selected fraction | 0.5617 |
+| selected base MSE mean / median / p90 | 0.8344 / 0.1395 / 2.3075 |
+| selected best MSE mean / median / p90 | 0.2059 / 0.0303 / 0.5355 |
+| selected improvement MSE mean / median / p90 | 0.6285 / 0.0640 / 2.2065 |
+| searched base success within epsilon | 0.5305 |
+| searched best success within epsilon | 0.7625 |
+| collection frozen hierarchy success | 0.4375 |
+
+This is a useful diagnostic: random shooting from the actual closed-loop
+high-level states often finds local action sequences that beat the frozen low
+level.
+
+### Runs
+
+All runs used final-layer distillation, `epochs = 200`, `batch-size = 1024`,
+`learning-rate = 1e-4`, hard replay-reset weight `0.25`, easy fixed-bank
+preservation weight `1.0`, and the same closed-loop preservation/action-search
+NPZ files.
+
+| checkpoint | preserve NPZ weight | improve NPZ weight |
+| --- | ---: | ---: |
+| `hcl_next_closedloop_search_improve_c16_imp2_preserve_npz05_final_layer_lr1e4_e200` | 0.5 | 2.0 |
+| `hcl_next_closedloop_search_improve_c16_imp1_preserve_npz05_final_layer_lr1e4_e200` | 0.5 | 1.0 |
+| `hcl_next_closedloop_search_improve_c16_imp1_preserve_npz1_final_layer_lr1e4_e200` | 1.0 | 1.0 |
+
+Representative training command for the last variant:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 1.0 \
+  --run-tag hcl_next_closedloop_search_improve_c16_imp1_preserve_npz1_final_layer_lr1e4_e200 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Closed-Loop Results
+
+200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| closed preserve w1.0 | hierarchy | 0.425 | 38.40 | 0.011 |
+| closed search imp2 preserve0.5 | hierarchy | 0.445 | 38.58 | 0.0106 |
+| closed search imp1 preserve0.5 | hierarchy | 0.460 | 40.29 | 0.0089 |
+| closed search imp1 preserve1.0 | hierarchy | 0.410 | 38.69 | 0.0077 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| closed preserve w1.0 | oracle_hierarchy | 0.630 | 45.06 | 0.016 |
+| closed search imp2 preserve0.5 | oracle_hierarchy | 0.605 | 43.31 | 0.0129 |
+| closed search imp1 preserve0.5 | oracle_hierarchy | 0.610 | 43.53 | 0.0127 |
+| closed search imp1 preserve1.0 | oracle_hierarchy | 0.635 | 44.53 | 0.0120 |
+
+### Local Results
+
+Full fixed bank:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 0.5051 | 0.00187 | 0.05421 | - | 0.8943 | - |
+| closed search imp2 preserve0.5 | 0.5182 | 0.00193 | 0.05558 | 0.4341 | 0.8901 | 0.0171 |
+| closed search imp1 preserve1.0 | 0.4718 | 0.00189 | 0.05563 | 0.4644 | 0.8911 | 0.0161 |
+
+Hard subset:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 4.7270 | 0.1159 | 0.8888 | - | 0.0000 | - |
+| closed search imp2 preserve0.5 | 3.9440 | 0.1064 | 0.6331 | 0.5958 | 0.1247 | 0.0428 |
+| closed search imp1 preserve1.0 | 3.9614 | 0.1072 | 0.6022 | 0.5935 | 0.1109 | 0.0392 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_imp2_preserve_npz05_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_imp1_preserve_npz05_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_imp1_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_imp2_preserve_npz05_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_imp2_preserve_npz05_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_imp1_preserve_npz05_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_imp1_preserve_npz05_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_imp1_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_imp1_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_imp1_preserve_npz1_final_layer_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_imp1_preserve_npz1_final_layer_hard.json`
+
+### Interpretation
+
+Closed-loop action search is useful as a diagnostic and as a source of
+improvement labels, but the first distillation targets are not yet robust enough
+to be the new default.
+
+The strongest learned-high result came from `improve = 1.0`, `preserve NPZ =
+0.5`: `0.395 -> 0.460` hierarchy success. However, it damaged oracle-high
+rollouts (`0.635 -> 0.610`), which means the low-level change is not purely a
+local correction and can interfere with good high-level goals.
+
+Increasing closed-loop preservation to `1.0` restores oracle-high success to
+`0.635`, but learned-high falls to `0.410` and hard fixed-bank success is only
+`0.1109`. This is safer but weaker than the preservation-only checkpoint.
+
+### Decision
+
+Keep `closed preserve w1.0` as the current safest deployable low-level
+distillation checkpoint. Treat the action-search bank as evidence that local
+improvement targets exist, but add another filter before using them for
+training. The next candidate should only accept searched targets that both:
+
+1. improve terminal MSE over the frozen base; and
+2. stay close to the frozen base action sequence or preserve oracle-high
+rollouts under an oracle-mode gate.
+
+## 2026-06-25 - Action-Delta Filtered Closed-Loop Search
+
+### Code Changes
+
+Added `--max-action-delta-l2` to
+`collect-privileged-z-closed-loop-action-search-bank`. The collector now stores
+`selected_action_delta_l2` and `searched_action_delta_l2`, where each value is
+the mean per-step L2 distance between the selected searched action sequence and
+the frozen base action sequence over the held-goal horizon.
+
+The purpose is to reject action-search labels that improve the branch-local MSE
+only by moving far from the base low-level behavior.
+
+Verification:
+
+```bash
+uv run python -m compileall src/hcl_poc/privileged_z.py src/hcl_poc/cli.py
+uv run pytest -q
+```
+
+Result: `22 passed`.
+
+### Filtered Collection
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  collect-privileged-z-closed-loop-action-search-bank \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 128 \
+  --seed-start 9900000 \
+  --num-envs 64 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-action-delta-l2 0.08 \
+  --max-search-batches 32 \
+  --output data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001_delta008.npz \
+  --force
+```
+
+Summary:
+
+| metric | value |
+| --- | ---: |
+| condition rows | 480 |
+| searched branches | 1280 |
+| selected branches | 48 |
+| selected fraction | 0.0375 |
+| selected base MSE mean / median / p90 | 1.1074 / 1.1715 / 2.2641 |
+| selected best MSE mean / median / p90 | 0.0624 / 0.0108 / 0.1058 |
+| selected improvement MSE mean / median / p90 | 1.0450 / 0.8228 / 2.2609 |
+| selected action delta L2 mean / median / p90 | 0.0720 / 0.0727 / 0.0788 |
+| searched base success within epsilon | 0.5016 |
+| searched best success within epsilon | 0.7250 |
+| collection frozen hierarchy success | 0.3984 |
+
+The action-delta filter is very strict: it keeps only `48 / 1280` searched
+branches. The retained branches are high-improvement and near the intended
+action-delta boundary.
+
+### Runs
+
+Both runs used final-layer distillation with:
+
+- hard replay-reset weight `0.25`;
+- easy fixed-bank preservation weight `1.0`;
+- closed-loop preservation NPZ weight `1.0`;
+- filtered improvement NPZ
+  `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001_delta008.npz`;
+- `epochs = 200`, `batch-size = 1024`, `learning-rate = 1e-4`.
+
+| checkpoint | improve NPZ weight |
+| --- | ---: |
+| `hcl_next_closedloop_search_improve_c16_delta008_imp16_preserve_npz1_final_layer_lr1e4_e200` | 16.0 |
+| `hcl_next_closedloop_search_improve_c16_delta008_imp4_preserve_npz1_final_layer_lr1e4_e200` | 4.0 |
+
+### Closed-Loop Results
+
+200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| closed preserve w1.0 | hierarchy | 0.425 | 38.40 | 0.011 |
+| filtered search imp16 | hierarchy | 0.420 | 37.53 | 0.0074 |
+| filtered search imp4 | hierarchy | 0.430 | 39.33 | 0.0077 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| closed preserve w1.0 | oracle_hierarchy | 0.630 | 45.06 | 0.016 |
+| filtered search imp16 | oracle_hierarchy | 0.585 | 42.42 | 0.0124 |
+| filtered search imp4 | oracle_hierarchy | 0.620 | 44.01 | 0.0119 |
+
+### Local Results
+
+The lower-weight filtered checkpoint was evaluated on the fixed banks.
+
+Full fixed bank:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 0.5051 | 0.00187 | 0.05421 | - | 0.8943 | - |
+| filtered search imp4 | 0.1375 | 0.00189 | 0.05480 | 0.4905 | 0.8936 | 0.0149 |
+
+Hard subset:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 4.7270 | 0.1159 | 0.8888 | - | 0.0000 | - |
+| filtered search imp4 | 0.9702 | 0.1010 | 0.5922 | 0.6143 | 0.1155 | 0.0397 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001_delta008.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_delta008_imp16_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_delta008_imp4_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_delta008_imp16_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_delta008_imp16_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_delta008_imp4_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_delta008_imp4_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_delta008_imp4_preserve_npz1_final_layer_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_delta008_imp4_preserve_npz1_final_layer_hard.json`
+
+### Interpretation
+
+The action-distance filter improves the fixed-bank behavior dramatically, but
+it still does not produce a clean closed-loop win.
+
+`imp16` overweights a tiny high-signal filtered bank and damages oracle-high
+rollouts badly (`0.635 -> 0.585`). `imp4` is much safer and gives the best hard
+fixed-bank MSE so far (`4.7270 -> 0.9702`) with small mean action delta, but its
+closed-loop result is only marginally better than preservation-only on
+learned-high (`0.430` vs `0.425`) and slightly worse on oracle-high (`0.620` vs
+`0.630`).
+
+This strengthens the previous conclusion: fixed-bank and branch-local metrics
+can look very good while still not transferring cleanly to full rollouts.
+
+### Decision
+
+Do not promote filtered action-search distillation over closed-loop
+preservation-only. The next useful experiment should change the acceptance
+criterion from an action-distance heuristic to an oracle-rollout gate: accept an
+improvement target only if it improves the learned-high branch and does not
+degrade an oracle-high branch from the same state/goal.
+
+## 2026-06-25 - Oracle-Gated Closed-Loop Action Search
+
+### Code Changes
+
+Added `--oracle-gate-max-degradation-mse` to
+`collect-privileged-z-closed-loop-action-search-bank`. When enabled, the
+collector computes an oracle high-level goal from the same simulator branch
+state and accepts a learned-goal action-search target only if executing the
+selected action sequence does not make oracle-goal terminal MSE worse than the
+frozen low-level oracle-goal branch by more than the configured tolerance.
+
+The saved NPZ now includes oracle-gate diagnostics:
+
+- `selected_oracle_base_mse`
+- `selected_oracle_candidate_mse`
+- `selected_oracle_delta_mse`
+- `searched_oracle_base_mse`
+- `searched_oracle_candidate_mse`
+- `searched_oracle_delta_mse`
+
+Also fixed the collector's searched-action-delta accounting by initializing the
+per-branch best action sequence to the frozen base sequence. Previously,
+non-improved branches kept a zero placeholder; selected rows were still valid,
+but searched action-delta diagnostics for non-selected rows were not meaningful.
+
+### Collection
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  collect-privileged-z-closed-loop-action-search-bank \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 128 \
+  --seed-start 9900000 \
+  --num-envs 64 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --oracle-gate-max-degradation-mse 0.0 \
+  --max-search-batches 32 \
+  --output data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001_oraclegate0.npz \
+  --force
+```
+
+Summary:
+
+| metric | value |
+| --- | ---: |
+| condition rows | 2700 |
+| searched branches | 1280 |
+| selected branches | 270 |
+| selected fraction | 0.2109 |
+| selected base MSE mean / median / p90 | 1.0088 / 0.1616 / 2.7423 |
+| selected best MSE mean / median / p90 | 0.2877 / 0.0443 / 0.7852 |
+| selected improvement MSE mean / median / p90 | 0.7211 / 0.0600 / 2.6140 |
+| selected action delta L2 mean / median / p90 | 0.1869 / 0.1525 / 0.3128 |
+| selected oracle base MSE mean / median / p90 | 5.5084 / 1.0948 / 4.8297 |
+| selected oracle candidate MSE mean / median / p90 | 1.1070 / 0.1754 / 1.0669 |
+| selected oracle delta MSE mean / median / p90 | -4.4014 / -0.4952 / -0.0103 |
+| searched oracle gate pass fraction | 0.3797 |
+| collection frozen hierarchy success | 0.4297 |
+
+The oracle gate keeps a useful middle-sized bank: stricter than unfiltered
+action search (`270` vs `719` selected branches), but far less sparse than the
+action-distance filter (`270` vs `48` selected branches). The selected labels
+improve both the learned-goal branch and the oracle-goal branch under the
+branch-local diagnostic.
+
+### Runs
+
+Both runs used final-layer distillation with hard replay-reset weight `0.25`,
+easy fixed-bank preservation weight `1.0`, closed-loop preservation NPZ weight
+`1.0`, `epochs = 200`, `batch-size = 1024`, and `learning-rate = 1e-4`.
+
+| checkpoint | improve NPZ weight |
+| --- | ---: |
+| `hcl_next_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_lr1e4_e200` | 2.0 |
+| `hcl_next_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_lr1e4_e200` | 1.0 |
+
+### Closed-Loop Results
+
+Dev seed window, 200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| closed preserve w1.0 | hierarchy | 0.425 | 38.40 | 0.011 |
+| oracle-gated search imp2 | hierarchy | 0.455 | 39.95 | 0.0072 |
+| oracle-gated search imp1 | hierarchy | 0.445 | 39.66 | 0.0072 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| closed preserve w1.0 | oracle_hierarchy | 0.630 | 45.06 | 0.016 |
+| oracle-gated search imp2 | oracle_hierarchy | 0.675 | 46.52 | 0.0122 |
+| oracle-gated search imp1 | oracle_hierarchy | 0.660 | 45.85 | 0.0114 |
+
+Fresh seed window, 500 episodes, `seed-start = 10000000`:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.458 | 38.98 | 0.000 |
+| oracle-gated search imp2 | hierarchy | 0.448 | 38.63 | 0.0084 |
+| oracle-gated search imp1 | hierarchy | 0.464 | 39.81 | 0.0074 |
+| frozen base | oracle_hierarchy | 0.626 | 45.05 | 0.000 |
+| oracle-gated search imp2 | oracle_hierarchy | 0.658 | 46.37 | 0.0116 |
+| oracle-gated search imp1 | oracle_hierarchy | 0.666 | 45.94 | 0.0116 |
+
+### Local Results
+
+Full fixed bank:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 0.5051 | 0.00187 | 0.05421 | - | 0.8943 | - |
+| oracle-gated search imp2 | 0.4231 | 0.00191 | 0.05553 | 0.4795 | 0.8923 | 0.0155 |
+| oracle-gated search imp1 | 0.4638 | 0.00188 | 0.05335 | 0.4893 | 0.8950 | 0.0153 |
+
+Hard subset:
+
+| checkpoint | terminal MSE mean | terminal MSE median | terminal MSE p90 | fraction improved | success within epsilon | action delta L2 mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen base | 4.7270 | 0.1159 | 0.8888 | - | 0.0000 | - |
+| oracle-gated search imp2 | 3.7274 | 0.1082 | 0.6054 | 0.5935 | 0.1109 | 0.0407 |
+| oracle-gated search imp1 | 4.0571 | 0.1061 | 0.5528 | 0.6005 | 0.1316 | 0.0397 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001_oraclegate0.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_base_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_oraclegate0_imp2_preserve_npz1_final_layer_hard.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_full.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_hard.json`
+
+### Interpretation
+
+Oracle-gated action search is the first action-search variant that improves the
+dev closed-loop learned-high gate while also improving oracle-high instead of
+damaging it. The branch-local oracle gate was therefore the right acceptance
+criterion to add.
+
+`imp2` has the strongest dev-window result (`0.455` learned-high and `0.675`
+oracle-high), but it does not generalize on the fresh learned-high window
+(`0.448` vs frozen base `0.458`). `imp1` has a smaller dev gain, but is the
+first candidate that beats frozen base on both fresh learned-high and fresh
+oracle-high:
+
+- fresh learned-high: `0.458 -> 0.464`
+- fresh oracle-high: `0.626 -> 0.666`
+
+The gains are still modest and should not be treated as final evidence that the
+RL/reachability formulation is solved. They do show that filtering improvement
+targets with an oracle branch gate can produce a low-level update that survives
+the main closed-loop deployment checks.
+
+### Decision
+
+Promote `hcl_next_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_lr1e4_e200`
+as the current best low-level distillation candidate for the privileged
+`N=1800, k=10` sanity track.
+
+Next actions:
+
+1. repeat oracle-gated collection on a larger/more diverse closed-loop bank;
+2. evaluate the promoted checkpoint over more fresh seeds before claiming a
+   stable improvement;
+3. if the effect persists, move the same oracle-gated target-selection idea into
+   the real RL/reachability formulation instead of continuing small supervised
+   distillation sweeps.
+
+## 2026-06-25 - Additional Fresh-Seed Validation for Oracle-Gated imp1
+
+### Purpose
+
+The first fresh window for
+`hcl_next_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_lr1e4_e200`
+was positive on both learned-high and oracle-high. To check whether that was a
+stable effect rather than a seed-window artifact, I ran two more 500-episode
+fresh windows at `seed-start = 10100000` and `10200000`, paired against the
+frozen base checkpoint.
+
+### Results
+
+500 episodes per row:
+
+| seed-start | mode | frozen base success | tuned success | delta | frozen base return | tuned return | delta |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10000000 | hierarchy | 0.458 | 0.464 | +0.006 | 38.98 | 39.81 | +0.83 |
+| 10100000 | hierarchy | 0.470 | 0.480 | +0.010 | 39.82 | 40.24 | +0.42 |
+| 10200000 | hierarchy | 0.446 | 0.440 | -0.006 | 39.29 | 39.30 | +0.01 |
+| 10000000 | oracle_hierarchy | 0.626 | 0.666 | +0.040 | 45.05 | 45.94 | +0.89 |
+| 10100000 | oracle_hierarchy | 0.654 | 0.672 | +0.018 | 46.88 | 46.20 | -0.68 |
+| 10200000 | oracle_hierarchy | 0.638 | 0.644 | +0.006 | 46.48 | 45.71 | -0.77 |
+
+Aggregate over the three fresh windows:
+
+| mode | frozen base success mean | tuned success mean | delta success mean | frozen base return mean | tuned return mean | delta return mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| hierarchy | 0.4580 | 0.4613 | +0.0033 | 39.36 | 39.78 | +0.42 |
+| oracle_hierarchy | 0.6393 | 0.6607 | +0.0213 | 46.14 | 45.95 | -0.19 |
+
+### Artifacts
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_base_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_fresh_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_base_fresh_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_imp1_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+
+### Interpretation
+
+The promoted checkpoint still looks directionally useful, but the learned-high
+effect is marginal across fresh seeds. It improves learned-high success in two
+of three fresh windows and the mean success delta is only `+0.0033`. The
+oracle-high success lift is more consistent: all three fresh windows are
+positive, with mean success delta `+0.0213`.
+
+Returns are mixed for oracle-high despite higher success, so this should not be
+reported as a broad task-return improvement. The more defensible conclusion is:
+the oracle gate solves the previous oracle-high damage problem and creates a
+small learned-high improvement signal, but larger/more diverse target collection
+is needed before claiming a robust full-policy improvement.
+
+### Decision
+
+Keep the same checkpoint as the current best candidate, but downgrade the
+promotion language: it is the best *diagnostic* candidate, not yet a stable
+improved policy. The next experiment should collect a larger oracle-gated bank
+from multiple seed windows rather than continue tuning weights on the small
+`n128` bank.
+
+## 2026-06-25 - Multi-Window Oracle-Gated Bank
+
+### Purpose
+
+The small oracle-gated bank gave a promising but marginal learned-high effect.
+This experiment tests whether more diverse oracle-gated improvement targets
+help by collecting the same `n128` bank on two additional seed windows and
+merging all three windows into a larger `n384` NPZ.
+
+### Collection
+
+Additional collection commands:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  collect-privileged-z-closed-loop-action-search-bank \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 128 \
+  --seed-start 10100000 \
+  --num-envs 64 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --oracle-gate-max-degradation-mse 0.0 \
+  --max-search-batches 32 \
+  --output data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed10100000_c16_std005_min001_oraclegate0.npz \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  collect-privileged-z-closed-loop-action-search-bank \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 128 \
+  --seed-start 10200000 \
+  --num-envs 64 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --oracle-gate-max-degradation-mse 0.0 \
+  --max-search-batches 32 \
+  --output data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed10200000_c16_std005_min001_oraclegate0.npz \
+  --force
+```
+
+Collection summaries:
+
+| seed-start | selected branches | searched branches | selected fraction | selected improvement MSE mean | selected action delta L2 mean | selected oracle delta MSE mean | collection base success |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 9900000 | 270 | 1280 | 0.2109 | 0.7211 | 0.1869 | -4.4014 | 0.4297 |
+| 10100000 | 248 | 1280 | 0.1938 | 14.5466 | 0.2198 | -9.0017 | 0.4844 |
+| 10200000 | 217 | 1280 | 0.1695 | 28.2455 | 0.2194 | -17.2059 | 0.5000 |
+| merged | 735 | 3840 | 0.1914 | 13.5122 | 0.2076 | -9.7340 | 0.4714 |
+
+Merged artifact:
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0.npz`
+
+The later seed windows contain very large MSE outliers. The oracle gate still
+selects branches that improve oracle-goal MSE locally, but the merged target
+distribution is much heavier-tailed than the original `n128` bank.
+
+### Run
+
+The merged bank has `7350` low-level rows, about `2.7x` the original oracle-gated
+bank. To avoid increasing the effective improvement-loss mass, I used
+`--improve-npz-weight 0.5`.
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.5 \
+  --run-tag hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_lr1e4_e200 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Dev seed window, 200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| oracle-gated search imp1 small bank | hierarchy | 0.445 | 39.66 | 0.0072 |
+| oracle-gated search multi384 imp0.5 | hierarchy | 0.460 | 38.41 | 0.0073 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| oracle-gated search imp1 small bank | oracle_hierarchy | 0.660 | 45.85 | 0.0114 |
+| oracle-gated search multi384 imp0.5 | oracle_hierarchy | 0.655 | 45.18 | 0.0122 |
+
+Fresh seed windows, 500 episodes per row:
+
+| seed-start | mode | frozen base success | small-bank imp1 success | multi384 imp0.5 success | multi384 delta vs base |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 10000000 | hierarchy | 0.458 | 0.464 | 0.454 | -0.004 |
+| 10100000 | hierarchy | 0.470 | 0.480 | 0.454 | -0.016 |
+| 10200000 | hierarchy | 0.446 | 0.440 | 0.458 | +0.012 |
+| 10000000 | oracle_hierarchy | 0.626 | 0.666 | 0.642 | +0.016 |
+| 10100000 | oracle_hierarchy | 0.654 | 0.672 | 0.644 | -0.010 |
+| 10200000 | oracle_hierarchy | 0.638 | 0.644 | 0.618 | -0.020 |
+
+Aggregate over the three fresh windows:
+
+| mode | frozen base success mean | small-bank imp1 success mean | multi384 imp0.5 success mean | multi384 delta vs base |
+| --- | ---: | ---: | ---: | ---: |
+| hierarchy | 0.4580 | 0.4613 | 0.4553 | -0.0027 |
+| oracle_hierarchy | 0.6393 | 0.6607 | 0.6347 | -0.0047 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed10100000_c16_std005_min001_oraclegate0.npz`
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed10200000_c16_std005_min001_oraclegate0.npz`
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_imp05_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+
+### Interpretation
+
+The naive larger-bank scaling did not help. It looked competitive on the dev
+seed window, but on the three fresh windows it underperformed both the frozen
+base and the smaller-bank oracle-gated `imp1` checkpoint on average.
+
+This is useful negative evidence. The problem is not just that the small bank
+was too small; target distribution quality matters. The larger bank introduced
+heavy-tailed local improvement labels from later seed windows, and the simple
+uniform supervised loss did not turn those into a better closed-loop policy.
+
+### Decision
+
+Keep the smaller `n128` oracle-gated `imp1` checkpoint as the best diagnostic
+candidate. Do not train further on the merged `multi384` bank without additional
+filtering or weighting. The next useful change is to make target selection or
+loss weighting robust to heavy-tailed branch improvements, for example by:
+
+1. capping selected branch improvement MSE / action delta;
+2. stratifying by branch difficulty instead of uniformly weighting all selected
+   rows;
+3. filtering out extreme selected branches whose base MSE is dominated by
+   unstable simulator outliers.
+
+## 2026-06-25 - Base-MSE-Capped Multi-Window Oracle-Gated Bank
+
+### Purpose
+
+The unfiltered multi-window oracle-gated bank failed fresh validation because
+later seed windows contributed extreme selected-branch MSE outliers. Post-hoc
+row filtering was unsafe because the existing NPZ layout stores selected
+condition/action rows step-major within collection chunks and does not preserve
+enough branch-to-row metadata. I added collector-side filtering instead.
+
+### Implementation
+
+Added `--max-base-mse` to
+`collect-privileged-z-closed-loop-action-search-bank`. When provided, selected
+branches must also have frozen-base terminal MSE at most that value. The value
+is saved in the NPZ metadata and printed in the collection summary.
+
+Verification after the code change:
+
+```bash
+uv run python -m compileall -q src/hcl_poc/privileged_z.py src/hcl_poc/cli.py
+uv run pytest -q
+```
+
+Result: `22 passed`.
+
+### Collection
+
+Collected three `n128` seed windows with `--max-base-mse 5.0`,
+`--max-action-delta-l2 0.25`, and `--oracle-gate-max-degradation-mse 0.0`.
+
+| seed-start | selected branches | rows | selected fraction | selected base MSE mean / median / p90 / max | selected improvement MSE mean / median / p90 / max | selected action delta L2 mean / max | selected oracle delta MSE mean / median / p90 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 9900000 | 191 | 1910 | 0.1492 | 0.6396 / 0.1265 / 2.3904 / 4.8812 | 0.4464 / 0.0417 / 2.2834 / 4.7033 | 0.1496 / 0.2494 | -7.7955 / -0.4565 / -0.0073 |
+| 10100000 | 177 | 1770 | 0.1383 | 0.3952 / 0.1023 / 1.3042 / 4.2287 | 0.2644 / 0.0463 / 0.6073 / 3.8716 | 0.1423 / 0.2467 | -1.2499 / -0.2182 / -0.0092 |
+| 10200000 | 168 | 1680 | 0.1313 | 0.6120 / 0.1452 / 2.5407 / 4.5555 | 0.4143 / 0.0548 / 2.2833 / 4.3340 | 0.1448 / 0.2481 | -1.5714 / -0.2263 / -0.0098 |
+| merged | 536 | 5360 | 0.1396 | 0.5502 / 0.1191 / 2.1862 / 4.8812 | 0.3762 / 0.0464 / 1.5455 / 4.7033 | 0.1457 / 0.2494 | -3.6831 / -0.2579 / -0.0088 |
+
+Merged artifact:
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025.npz`
+
+The cap removed the severe selected-label tail from the previous merged bank
+while keeping about `73%` of the selected branches (`536 / 735`).
+
+### Run
+
+Final-layer replay distillation used the capped merged bank with
+`--improve-npz-weight 0.5`, matching the unfiltered multi-window effective
+weighting choice.
+
+Checkpoint:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+### Results
+
+Dev seed window, 200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| frozen base | hierarchy | 0.395 | 37.02 | 0.000 |
+| oracle-gated search imp1 small bank | hierarchy | 0.445 | 39.66 | 0.0072 |
+| oracle-gated search multi384 imp0.5 | hierarchy | 0.460 | 38.41 | 0.0073 |
+| basecap5 delta0.25 multi384 imp0.5 | hierarchy | 0.465 | 39.97 | 0.0078 |
+| frozen base | oracle_hierarchy | 0.635 | 45.28 | 0.000 |
+| oracle-gated search imp1 small bank | oracle_hierarchy | 0.660 | 45.85 | 0.0114 |
+| oracle-gated search multi384 imp0.5 | oracle_hierarchy | 0.655 | 45.18 | 0.0122 |
+| basecap5 delta0.25 multi384 imp0.5 | oracle_hierarchy | 0.685 | 46.04 | 0.0114 |
+
+Fresh seed windows, 500 episodes per row:
+
+| seed-start | mode | frozen base success | small-bank imp1 success | unfiltered multi384 imp0.5 success | basecap5 delta0.25 multi384 success | capped delta vs base |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 10000000 | hierarchy | 0.458 | 0.464 | 0.454 | 0.454 | -0.004 |
+| 10100000 | hierarchy | 0.470 | 0.480 | 0.454 | 0.460 | -0.010 |
+| 10200000 | hierarchy | 0.446 | 0.440 | 0.458 | 0.476 | +0.030 |
+| 10000000 | oracle_hierarchy | 0.626 | 0.666 | 0.642 | 0.644 | +0.018 |
+| 10100000 | oracle_hierarchy | 0.654 | 0.672 | 0.644 | 0.672 | +0.018 |
+| 10200000 | oracle_hierarchy | 0.638 | 0.644 | 0.618 | 0.658 | +0.020 |
+
+Aggregate over the three fresh windows:
+
+| mode | frozen base success mean | small-bank imp1 success mean | unfiltered multi384 imp0.5 success mean | basecap5 delta0.25 multi384 success mean | capped delta vs base |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| hierarchy | 0.4580 | 0.4613 | 0.4553 | 0.4633 | +0.0053 |
+| oracle_hierarchy | 0.6393 | 0.6607 | 0.6347 | 0.6580 | +0.0187 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed9900000_c16_std005_min001_oraclegate0_basecap5_delta025.npz`
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed10100000_c16_std005_min001_oraclegate0_basecap5_delta025.npz`
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n128_seed10200000_c16_std005_min001_oraclegate0_basecap5_delta025.npz`
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+
+### Interpretation
+
+Collector-side branch capping fixed the main failure mode of the naive merged
+bank. The learned-high improvement is still small and seed-dependent, but the
+fresh-window mean is now above both frozen base and the previous small-bank
+diagnostic candidate. Oracle-high transfer is consistently positive on all
+fresh windows, although the mean remains slightly below the prior small-bank
+checkpoint.
+
+### Decision
+
+Promote the basecap5/delta0.25 multi-window checkpoint as the best learned-high
+diagnostic candidate so far, but treat the margin as modest. The result supports
+continuing with capped or weighted closed-loop action-search targets rather than
+more uniform training on heavy-tailed selected branches. The next useful
+experiment is a small weighting sweep on this capped bank, especially
+`--improve-npz-weight 1.0`, before trying any PPO fine-tuning.
+
+### Improve-Weight 1.0 Sweep
+
+I trained the same capped-bank final-layer recipe with
+`--improve-npz-weight 1.0`.
+
+Checkpoint:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp1_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+Dev seed window, 200 episodes, `seed-start = 9900000`:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| basecap5 delta0.25 multi384 imp0.5 | hierarchy | 0.465 | 39.97 | 0.0078 |
+| basecap5 delta0.25 multi384 imp1.0 | hierarchy | 0.475 | 39.27 | 0.0068 |
+| basecap5 delta0.25 multi384 imp0.5 | oracle_hierarchy | 0.685 | 46.04 | 0.0114 |
+| basecap5 delta0.25 multi384 imp1.0 | oracle_hierarchy | 0.630 | 45.69 | 0.0108 |
+
+Artifacts:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp1_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp1_preserve_npz1_final_layer_200eps.json`
+
+Decision: reject `imp1.0` without fresh-window validation. The learned-high dev
+score improves slightly, but oracle-high drops below the frozen oracle-high base
+and far below the `imp0.5` checkpoint. This suggests the capped improve signal
+still needs a moderate weight; pushing it harder overfits the learned-goal
+closed-loop branch and damages oracle-goal robustness.
+
+## 2026-06-25 - Direct PPO From Capped Supervised Initialization
+
+### Hypothesis
+
+The capped supervised distillation checkpoint improved learned-high closed-loop
+success modestly, but the earlier privileged/TCP PPO runs all started from the
+older frozen BC low-level. This run tests whether paired PPO can improve when
+initialized from the stronger capped supervised low-level.
+
+### Implementation
+
+Added `--direct-init-checkpoint` to `train-privileged-z-direct`. The command
+still uses the base privileged-z checkpoint for normalizers, high-level model,
+and compatibility checks, but loads the direct actor-critic state from the
+provided tuned checkpoint before PPO.
+
+A one-update smoke run verified that the direct init path was actually recorded
+in the PPO recipe. An initial full run accidentally omitted the pass-through in
+CLI dispatch and reproduced the old base-initialized condition; that run was
+overwritten after fixing the dispatch and confirming the recipe.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-direct \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --direct-init-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5 \
+  --run-tag hcl_next_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m \
+  --seed 0 \
+  --steps 1024000 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --learning-rate 3e-5 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --checkpoint-every-updates 5 \
+  --train-scope final_layer \
+  --force
+```
+
+### Setup
+
+- representation: 31D privileged Push-T observation state
+- direct init checkpoint: capped base-MSE/delta multi-window supervised
+  distillation, `imp0.5`
+- reward mode: paired terminal improvement
+- dense progress weight: 0
+- train scope: final low-policy layer plus log std and critic
+- num_envs: 4096
+- rollout steps: 10
+- total transitions: 1,024,000
+- fixed local eval bank: `data/manifests/local_reset_bank_n1800_seed0_k10.json`
+- result level: dev
+
+### Results
+
+Training history final row:
+
+- mean paired improvement: `0.0160`
+- fraction improved: `0.4070`
+- mean action delta L2: `0.0297`
+- action saturation rate: `0.1252`
+
+Fixed-bank local paired eval:
+
+| checkpoint | mean paired improvement | median paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE median | tuned terminal MSE p90 | action delta L2 mean | saturation mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| capped supervised init | 0.3428 | -0.00000293 | 0.4912 | 0.8918 | 0.00189 | 0.05585 | 0.0147 | 0.00066 |
+| PPO step 204800 | 0.0476 | -0.00002582 | 0.4512 | 0.8933 | 0.00193 | 0.05462 | 0.0158 | 0.00067 |
+| PPO step 409600 | 0.0533 | -0.00000870 | 0.4832 | 0.8972 | 0.00190 | 0.05150 | 0.0176 | 0.00059 |
+| PPO step 614400 | 0.3637 | -0.00001065 | 0.4734 | 0.8943 | 0.00191 | 0.05289 | 0.0174 | 0.00053 |
+| PPO step 819200 | 0.0577 | -0.00001702 | 0.4700 | 0.8965 | 0.00192 | 0.05203 | 0.0184 | 0.00059 |
+| PPO step 1024000 | 0.0746 | -0.00001960 | 0.4612 | 0.8994 | 0.00191 | 0.05048 | 0.0189 | 0.00059 |
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m/seed0/checkpoints/`
+- `results/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m/seed0/history.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_basecap5_delta025_imp05_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m_step204800_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m_step409600_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m_step614400_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m_step819200_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_final_layer_n4096_1m_latest_k10_4096.json`
+
+### Interpretation
+
+Starting PPO from the capped supervised checkpoint did not pass the local paired
+gate. PPO slightly improves epsilon success and p90 terminal MSE at some
+checkpoints, but median paired improvement remains negative and
+`fraction_improved` stays below both `0.5` and the plan's `>0.55` pass
+criterion. The best epsilon checkpoint is latest (`0.8994`), but it improves
+only `46.1%` of local rollouts and is therefore still an outlier/threshold
+tradeoff rather than broad reachability improvement.
+
+### Decision
+
+Do not run closed-loop task evaluation for this PPO branch. The capped
+supervised checkpoint remains the best learned-high diagnostic candidate, and
+paired PPO from that initialization is not a reliable local improvement method.
+The next useful step is not another PPO hyperparameter sweep; it is to change
+the local objective/data weighting, for example train on harder selected local
+states or use stratified/quantile-weighted paired rewards so PPO does not mostly
+optimize rare outlier improvements.
+
+## 2026-06-25 - Hard-Start Direct PPO From Capped Supervised Initialization
+
+### Hypothesis
+
+The previous direct PPO run trained on the full local-start distribution and
+did not improve most rollouts. This run tests whether PPO is useful if the
+paired terminal-improvement objective is restricted to starts where the frozen
+base low-level already fails, using `base_terminal_mse >= 0.05`.
+
+### Implementation
+
+Added `--min-base-terminal-mse` to `train-privileged-z-direct`.
+
+For `reward-mode paired`, the trainer now computes the frozen base terminal MSE
+at reset and marks only starts above the threshold as active. Inactive samples
+remain in the vectorized environment rollout, but their rewards are zeroed and
+they are excluded from PPO advantage normalization, minibatch updates, and
+reported rollout metrics. The PPO recipe records the threshold and every
+history row records `active_fraction`.
+
+A one-update smoke run verified the direct init and hard-start mask:
+
+- `active_fraction`: `0.1143`
+- `mean_base_terminal_distance`: `2.3782`
+- `mean_paired_improvement`: `0.2643`
+- `fraction_improved`: `0.5769`
+- `success_fraction_seen`: `0.2870`
+- `action_saturation_rate`: `0.00363`
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-direct \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --direct-init-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp05_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --init-dataset data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5 \
+  --run-tag hcl_next_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m \
+  --seed 0 \
+  --steps 1024000 \
+  --reward-mode paired \
+  --terminal-weight 1.0 \
+  --learning-rate 3e-5 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --checkpoint-every-updates 5 \
+  --train-scope final_layer \
+  --min-base-terminal-mse 0.05 \
+  --force
+```
+
+### Setup
+
+- direct init checkpoint: capped base-MSE/delta multi-window supervised
+  distillation, `imp0.5`
+- reward mode: paired terminal improvement
+- active threshold: frozen base terminal MSE `>= 0.05`
+- train scope: final low-policy layer plus log std and critic
+- num_envs: 4096
+- rollout steps: 10
+- total transitions: 1,024,000
+- full fixed local eval bank: `data/manifests/local_reset_bank_n1800_seed0_k10.json`
+- hard fixed local eval bank: `data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json`
+- result level: dev
+
+### Training Result
+
+Final history row:
+
+- `active_fraction`: `0.1345`
+- `mean_base_terminal_distance`: `2.1086`
+- `mean_terminal_distance`: `2.1029`
+- `mean_paired_improvement`: `0.00570`
+- `fraction_improved`: `0.5771`
+- `success_fraction_seen`: `0.2539`
+- `mean_action_delta_l2`: `0.0326`
+- `action_saturation_rate`: `0.00653`
+
+### Full Fixed-Bank Local Paired Eval
+
+Base full-bank epsilon success is `0.8943`.
+
+| checkpoint | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PPO step 204800 | 0.4097 | 0.0954 | 0.4421 | 0.8933 | 0.0549 |
+| PPO step 409600 | 0.4366 | 0.0685 | 0.4084 | 0.8933 | 0.0546 |
+| PPO step 614400 | 0.4175 | 0.0876 | 0.4614 | 0.8894 | 0.0564 |
+| PPO step 819200 | 0.4337 | 0.0713 | 0.4473 | 0.8972 | 0.0520 |
+| PPO step 1024000 | 0.4230 | 0.0821 | 0.4417 | 0.8926 | 0.0548 |
+
+### Hard Fixed-Bank Local Paired Eval
+
+Base hard-bank epsilon success is `0.0`; base hard-bank terminal MSE mean is
+`4.7270`.
+
+| checkpoint | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| capped supervised init | 1.0231 | 3.7039 | 0.5820 | 0.1016 | 0.5898 |
+| PPO step 204800 | 3.4438 | 1.2833 | 0.5820 | 0.1270 | 0.5968 |
+| PPO step 409600 | 4.0454 | 0.6817 | 0.5497 | 0.1316 | 0.5466 |
+| PPO step 614400 | 3.8797 | 0.8474 | 0.5635 | 0.1109 | 0.5733 |
+| PPO step 819200 | 4.0431 | 0.6840 | 0.5635 | 0.1594 | 0.6565 |
+| PPO step 1024000 | 3.9235 | 0.8036 | 0.5566 | 0.1201 | 0.5762 |
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m/seed0/checkpoints/`
+- `results/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m/seed0/history.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000204800_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000409600_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000614400_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000819200_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_001024000_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_latest_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_supervised_basecap5_delta025_imp05_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000204800_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000409600_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000614400_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_000819200_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_step_001024000_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m_latest_hard_k10.json`
+
+### Interpretation
+
+Hard-start PPO changed the hard-start threshold behavior, but it did not produce
+a better controller. On the full fixed bank, every checkpoint remains below the
+previous local improvement bar, with `fraction_improved <= 0.4614`, and success
+is flat or slightly worse except for one threshold-tradeoff checkpoint.
+
+On the hard fixed bank, PPO increases hard epsilon success at some checkpoints
+up to `0.1594`, but loses most of the supervised checkpoint's tail improvement:
+the capped supervised init reduces hard mean terminal MSE to `1.0231`, while
+PPO checkpoints stay in the `3.44` to `4.05` range. The result is again a
+threshold/outlier tradeoff rather than broad local reachability improvement.
+
+### Decision
+
+Do not run closed-loop task evaluation for this hard-start PPO branch. Keep the
+capped supervised `imp0.5` checkpoint as the best learned-high diagnostic
+candidate. The next PPO-style attempt should change the reward or sampling
+objective more directly, for example stratified hard/easy minibatches with an
+explicit preservation term, quantile-weighted paired improvement, or supervised
+refresh against capped action-search labels before any policy-gradient updates.
+
+## 2026-06-25 - Capped Action-Search Improve-Weight 0.25 Sweep
+
+### Hypothesis
+
+The `imp1.0` capped-bank distillation damaged oracle-goal robustness, while
+`imp0.5` gave a modest but real fresh-window improvement. A lighter
+`--improve-npz-weight 0.25` might preserve oracle behavior better while still
+using the capped action-search labels enough to help the learned-high policy.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.25 \
+  --run-tag hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Setup
+
+- base checkpoint: `artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- improve bank: capped base-MSE/delta multi-window action-search bank
+- improve weight: `0.25`
+- preserve weights: replay hard `0.25`, easy base `1.0`, closed-loop preserve NPZ `1.0`
+- train scope: final low-policy layer
+- dev closed-loop window: 200 episodes, `seed-start = 9900000`
+- fresh closed-loop windows: 3 x 500 episodes, `seed-start in {10000000,10100000,10200000}`
+
+### Local Eval
+
+Full fixed local bank:
+
+| checkpoint | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| imp0.25 | 0.1719 | 0.3331 | 0.4631 | 0.8928 | 0.0558 |
+
+Hard fixed local bank:
+
+| checkpoint | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| imp0.25 | 1.1170 | 3.6100 | 0.5797 | 0.1039 | 0.5957 |
+| imp0.5 reference | 1.0231 | 3.7039 | 0.5820 | 0.1016 | 0.5898 |
+
+The local paired metrics are slightly worse than `imp0.5`; this checkpoint would
+not have been selected from local eval alone.
+
+### Closed-Loop Dev Eval
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| imp0.25 | hierarchy | 0.545 | 41.16 | 0.0068 |
+| imp0.25 | oracle_hierarchy | 0.695 | 47.11 | 0.0120 |
+| imp0.5 reference | hierarchy | 0.465 | 39.97 | 0.0078 |
+| imp0.5 reference | oracle_hierarchy | 0.685 | 46.04 | 0.0114 |
+| imp1.0 reference | hierarchy | 0.475 | 39.27 | 0.0068 |
+| imp1.0 reference | oracle_hierarchy | 0.630 | 45.69 | 0.0108 |
+
+### Fresh-Window Eval
+
+| checkpoint | mode | seed 10000000 | seed 10100000 | seed 10200000 | mean |
+| --- | --- | ---: | ---: | ---: | ---: |
+| imp0.25 | hierarchy | 0.574 | 0.574 | 0.546 | 0.5647 |
+| imp0.25 | oracle_hierarchy | 0.726 | 0.718 | 0.712 | 0.7187 |
+| imp0.5 reference | hierarchy | 0.454 | 0.460 | 0.476 | 0.4633 |
+| imp0.5 reference | oracle_hierarchy | 0.644 | 0.672 | 0.658 | 0.6580 |
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_basecap5_delta025_imp025_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_basecap5_delta025_imp025_distill_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+
+### Interpretation
+
+`imp0.25` is the strongest learned-high checkpoint so far. It improves fresh
+hierarchy success by about 10 percentage points over `imp0.5` and also improves
+oracle-goal success by about 6 percentage points. This is notable because the
+fixed local paired metrics were not better than `imp0.5`; for this supervised
+branch-bank distillation family, closed-loop validation is necessary because
+the local fixed bank overweights the same hard-tail behavior and misses how the
+policy interacts with learned high-level goals.
+
+### Decision
+
+Promote `imp0.25` as the current best privileged-state learned-high diagnostic
+candidate. Do not continue PPO from this checkpoint yet; the PPO results still
+show the local paired objective can destroy tail behavior. The next useful
+experiment is either a small supervised neighborhood around this weight
+(`0.125`, `0.375`) or a better branch-bank objective that selects labels by
+closed-loop learned-high benefit rather than only local paired improvement.
+
+## 2026-06-25 - Capped Action-Search Improve-Weight Neighborhood
+
+### Hypothesis
+
+After `imp0.25` became the best fresh validated checkpoint, test nearby weights
+to see whether the optimum is below or above `0.25`.
+
+### Setup
+
+Same recipe and data as the `imp0.25` sweep, changing only
+`--improve-npz-weight`:
+
+- `imp0.125`
+- `imp0.375`
+
+`imp0.125` was evaluated only on the 200-episode dev window because it did not
+clearly beat `imp0.25`. `imp0.375` beat `imp0.25` on the dev window, so it also
+received three fresh 500-episode hierarchy and oracle windows.
+
+### Dev Results
+
+| checkpoint | hierarchy success | oracle success | hierarchy return | oracle return |
+| --- | ---: | ---: | ---: | ---: |
+| imp0.125 | 0.540 | 0.700 | 40.32 | 47.53 |
+| imp0.25 | 0.545 | 0.695 | 41.16 | 47.11 |
+| imp0.375 | 0.565 | 0.715 | 41.86 | 47.66 |
+
+### Fresh Results
+
+| checkpoint | mode | seed 10000000 | seed 10100000 | seed 10200000 | mean |
+| --- | --- | ---: | ---: | ---: | ---: |
+| imp0.25 | hierarchy | 0.574 | 0.574 | 0.546 | 0.5647 |
+| imp0.25 | oracle_hierarchy | 0.726 | 0.718 | 0.712 | 0.7187 |
+| imp0.375 | hierarchy | 0.582 | 0.578 | 0.522 | 0.5607 |
+| imp0.375 | oracle_hierarchy | 0.722 | 0.720 | 0.706 | 0.7160 |
+
+### Local Metrics For `imp0.375`
+
+Full fixed local bank:
+
+| checkpoint | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| imp0.375 | 0.1665 | 0.3386 | 0.4788 | 0.8916 | 0.0564 |
+
+Hard fixed local bank:
+
+| checkpoint | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| imp0.375 | 1.0879 | 3.6392 | 0.5681 | 0.0970 | 0.6126 |
+
+### Artifacts
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0125_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0125_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0125_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_basecap5_delta025_imp0375_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_basecap5_delta025_imp0375_distill_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_fresh_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_fresh_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp0375_preserve_npz1_final_layer_fresh_seed10200000_500eps.json`
+
+### Interpretation
+
+The useful weight range is around `0.25` to `0.375`. `imp0.375` looked better
+on the 200-episode dev window but did not beat `imp0.25` after fresh-window
+validation. The two are close enough that the difference is probably within
+seed noise, but `imp0.25` currently has the best fresh mean for both learned
+high-level and oracle-goal hierarchy.
+
+### Decision
+
+Keep `imp0.25` as the current best checkpoint. Treat `imp0.375` as a close
+alternate, not a replacement. The next useful step is no longer a scalar
+improve-weight sweep; the bottleneck is label selection/objective design. The
+best next branch-bank experiment is to collect or weight action-search labels
+by observed closed-loop learned-high benefit, then train the same final-layer
+distillation recipe against that filtered target set.
+
+## 2026-06-25 - Fail-To-Success Action-Search Label Filter
+
+### Hypothesis
+
+The broad capped action-search bank improves closed-loop behavior even though
+the fixed local paired gate is weak. A stricter target set may work better if it
+keeps only branches where action search converts a local failure into a local
+success:
+
+```text
+selected_base_mse >= 0.05
+selected_best_mse <= 0.05
+selected_action_delta_l2 <= 0.25
+selected_oracle_delta_mse <= 0
+```
+
+This tests whether the useful labels are specifically failure-to-success local
+corrections rather than all locally improving branches.
+
+### Implementation
+
+Added a reusable bank-filter command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  filter-privileged-z-action-search-bank \
+  --input data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025.npz \
+  --output data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025_fail2success_eps005.npz \
+  --min-base-mse 0.05 \
+  --max-best-mse 0.05 \
+  --max-action-delta-l2 0.25 \
+  --max-oracle-delta-mse 0.0 \
+  --force
+```
+
+The filter selected 163 of 536 branches, producing 1630 horizon rows.
+
+Filtered branch summaries:
+
+| metric | mean | median | p90 | min | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| selected base MSE | 0.6908 | 0.1091 | 2.8661 | 0.0506 | 4.7212 |
+| selected best MSE | 0.0220 | 0.0190 | 0.0415 | 0.0025 | 0.0499 |
+| selected improvement MSE | 0.6687 | 0.0860 | 2.8374 | 0.0112 | 4.7033 |
+| selected action delta L2 | 0.1567 | 0.1523 | 0.2214 | 0.0648 | 0.2494 |
+| selected oracle delta MSE | -0.8757 | -0.0857 | -0.0065 | -10.3126 | -0.0004 |
+
+### Command
+
+The filtered bank has fewer improve rows, so I used `--improve-npz-weight 1.0`
+to keep the total improve-label influence in the same rough range as the
+successful full-bank `imp0.25` run.
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025_fail2success_eps005.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 1.0 \
+  --run-tag hcl_next_closedloop_search_fail2success_basecap5_delta025_imp1_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Local eval:
+
+| bank | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| full fixed local | 0.5117 | -0.0066 | 0.5042 | 0.8901 | 0.0566 |
+| hard fixed local | 4.1892 | 0.5379 | 0.6189 | 0.1016 | 0.6056 |
+
+Closed-loop dev eval:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| fail-to-success imp1 | hierarchy | 0.545 | 41.66 | 0.0070 |
+| fail-to-success imp1 | oracle_hierarchy | 0.690 | 46.86 | 0.0116 |
+| imp0.25 reference | hierarchy | 0.545 | 41.16 | 0.0068 |
+| imp0.25 reference | oracle_hierarchy | 0.695 | 47.11 | 0.0120 |
+| imp0.375 reference | hierarchy | 0.565 | 41.86 | 0.0071 |
+| imp0.375 reference | oracle_hierarchy | 0.715 | 47.66 | 0.0116 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025_fail2success_eps005.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_fail2success_basecap5_delta025_imp1_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_fail2success_basecap5_delta025_imp1_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_fail2success_basecap5_delta025_imp1_distill_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_fail2success_basecap5_delta025_imp1_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_fail2success_basecap5_delta025_imp1_preserve_npz1_final_layer_200eps.json`
+
+### Interpretation
+
+The strict local failure-to-success subset improves the hard-bank fraction
+improved, but it worsens full-bank mean MSE and does not improve closed-loop dev
+success. This suggests the closed-loop benefit of the broad capped bank is not
+explained only by local threshold conversions. The filtered labels may be too
+narrow and remove stabilizing or shaping examples that help the learned-high
+closed-loop distribution.
+
+### Decision
+
+Reject this filtered bank without fresh-window validation. Keep `imp0.25` as
+current best. The next label-selection experiment should not rely only on local
+MSE threshold conversion; it should either collect branches under the learned
+high-level closed-loop distribution with direct episode-outcome attribution, or
+use a softer weighting over the broad bank rather than a hard success threshold.
+
+## 2026-06-25 - Soft-Weighted Broad Action-Search Bank
+
+### Hypothesis
+
+The fail-to-success hard filter was too narrow: it improved hard local MSE but
+removed many broad-bank labels that may stabilize the learned high-level
+closed-loop distribution. A softer sample-weighting scheme over the full capped
+action-search bank may keep the stabilizing examples while emphasizing states
+where the base branch is hard and action search found a large local
+improvement.
+
+### Implementation
+
+Added `reweight-privileged-z-action-search-bank`, which writes branch-level
+`branch_sample_weights` and horizon row-level `sample_weights` into an NPZ
+without dropping rows. The distillation trainer now reads optional
+`sample_weights` from `--improve-npz` and multiplies them by the command-level
+`--improve-npz-weight`.
+
+The first weighting mode tested was:
+
+```text
+base_x_improvement = max(selected_base_mse / success_epsilon, 1)
+                     * max(selected_improvement_mse / improvement_scale, 0)
+```
+
+with clipping to `[0.25, 4.0]` before mean normalization.
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  reweight-privileged-z-action-search-bank \
+  --input data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025.npz \
+  --output data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025_soft_base_x_improvement_w025_4_norm.npz \
+  --mode base_x_improvement \
+  --success-epsilon 0.05 \
+  --improvement-scale 0.05 \
+  --min-weight 0.25 \
+  --max-weight 4.0 \
+  --force
+```
+
+Weighted bank summary:
+
+| field | value |
+| --- | ---: |
+| branches | 536 |
+| horizon rows | 5360 |
+| branch weight mean | 1.0000 |
+| branch weight median | 0.7570 |
+| branch weight p90 | 1.9767 |
+| branch weight min | 0.1235 |
+| branch weight max | 1.9767 |
+
+The min is below `0.25` because normalization is applied after clipping.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025_soft_base_x_improvement_w025_4_norm.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.25 \
+  --run-tag hcl_next_closedloop_search_soft_base_x_improvement_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Local eval:
+
+| bank | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| full fixed local | 0.1471 | 0.3579 | 0.4717 | 0.8916 | 0.0563 |
+| hard fixed local | 0.8672 | 3.8599 | 0.5658 | 0.0901 | 0.5875 |
+
+Closed-loop dev eval:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| soft base x improvement imp0.25 | hierarchy | 0.520 | 41.49 | 0.0076 |
+| soft base x improvement imp0.25 | oracle_hierarchy | 0.700 | 46.71 | 0.0120 |
+| imp0.25 reference | hierarchy | 0.545 | 41.16 | 0.0068 |
+| imp0.25 reference | oracle_hierarchy | 0.695 | 47.11 | 0.0120 |
+| imp0.375 reference | hierarchy | 0.565 | 41.86 | 0.0071 |
+| imp0.375 reference | oracle_hierarchy | 0.715 | 47.66 | 0.0116 |
+
+### Artifacts
+
+- `data/manifests/privileged_z_closed_loop_action_search_hierarchy_n384_seed9900000_10100000_10200000_c16_std005_min001_oraclegate0_basecap5_delta025_soft_base_x_improvement_w025_4_norm.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_soft_base_x_improvement_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_soft_base_x_improvement_basecap5_delta025_imp025_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_soft_base_x_improvement_basecap5_delta025_imp025_distill_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_soft_base_x_improvement_basecap5_delta025_imp025_preserve_npz1_final_layer_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_soft_base_x_improvement_basecap5_delta025_imp025_preserve_npz1_final_layer_200eps.json`
+
+### Interpretation
+
+The soft-weighted broad bank greatly reduces local catastrophic outliers,
+especially on the hard subset, but it still lowers plain closed-loop hierarchy
+success to `0.520`. The oracle score of `0.700` is not bad, but the learned
+high-level path is worse than both the current best `imp0.25` and the close
+`imp0.375` alternate.
+
+This suggests the weighted labels improve local recovery in a way that does not
+align with the high-level policy's closed-loop state distribution. The next
+useful step is probably not a more aggressive local weighting rule. More
+promising options are direct episode-outcome attribution for action-search
+branches, or a separate selector/gate trained to decide when to apply the
+distilled residual.
+
+### Decision
+
+Reject this soft-weighted candidate without fresh-window validation. Keep
+`imp0.25` as the current best checkpoint.
+
+## 2026-06-25 - Oracle Segment Gate Diagnostic
+
+### Hypothesis
+
+The action-search/distilled residual may be useful only on a subset of
+high-level segments. If the main failure is over-applying the residual, then an
+oracle segment gate should improve closed-loop success by applying the tuned
+policy only when it locally beats the base policy for the held goal.
+
+### Implementation
+
+Added an explicit diagnostic mode to `eval-privileged-z`:
+
+```text
+--tuned-gate-mode local_oracle
+```
+
+At each high-level replan, the evaluator clones the current simulator state,
+rolls out the base low-level policy and the tuned low-level policy for the next
+held-goal horizon, and compares privileged normalized terminal MSE to the held
+goal. The tuned policy is used for the real segment only when:
+
+```text
+tuned_terminal_mse <= base_terminal_mse + tuned_gate_max_degradation_mse
+```
+
+The default `tuned_gate_max_degradation_mse` is `0.0`, so this first diagnostic
+uses a strict no-local-regression gate. This is an oracle diagnostic, not a
+deployable selector.
+
+### Commands
+
+Current best learned-high gate:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --tuned-gate-mode local_oracle \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_imp025_local_oracle_gate_200eps.json \
+  --force
+```
+
+Soft-weight learned-high gate:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_soft_base_x_improvement_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --tuned-gate-mode local_oracle \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_soft_base_x_improvement_local_oracle_gate_200eps.json \
+  --force
+```
+
+Current best oracle-goal gate:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --mode oracle_hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --tuned-gate-mode local_oracle \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_oracle_imp025_local_oracle_gate_200eps.json \
+  --force
+```
+
+### Results
+
+Closed-loop dev eval:
+
+| checkpoint | mode | gate | success | return | gate tuned fraction | gate mean paired improvement |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| imp0.25 reference | hierarchy | none | 0.545 | 41.16 | n/a | n/a |
+| imp0.25 | hierarchy | local oracle | 0.495 | 39.73 | 0.3825 | -0.3358 |
+| soft base x improvement reference | hierarchy | none | 0.520 | 41.49 | n/a | n/a |
+| soft base x improvement | hierarchy | local oracle | 0.505 | 40.27 | 0.3845 | 0.4401 |
+| imp0.25 reference | oracle_hierarchy | none | 0.695 | 47.11 | n/a | n/a |
+| imp0.25 | oracle_hierarchy | local oracle | 0.705 | 47.15 | 0.4985 | 0.2409 |
+
+### Artifacts
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_imp025_local_oracle_gate_smoke_20eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_imp025_local_oracle_gate_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_soft_base_x_improvement_local_oracle_gate_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_imp025_local_oracle_gate_200eps.json`
+
+### Interpretation
+
+The strict local oracle gate does not recover learned-high performance. It
+hurts the current best candidate from `0.545` to `0.495`, and it also fails to
+recover the weaker soft-weight candidate. This rules out a simple selector
+whose target is only "does the tuned low level reduce privileged terminal MSE
+to the held high-level goal?"
+
+The oracle-goal version is different: the same gate slightly improves
+oracle-goal success from `0.695` to `0.705`. That suggests the residual can be
+locally useful when the high-level goal is well aligned, but local terminal MSE
+to the learned high-level goal is not a sufficient selector for task success.
+
+### Decision
+
+Do not spend effort on a learned selector trained only from local held-goal MSE
+labels. The next useful branch/outcome experiment should attach labels to
+closed-loop task or segment outcome under the learned-high distribution, or it
+should improve high-level goal validity/off-manifold handling before more
+low-level residual training.
+
+## 2026-06-25 - High-Level Goal Validity Diagnostic
+
+### Hypothesis
+
+The segment-gate diagnostic suggested that local privileged MSE to learned
+high-level goals is not enough to predict task success. The next question is
+whether learned high-level goals are invalid/off-manifold, or whether they are
+valid-looking but semantically different from the oracle teacher continuation.
+
+### Implementation
+
+Added `eval-privileged-z-goal-validity`, a high-level goal diagnostic for the
+privileged-state hierarchy. At each learned-high replan it:
+
+- predicts the learned high-level goal from the current state and previous action;
+- rolls a privileged PPO teacher from the same simulator state for `k=10` steps
+  to produce an oracle continuation goal;
+- compares learned goals to the oracle-goal manifold via nearest-neighbor
+  distance over collected oracle goals;
+- compares predicted-goal vs oracle-goal first low-level actions;
+- rolls the frozen low-level policy to the predicted goal and to the oracle goal
+  from the same state, then measures terminal MSE to both goals.
+
+This implements the most immediately available parts of Experiment H without a
+learned `D_phi` or validity discriminator.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-goal-validity \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_goal_validity_base_hierarchy_200eps.json \
+  --force
+```
+
+### Results
+
+Closed-loop learned-high success in the diagnostic run was `0.545`.
+
+Goal validity/manifold metrics:
+
+| metric | mean | median | p90 | max |
+| --- | ---: | ---: | ---: | ---: |
+| predicted to matched oracle goal MSE | 0.7281 | 0.0630 | 1.9172 | 263.2875 |
+| predicted to matched oracle goal L2 | 2.6978 | 1.3973 | 7.7093 | 90.3433 |
+| current to predicted goal MSE | 1.2070 | 0.1713 | 1.8690 | 108.4413 |
+| current to oracle goal MSE | 1.8514 | 0.4889 | 2.5807 | 265.2595 |
+| predicted nearest oracle-goal MSE | 0.0808 | 0.0215 | 0.2002 | 9.1786 |
+| oracle leave-one-out nearest MSE | 0.1159 | 0.0223 | 0.1666 | 28.5462 |
+| random nearest oracle-goal MSE | 0.9464 | 0.9243 | 1.2570 | 1.9662 |
+
+Low-level behavior metrics:
+
+| metric | mean | median | p90 | max |
+| --- | ---: | ---: | ---: | ---: |
+| predicted vs oracle first action L2 | 0.1857 | 0.0447 | 0.7090 | 2.0539 |
+| predicted-goal policy terminal MSE to predicted | 0.9994 | 0.0411 | 1.9409 | 109.4581 |
+| predicted-goal policy terminal MSE to oracle | 1.0506 | 0.0264 | 0.7776 | 355.7493 |
+| oracle-goal policy terminal MSE to oracle | 0.5696 | 0.0129 | 0.5074 | 264.5513 |
+| oracle-goal policy terminal MSE to predicted | 0.5826 | 0.0534 | 1.8774 | 65.7567 |
+
+### Delta-Scale Mitigation Probe
+
+Because `current -> predicted` goals were much closer than `current -> oracle`
+goals, I tested the simplest H2-style mitigation at eval time:
+
+```text
+g_scaled = z_current + scale * (g_pred - z_current)
+```
+
+with no retraining.
+
+| high-goal delta scale | learned-high success | return |
+| ---: | ---: | ---: |
+| 1.00 reference | 0.545 | 41.58 |
+| 0.75 | 0.185 | 29.10 |
+| 1.25 | 0.275 | 30.81 |
+| 1.50 | 0.135 | 21.14 |
+
+Artifacts:
+
+- `results/hcl_next_phase1/privileged_z_goal_validity_base_hierarchy_smoke_20eps.json`
+- `results/hcl_next_phase1/privileged_z_goal_validity_base_hierarchy_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_high_delta_scale075_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_high_delta_scale125_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_high_delta_scale150_200eps.json`
+
+### Interpretation
+
+The learned high-level goals do not look like arbitrary off-manifold vectors:
+their nearest-neighbor distance to collected oracle goals is close to the
+oracle leave-one-out nearest-neighbor baseline and far better than random
+normalized goals. However, the matched oracle continuation error is large, and
+the learned goals are usually closer to the current state than oracle teacher
+continuations.
+
+Naively scaling the high-level delta is not a fix. Both extrapolating and
+shrinking the learned delta collapse success, which means the learned high-level
+output is calibrated to the low-level's training distribution in a more
+structured way than a scalar distance-to-current.
+
+### Decision
+
+Do not pursue scalar high-goal delta scaling. The next high-level mitigation
+should be a real prototype/nearest-neighbor goal selection experiment or
+episode-outcome-attributed branch data under the learned-high distribution. The
+diagnostic also argues against treating the issue as generic off-manifold
+prediction; the problem is more likely semantic goal selection/alignment.
+
+## 2026-06-25 - Prototype High-Level Goal Projection
+
+### Hypothesis
+
+Experiment H proposes a prototype/nearest-neighbor high-level variant. If
+learned high-level predictions are slightly off the real future-state manifold,
+then projecting them to a nearby real teacher-state prototype may improve
+closed-loop success while keeping the high-level semantics mostly intact.
+
+### Implementation
+
+Added an eval-only prototype projection to `eval-privileged-z`:
+
+```text
+--high-goal-projection nearest_oracle_bank
+```
+
+Before the evaluation starts, the command collects a separate oracle-state bank
+by running the privileged PPO teacher from `--high-goal-bank-seed-start`.
+During learned-high replans, the evaluator replaces:
+
+```text
+g_pred -> nearest_neighbor(g_pred, oracle_state_bank)
+```
+
+in normalized privileged-state space. This is a diagnostic H4 prototype
+projection, not a trained scorer over prototypes.
+
+### Commands
+
+Base hierarchy:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --high-goal-projection nearest_oracle_bank \
+  --high-goal-bank-episodes 200 \
+  --high-goal-bank-seed-start 9800000 \
+  --high-goal-bank-num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_nearest_oracle_bank_200eps.json \
+  --force
+```
+
+Current best residual:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_closedloop_search_improve_c16_oraclegate0_multi384_basecap5_delta025_imp025_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --high-goal-projection nearest_oracle_bank \
+  --high-goal-bank-episodes 200 \
+  --high-goal-bank-seed-start 9800000 \
+  --high-goal-bank-num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_imp025_nearest_oracle_bank_200eps.json \
+  --force
+```
+
+### Results
+
+| checkpoint | high-goal projection | success | return | prototype bank size | predicted-to-prototype MSE median | predicted-to-prototype MSE p90 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| base reference | none | 0.545 | 41.58 | n/a | n/a | n/a |
+| base | nearest oracle bank | 0.300 | 32.70 | 2000 | 0.0388 | 0.3597 |
+| imp0.25 reference | none | 0.545 | 41.16 | n/a | n/a | n/a |
+| imp0.25 | nearest oracle bank | 0.350 | 35.17 | 2000 | 0.0404 | 0.3685 |
+
+Artifacts:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_nearest_oracle_bank_smoke_20eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_base_nearest_oracle_bank_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_imp025_nearest_oracle_bank_200eps.json`
+
+### Interpretation
+
+Nearest-neighbor prototype projection is strongly harmful, even though the
+chosen prototypes are close to the predicted high-level goals by normalized MSE.
+This reinforces the previous delta-scaling result: the low-level and high-level
+appear calibrated to the continuous learned goal output, not merely to a nearby
+valid future-state manifold point.
+
+The failure also suggests that the "validity" problem is not solved by making
+goals more obviously real. A nearby real teacher-state prototype can still
+change the intended local control semantics enough to break the learned
+hierarchy.
+
+### Decision
+
+Reject nearest-oracle-bank projection as an eval-time mitigation. The next
+useful H4 variant would need a trained prototype scorer or high-level trained
+directly on prototype IDs. For the current RL proof-of-concept, the more direct
+next step is branch/outcome attribution under the learned-high distribution,
+because local/prototype geometry keeps failing to predict task-level success.
+
+## 2026-06-25 - Learned-High Branch Outcome Attribution
+
+### Hypothesis
+
+Previous experiments showed that local privileged terminal MSE is a poor
+selector for task-level success. The next diagnostic directly checks the
+missing label: when action search finds a locally better segment under the
+learned-high goal, does executing that segment and then continuing the same
+learned hierarchy improve final task outcome?
+
+### Implementation
+
+Added `eval-privileged-z-branch-outcomes`. For each sampled learned-high
+replan batch it:
+
+- predicts the learned high-level goal;
+- performs the same random-noise local action search used by the action-search
+  bank collector;
+- rolls two counterfactual episodes from the same simulator state:
+  - base segment actions, then continue the learned hierarchy;
+  - searched best segment actions, then continue the learned hierarchy;
+- records final success/return deltas and splits them by the old local-MSE
+  selection rule.
+
+This is a diagnostic command. It does not write a training bank yet.
+
+### Commands
+
+Smoke:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 20 \
+  --seed-start 9900000 \
+  --num-envs 20 \
+  --random-candidates 8 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-action-delta-l2 0.25 \
+  --max-branch-batches 2 \
+  --max-rollout-steps 120 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_attribution_smoke_20eps_b2_c8.json \
+  --force
+```
+
+Dev windows:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 100 \
+  --seed-start 9900000 \
+  --num-envs 100 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-action-delta-l2 0.25 \
+  --max-branch-batches 4 \
+  --max-rollout-steps 120 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_attribution_100eps_b4_c16.json \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 100 \
+  --seed-start 9910000 \
+  --num-envs 100 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-action-delta-l2 0.25 \
+  --max-branch-batches 4 \
+  --max-rollout-steps 120 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_attribution_seed9910000_100eps_b4_c16.json \
+  --force
+```
+
+### Results
+
+Dev window `seed_start=9900000`:
+
+| branch set | count | base success | candidate success | success delta | base return | candidate return | mean return delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all searched | 400 | 0.5225 | 0.5400 | +0.0175 | 44.55 | 45.60 | +1.05 |
+| locally selected | 216 | 0.5093 | 0.5046 | -0.0046 | 42.42 | 42.00 | -0.41 |
+| locally rejected | 184 | 0.5380 | 0.5815 | +0.0435 | 47.05 | 49.82 | +2.77 |
+
+Dev window `seed_start=9910000`:
+
+| branch set | count | base success | candidate success | success delta | base return | candidate return | mean return delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all searched | 400 | 0.5375 | 0.5450 | +0.0075 | 44.45 | 45.70 | +1.25 |
+| locally selected | 223 | 0.5202 | 0.5202 | +0.0000 | 40.26 | 41.91 | +1.65 |
+| locally rejected | 177 | 0.5593 | 0.5763 | +0.0169 | 49.72 | 50.47 | +0.75 |
+
+The smoke run was noisier but showed the same warning sign: the locally
+selected subset had negative success delta.
+
+Artifacts:
+
+- `results/hcl_next_phase1/privileged_z_branch_outcome_attribution_smoke_20eps_b2_c8.json`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_attribution_100eps_b4_c16.json`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_attribution_seed9910000_100eps_b4_c16.json`
+
+### Interpretation
+
+The searched segments can improve final task outcome on average, but the
+existing local-MSE selection rule does not identify the useful subset. In both
+dev windows, the locally rejected set has the larger success improvement. The
+task-outcome signal is sparse: most branches leave success unchanged, and the
+mean gain comes from a small imbalance between helped and hurt episodes.
+
+This explains why prior local-MSE filters and weights were unreliable. They
+optimize a real local reachability metric, but that metric is not the right
+label for deciding which branch should train or override the learned hierarchy.
+
+### Decision
+
+Do not train another bank using local MSE thresholds as the primary label. The
+next useful implementation is an outcome-attributed branch bank that stores the
+searched segment actions plus `success_delta`/`return_delta`, then trains or
+filters from those outcome labels instead of local terminal MSE.
+
+## 2026-06-25 - Outcome-Attributed Success-Delta Bank Distillation
+
+### Hypothesis
+
+The branch-outcome attribution diagnostic showed that final task outcome labels
+are better aligned than local terminal MSE labels. A first strict training bank
+should keep only branches where the searched segment changes the counterfactual
+continuation from failure to success:
+
+```text
+success_delta >= 0.5
+```
+
+This tests whether a small but clean set of task-outcome-positive segment
+actions transfers through the same final-layer distillation recipe.
+
+### Implementation
+
+Extended `eval-privileged-z-branch-outcomes` with optional bank writing:
+
+```text
+--bank-output ...
+--bank-min-success-delta ...
+--bank-min-return-delta ...
+```
+
+The bank is compatible with `train-privileged-z-local-replay-distill`:
+
+- `conditions`, `actions`
+- local action-search metrics
+- `selected_base_success`, `selected_candidate_success`, `selected_success_delta`
+- `selected_base_return`, `selected_candidate_return`, `selected_return_delta`
+- row `sample_weights` from positive return delta
+
+### Commands
+
+Bank collection:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 100 \
+  --seed-start 9900000 \
+  --num-envs 100 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-action-delta-l2 0.25 \
+  --max-branch-batches 4 \
+  --max-rollout-steps 120 \
+  --bank-output data/manifests/privileged_z_branch_outcome_success_delta_pos_seed9900000_100eps_b4_c16.npz \
+  --bank-min-success-delta 0.5 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_attribution_100eps_b4_c16_with_success_bank.json \
+  --force
+```
+
+The bank selected 32 branches and 320 horizon rows.
+
+Training:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_success_delta_pos_seed9900000_100eps_b4_c16.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.25 \
+  --run-tag hcl_next_branch_outcome_success_delta_pos_imp025_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 32 |
+| horizon rows | 320 |
+| success delta mean/median | 1.0 / 1.0 |
+| return delta mean/median | 30.43 / 31.77 |
+| return delta min/max | 0.72 / 65.19 |
+
+Local eval:
+
+| bank | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| full fixed local | 0.3750 | 0.1301 | 0.5195 | 0.8936 | 0.0545 |
+| hard fixed local | 3.2795 | 1.4475 | 0.5797 | 0.1224 | 0.5619 |
+
+Closed-loop dev eval:
+
+| checkpoint | mode | success | return | mean residual norm |
+| --- | --- | ---: | ---: | ---: |
+| branch outcome success-delta imp0.25 | hierarchy | 0.495 | 40.95 | 0.0070 |
+| branch outcome success-delta imp0.25 | oracle_hierarchy | 0.675 | 46.44 | 0.0115 |
+| imp0.25 reference | hierarchy | 0.545 | 41.16 | 0.0068 |
+| imp0.25 reference | oracle_hierarchy | 0.695 | 47.11 | 0.0120 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_success_delta_pos_seed9900000_100eps_b4_c16.npz`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_attribution_100eps_b4_c16_with_success_bank.json`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_success_delta_pos_imp025_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_branch_outcome_success_delta_pos_imp025_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_branch_outcome_success_delta_pos_imp025_distill_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_success_delta_pos_imp025_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_success_delta_pos_imp025_200eps.json`
+
+### Interpretation
+
+The outcome-positive bank improves hard local reset metrics, but it hurts
+closed-loop learned-high and oracle-goal success. This first bank is very small
+and only contains success-flip branches from one seed window, so it likely
+overfits rare rescue actions or lacks enough surrounding stabilizing examples.
+
+The result does not invalidate outcome attribution; it invalidates this narrow
+success-delta-only distillation recipe. The counterfactual diagnostic remains
+useful because it showed all searched branches had a small positive average
+task-outcome delta, while hard local filters did not align with that outcome.
+
+### Decision
+
+Reject this 32-branch success-delta bank as a replacement for `imp0.25`.
+Next outcome-bank attempt should either:
+
+- collect a broader multi-window bank and weight by `return_delta` rather than
+  filtering only success flips; or
+- use outcome labels to train a gate/selector over candidate branches instead
+  of distilling the rare rescue actions directly into the low level.
+
+## 2026-06-25 - Return-Positive Outcome Bank Distillation
+
+### Hypothesis
+
+The success-flip bank was too sparse. The branch outcome diagnostic showed that
+many candidate branches improve return without changing binary success, so a
+broader return-positive bank may provide useful low-level updates while keeping
+the closed-loop preserve bank stable.
+
+### Commands
+
+Bank collection:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 100 \
+  --seed-start 9900000 \
+  --num-envs 100 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-action-delta-l2 0.25 \
+  --max-branch-batches 4 \
+  --max-rollout-steps 120 \
+  --bank-output data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_100eps_b4_c16.npz \
+  --bank-min-return-delta 5.0 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_attribution_100eps_b4_c16_with_return_ge5_bank.json \
+  --force
+```
+
+Training:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_100eps_b4_c16.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 79 |
+| horizon rows | 790 |
+| success delta mean/median | 0.342 / 0.000 |
+| return delta mean/median | 23.21 / 18.63 |
+| return delta min/max | 5.06 / 65.19 |
+
+Local eval:
+
+| bank | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| full fixed local | 0.3619 | 0.1431 | 0.5090 | 0.8931 | 0.0543 |
+| hard fixed local | 3.0671 | 1.6599 | 0.6051 | 0.1247 | 0.5485 |
+
+Closed-loop matched 3x500 eval:
+
+| checkpoint | mode | seeds | success mean | return mean |
+| --- | --- | --- | ---: | ---: |
+| return-ge5 imp0.1 | hierarchy | 10000000,10100000,10200000 | 0.5713 | 43.13 |
+| return-ge5 imp0.1 | oracle_hierarchy | 10000000,10100000,10200000 | 0.7300 | 48.71 |
+| previous imp0.25 best | hierarchy | 10000000,10100000,10200000 | 0.5647 | 42.40 |
+| previous imp0.25 best | oracle_hierarchy | 10000000,10100000,10200000 | 0.7187 | 47.59 |
+
+Per-window success:
+
+| mode | seed 10000000 | seed 10100000 | seed 10200000 |
+| --- | ---: | ---: | ---: |
+| return-ge5 hierarchy | 0.562 | 0.592 | 0.560 |
+| previous imp0.25 hierarchy | 0.574 | 0.574 | 0.546 |
+| return-ge5 oracle_hierarchy | 0.738 | 0.738 | 0.714 |
+| previous imp0.25 oracle_hierarchy | 0.726 | 0.718 | 0.712 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_100eps_b4_c16.npz`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_attribution_100eps_b4_c16_with_return_ge5_bank.json`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_branch_outcome_return_ge5_imp01_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_branch_outcome_return_ge5_imp01_distill_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_imp01_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_imp01_seed10200000_500eps.json`
+
+### Interpretation
+
+This is the first outcome-bank variant that improves the matched 3x500
+closed-loop aggregate over the previous `imp0.25` best. The margin is small for
+learned-high hierarchy success, but oracle-goal success and mean return improve
+more clearly, which suggests the low-level update is useful when the goal is
+good and only weakly bottlenecked by the current high-level model.
+
+The result supports return-attributed branch banks over strict success-flip
+banks. It does not yet prove a robust recipe: the bank came from one 100-episode
+window, and the hierarchy gain is modest.
+
+### Decision
+
+Promote
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+as the current best low-level tuned checkpoint.
+
+Next experiment should scale this exact recipe by collecting return-positive
+outcome banks from multiple seed windows, then retrain with the same conservative
+`--improve-npz-weight 0.1` before evaluating on the same matched 3x500 seeds.
+
+## 2026-06-25 - Multi-Window Return-Positive Outcome Bank
+
+### Hypothesis
+
+The single-window return-positive bank improved the matched 3x500 aggregate.
+Collecting the same bank from several non-final seed windows may reduce
+overfitting and make the low-level improvement more robust.
+
+### Setup
+
+Collected two additional return-positive banks with the same branch search
+settings:
+
+- `seed_start=9910000`: 71 branches, 710 rows, return delta mean 27.82,
+  success delta mean 0.310
+- `seed_start=9920000`: 65 branches, 650 rows, return delta mean 24.84,
+  success delta mean 0.354
+
+Merged them with the previous `seed_start=9900000` bank:
+
+| merged bank metric | value |
+| --- | ---: |
+| branches | 215 |
+| horizon rows | 2150 |
+| return delta mean | 25.23 |
+| success delta mean | 0.335 |
+
+Merged bank artifact:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_300eps_b4_c16.npz`
+
+Training used the same recipe and weight as the single-window run:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_300eps_b4_c16.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_multi3_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Local eval:
+
+| bank | tuned terminal MSE mean | mean paired improvement | fraction improved | tuned epsilon success | tuned terminal MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| full fixed local | 0.1323 | 0.3728 | 0.5103 | 0.8938 | 0.0537 |
+| hard fixed local | 0.9386 | 3.7885 | 0.6374 | 0.1201 | 0.6628 |
+
+Closed-loop matched 3x500 eval:
+
+| checkpoint | mode | success mean | return mean |
+| --- | --- | ---: | ---: |
+| return-ge5 multi3 imp0.1 | hierarchy | 0.5700 | 43.06 |
+| return-ge5 multi3 imp0.1 | oracle_hierarchy | 0.7267 | 47.96 |
+| return-ge5 single-window imp0.1 | hierarchy | 0.5713 | 43.13 |
+| return-ge5 single-window imp0.1 | oracle_hierarchy | 0.7300 | 48.71 |
+| previous imp0.25 best | hierarchy | 0.5647 | 42.40 |
+| previous imp0.25 best | oracle_hierarchy | 0.7187 | 47.59 |
+
+Per-window success:
+
+| mode | seed 10000000 | seed 10100000 | seed 10200000 |
+| --- | ---: | ---: | ---: |
+| return-ge5 multi3 hierarchy | 0.568 | 0.582 | 0.560 |
+| return-ge5 single hierarchy | 0.562 | 0.592 | 0.560 |
+| previous imp0.25 hierarchy | 0.574 | 0.574 | 0.546 |
+| return-ge5 multi3 oracle_hierarchy | 0.744 | 0.732 | 0.704 |
+| return-ge5 single oracle_hierarchy | 0.738 | 0.738 | 0.714 |
+| previous imp0.25 oracle_hierarchy | 0.726 | 0.718 | 0.712 |
+
+Artifacts:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_local_paired_branch_outcome_return_ge5_multi3_imp01_distill_k10_4096.json`
+- `results/hcl_next_phase1/privileged_z_local_paired_branch_outcome_return_ge5_multi3_imp01_distill_hard_k10.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp01_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_imp01_seed10200000_500eps.json`
+
+### Interpretation
+
+The multi-window bank still beats the previous `imp0.25` reference, so the
+return-positive outcome-bank idea is reproducible. It does not beat the
+single-window return-positive candidate, even though local hard-bank MSE
+improves much more. This is another example where local reset MSE is only a weak
+proxy for closed-loop task success.
+
+The likely issue is not bank diversity but weighting/selection. The added
+branches may include more return-positive local interventions that are not
+beneficial under learned high-level goals, or the return-weighted rows may shift
+the low level too much on some oracle-goal windows.
+
+### Decision
+
+Keep the single-window return-positive checkpoint as the current best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+Do not promote the multi-window checkpoint. The next useful direction is not
+just "more branches"; it is a better branch selector or a weight sweep on the
+merged bank, especially below `--improve-npz-weight 0.1`.
+
+## 2026-06-25 - Multi-Window Return Bank Improve-Weight Sweep Below 0.1
+
+### Hypothesis
+
+The merged return-positive bank may contain useful but noisier branches. The
+`0.1` improve weight may over-apply these branches, so lower weights might keep
+the broader coverage while preserving the base policy better.
+
+### Setup
+
+Both variants used the same merged bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_300eps_b4_c16.npz`
+
+Only `--improve-npz-weight` changed:
+
+- `0.05`: `hcl_next_branch_outcome_return_ge5_multi3_imp005_preserve_npz1_final_layer_lr1e4_e200`
+- `0.075`: `hcl_next_branch_outcome_return_ge5_multi3_imp0075_preserve_npz1_final_layer_lr1e4_e200`
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return |
+| --- | --- | ---: | ---: |
+| multi3 imp0.05 | hierarchy | 0.520 | 40.92 |
+| multi3 imp0.05 | oracle_hierarchy | 0.685 | 44.72 |
+| multi3 imp0.075 | hierarchy | 0.555 | 40.86 |
+| multi3 imp0.075 | oracle_hierarchy | 0.680 | 45.07 |
+| single-window imp0.1 current best | hierarchy | 0.540 | 41.29 |
+| single-window imp0.1 current best | oracle_hierarchy | 0.702 | 46.89 |
+
+The `0.05` variant failed the quick dev gate, so it was not promoted to matched
+3x500 validation.
+
+The `0.075` variant had a better learned-high dev result but weak oracle-goal
+dev result, so it received hierarchy-only matched 3x500 validation:
+
+| checkpoint | seed 10000000 | seed 10100000 | seed 10200000 | mean | return mean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| multi3 imp0.075 hierarchy | 0.568 | 0.574 | 0.544 | 0.5620 | 42.77 |
+| multi3 imp0.1 hierarchy | 0.568 | 0.582 | 0.560 | 0.5700 | 43.06 |
+| single-window imp0.1 hierarchy | 0.562 | 0.592 | 0.560 | 0.5713 | 43.13 |
+
+Artifacts:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_imp005_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_imp0075_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp005_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_imp005_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp0075_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_imp0075_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp0075_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp0075_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_imp0075_seed10200000_500eps.json`
+
+### Interpretation
+
+Lowering the merged-bank improve weight does not recover the single-window
+result. The useful signal is not a simple scalar balance issue. More likely, the
+merged bank includes branches whose positive return label does not transfer to
+the learned-high closed-loop distribution, so the next step should change
+selection/conditioning instead of continuing scalar sweeps.
+
+### Decision
+
+Reject merged-bank improve weights `0.05` and `0.075`. Keep the single-window
+return-positive `imp0.1` checkpoint as current best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+Next useful direction: train or implement an outcome-aware selector/gate, or add
+bank metadata that conditions selection on the learned-high goal distribution,
+rather than applying all return-positive branches as uniform distillation data.
+
+## 2026-06-25 - Top-Return Branch Selection Diagnostic
+
+### Hypothesis
+
+The merged bank may fail because it includes too many weakly positive branches.
+Selecting only the strongest return-positive branches, while keeping the same
+branch count as the successful single-window bank, may recover or improve the
+closed-loop result.
+
+### Setup
+
+Created a filtered NPZ from the merged return-positive bank by selecting the top
+79 branches by `selected_return_delta`, preserving full 10-step branch blocks.
+
+Filtered bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_top79_return.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 79 |
+| horizon rows | 790 |
+| return delta mean | 43.56 |
+| return delta min | 31.71 |
+| success delta mean | 0.570 |
+| source seed counts | 9900000: 22, 9910000: 31, 9920000: 26 |
+
+Training used `--improve-npz-weight 0.1`, matching the current best recipe:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_top79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return |
+| --- | --- | ---: | ---: |
+| multi3 top79 imp0.1 | hierarchy | 0.555 | 42.35 |
+| multi3 top79 imp0.1 | oracle_hierarchy | 0.675 | 46.47 |
+| single-window imp0.1 current best | hierarchy | 0.540 | 41.29 |
+| single-window imp0.1 current best | oracle_hierarchy | 0.702 | 46.89 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_top79_return.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_top79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_top79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_top79_imp01_200eps.json`
+
+### Interpretation
+
+Top-return filtering improves the learned-high dev window compared with the
+current best on that same seed window, but it hurts oracle-goal success. This is
+similar to the `multi3 imp0.075` pattern, which failed matched 3x500 hierarchy
+validation. Therefore branch return magnitude alone is not a sufficient
+selector.
+
+The useful signal appears to depend on compatibility with the learned-high
+closed-loop goal distribution, not only task return improvement under the branch
+rollout.
+
+### Decision
+
+Reject top-return filtering as a replacement. Keep the single-window
+return-positive `imp0.1` checkpoint as current best.
+
+Next selector should include state/goal-distribution context or learn an
+explicit gate from branch outcome features rather than selecting only by return
+delta.
+
+## 2026-06-25 - Preserve-Goal Nearest Branch Selection Diagnostic
+
+### Hypothesis
+
+The failure of top-return filtering suggests return magnitude alone is not the
+right selector. A branch may be useful only if its held goal lies near the
+learned-high closed-loop goal distribution. Use the closed-loop preserve bank as
+a proxy for that distribution and select return-positive branches whose held
+goals are nearest to preserve-bank held goals.
+
+### Setup
+
+Reference distribution:
+
+- `data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz`
+
+Source bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_300eps_b4_c16.npz`
+
+Selection:
+
+- take the first row of each 10-step branch block;
+- extract the normalized held-goal slice from the low-level condition;
+- standardize by the preserve-bank held-goal distribution;
+- select the 79 branches with smallest nearest-neighbor MSE to preserve-bank
+  held goals;
+- preserve full 10-step branch blocks.
+
+Filtered bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_goalnn79_preserve.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 79 |
+| horizon rows | 790 |
+| preserve-goal NN MSE mean/max | 0.0194 / 0.0369 |
+| return delta mean | 27.00 |
+| success delta mean | 0.481 |
+| action delta mean | 0.195 |
+| source seed counts | 9900000: 40, 9910000: 28, 9920000: 11 |
+
+Training used the current-best distillation recipe:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_goalnn79_preserve.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_multi3_goalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return |
+| --- | --- | ---: | ---: |
+| goal-NN79 imp0.1 | hierarchy | 0.555 | 41.36 |
+| goal-NN79 imp0.1 | oracle_hierarchy | 0.725 | 47.16 |
+| single-window imp0.1 current best | hierarchy | 0.540 | 41.29 |
+| single-window imp0.1 current best | oracle_hierarchy | 0.702 | 46.89 |
+
+Matched 3x500 eval:
+
+| checkpoint | mode | seed 10000000 | seed 10100000 | seed 10200000 | success mean | return mean |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| goal-NN79 imp0.1 | hierarchy | 0.580 | 0.594 | 0.536 | 0.5700 | 43.02 |
+| goal-NN79 imp0.1 | oracle_hierarchy | 0.742 | 0.750 | 0.706 | 0.7327 | 48.55 |
+| single-window imp0.1 current best | hierarchy | 0.562 | 0.592 | 0.560 | 0.5713 | 43.13 |
+| single-window imp0.1 current best | oracle_hierarchy | 0.738 | 0.738 | 0.714 | 0.7300 | 48.71 |
+| full multi3 imp0.1 | hierarchy | 0.568 | 0.582 | 0.560 | 0.5700 | 43.06 |
+| full multi3 imp0.1 | oracle_hierarchy | 0.744 | 0.732 | 0.704 | 0.7267 | 47.96 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_goalnn79_preserve.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_goalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_goalnn79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_goalnn79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_goalnn79_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_goalnn79_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_goalnn79_imp01_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_goalnn79_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_goalnn79_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_goalnn79_imp01_seed10200000_500eps.json`
+
+### Interpretation
+
+Preserve-goal nearest selection is the first selector that improves oracle-goal
+success beyond the single-window current best, but it does not improve learned
+high-level hierarchy success. This is a useful split: the selected low-level
+update is beneficial when the high-level goal is good, while learned-high
+rollouts remain bottlenecked by the high-level goal distribution or by
+state-dependent cases not captured by goal-only nearest-neighbor selection.
+
+The result supports adding learned-high context to selection, but goal-only
+context is not sufficient to promote a new overall best.
+
+### Decision
+
+Do not promote goal-NN79 as the current overall best because hierarchy success
+is slightly lower than the single-window `imp0.1` checkpoint. Keep:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+as the current best learned-high checkpoint.
+
+Track goal-NN79 as the best oracle-goal/low-level diagnostic. The next selector
+should use richer context than goal alone, for example state+goal nearest
+neighbors or a learned selector over branch features, and should optimize the
+learned-high hierarchy aggregate rather than oracle-goal success alone.
+
+## State+goal-nearest 79-branch multi-window return-positive bank
+
+Goal-only nearest-neighbor selection improved the oracle-goal diagnostic but
+did not improve learned-high hierarchy success. I therefore repeated the
+same 79-branch subset size while matching the preserve distribution on the
+first branch row's low-level state plus held-goal condition slice.
+
+### Setup
+
+Reference distribution:
+
+- `data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz`
+
+Source bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_300eps_b4_c16.npz`
+
+Selection:
+
+- take the first row of each 10-step branch block;
+- extract the low-level condition state+held-goal slice `[0:62]`;
+- standardize by the preserve-bank first-row state+goal distribution;
+- select the 79 branches with smallest nearest-neighbor MSE to preserve-bank
+  state+goal rows;
+- preserve full 10-step branch blocks.
+
+Filtered bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn79_preserve.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 79 |
+| horizon rows | 790 |
+| preserve state+goal NN MSE mean/max | 0.0592 / 0.1082 |
+| return delta mean | 27.47 |
+| success delta mean | 0.443 |
+| action delta mean | 0.192 |
+| source seed counts | 9900000: 31, 9910000: 28, 9920000: 20 |
+
+Training used the same current-best distillation recipe:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn79_preserve.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return |
+| --- | --- | ---: | ---: |
+| state+goal-NN79 imp0.1 | hierarchy | 0.575 | 41.89 |
+| state+goal-NN79 imp0.1 | oracle_hierarchy | 0.705 | 46.69 |
+| goal-NN79 imp0.1 | hierarchy | 0.555 | 41.36 |
+| goal-NN79 imp0.1 | oracle_hierarchy | 0.725 | 47.16 |
+| single-window imp0.1 current best | hierarchy | 0.540 | 41.29 |
+| single-window imp0.1 current best | oracle_hierarchy | 0.702 | 46.89 |
+
+Matched 3x500 eval:
+
+| checkpoint | mode | seed 10000000 | seed 10100000 | seed 10200000 | success mean | return mean |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| state+goal-NN79 imp0.1 | hierarchy | 0.582 | 0.594 | 0.574 | 0.5833 | 43.27 |
+| state+goal-NN79 imp0.1 | oracle_hierarchy | 0.708 | 0.738 | 0.684 | 0.7100 | 47.92 |
+| goal-NN79 imp0.1 | hierarchy | 0.580 | 0.594 | 0.536 | 0.5700 | 43.02 |
+| goal-NN79 imp0.1 | oracle_hierarchy | 0.742 | 0.750 | 0.706 | 0.7327 | 48.55 |
+| single-window imp0.1 previous best | hierarchy | 0.562 | 0.592 | 0.560 | 0.5713 | 43.13 |
+| single-window imp0.1 previous best | oracle_hierarchy | 0.738 | 0.738 | 0.714 | 0.7300 | 48.71 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn79_preserve.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_seed10200000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_seed10200000_500eps.json`
+
+### Interpretation
+
+Adding state context to the nearest-neighbor selector flips the tradeoff seen
+with goal-only selection. The learned-high hierarchy improves from the prior
+best `0.5713` to `0.5833`, while oracle-goal success drops from the goal-only
+diagnostic `0.7327` to `0.7100`. This suggests that the selector is now
+choosing updates that better match the learned high-level rollout
+distribution, even though those updates are not globally better low-level
+corrections under oracle goals.
+
+The result is a real learned-high improvement, but it also reinforces that the
+current distillation recipe is strongly selector-sensitive. A next useful step
+is to train the same state+goal-selected bank with a small improve-weight sweep
+or to add a learned branch selector that optimizes matched learned-high
+success instead of nearest-neighbor similarity alone.
+
+### Decision
+
+Promote state+goal-NN79 as the new current best learned-high checkpoint:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+## 2026-06-25 — VAE512 FiLM Goal-Use Diagnostic and Closed-Loop Check
+
+### Hypothesis
+
+Replacing concat goal conditioning with FiLM/gated conditioning may make the
+low-level policy actually use the future latent goal, making it a better base
+for reachability RL than the current VAE512 concat hierarchy.
+
+### Commands
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  goal-diagnostics --n-demo 1800 --candidate vae512_b1e6_film \
+  --samples 5000 --horizons 2,5,10 --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate vae512_b1e6_film --goal-source learned \
+  --episodes 200 --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate vae512_b1e6_film --goal-source oracle \
+  --episodes 200 --force
+```
+
+### Results
+
+Offline goal-use diagnostics for FiLM at `N=1800`:
+
+| metric | value |
+| --- | ---: |
+| action MAE k10 | 0.0455 |
+| max same-state goal sensitivity | 0.1266 |
+| goal-shuffle action L2 | 0.2783 |
+| goal-shuffle MAE gap | 0.0883 |
+| frame-shuffle action L2 | 0.8213 |
+| previous-action shuffle L2 | 0.1129 |
+| remaining shuffle L2 | 0.0012 |
+
+Closed-loop 200-episode check:
+
+| checkpoint | goal source | episodes | success |
+| --- | --- | ---: | ---: |
+| VAE512 FiLM | learned | 200 | 0.425 |
+| VAE512 FiLM | oracle | 200 | 0.535 |
+| VAE512 concat n1800 seed0 | learned | 500 | 0.582 |
+| VAE512 concat n1800 seed0 | oracle | 50 | 0.500 |
+
+Artifacts:
+
+- `results/incremental/goal_diagnostics/n1800/seed0/vae512_b1e6_film/diagnostics.json`
+- `results/incremental/learned_interface/vae512_b1e6_film/seed0/learned_hierarchy_eval_200.json`
+- `results/incremental/learned_interface/vae512_b1e6_film/seed0/oracle_hierarchy_eval_200.json`
+
+### Interpretation
+
+FiLM fixes much of the offline goal-ignoring signal: goal-shuffle action L2
+increases from the concat n1800 value of `0.0740` to `0.2783`, and same-state
+goal sensitivity rises from `0.0308` to `0.1266`. However, the closed-loop
+learned-high hierarchy is substantially worse than the concat n1800 baseline
+(`0.425` vs `0.582` success), so the stronger goal dependence is not enough by
+itself.
+
+### Decision
+
+Do not promote the existing `vae512_b1e6_film` checkpoint as the immediate RL
+base. Treat FiLM/gated conditioning as a promising architecture direction, but
+it needs either retraining in the matched VAE-scaling `N=500/N=1800` setup or a
+different objective before using it for expensive PPO runs.
+
+## 2026-06-25 — Effect32 FiLM Diagnostic Fix and Closed-Loop Check
+
+### Hypothesis
+
+A future-effect latent may be a better real-compatible representation than a
+future-state VAE latent. Existing `effect32_film` artifacts should be checked
+with the same goal-use gate and a less noisy closed-loop evaluation.
+
+### Implementation Note
+
+The generic goal diagnostic initially treated effect-code `goals[t+h]` like a
+unary state latent. That is incorrect for horizons other than the fixed training
+horizon because effect-code goals are pair encodings. The diagnostic builder now
+encodes the actual pair `(frame_t, frame_{t+h})` for effect candidates before
+constructing the low-level condition. A regression test covers this indexing.
+
+### Commands
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  goal-diagnostics --n-demo 1800 --candidate effect32_film \
+  --samples 5000 --horizons 2,5,10 --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film --goal-source learned \
+  --episodes 200 --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film --goal-source oracle \
+  --episodes 200 --force
+```
+
+### Results
+
+Corrected offline goal-use diagnostics:
+
+| metric | value |
+| --- | ---: |
+| action MAE k10 | 0.0425 |
+| max same-state goal sensitivity | 0.0368 |
+| goal-shuffle action L2 | 0.0622 |
+| goal-shuffle MAE gap | 0.0102 |
+| frame-shuffle action L2 | 0.9503 |
+| previous-action shuffle L2 | 0.1326 |
+
+Closed-loop evaluation:
+
+| checkpoint | goal source | episodes | success | max reward | final reward |
+| --- | --- | ---: | ---: | ---: | ---: |
+| effect32 FiLM | learned | 200 | 0.655 | 0.752 | 0.741 |
+| effect32 FiLM | oracle | 200 | 0.720 | 0.804 | 0.798 |
+
+Artifacts:
+
+- `results/incremental/goal_diagnostics/n1800/seed0/effect32_film/diagnostics.json`
+- `results/incremental/learned_interface/effect32_film/seed0/learned_hierarchy_eval_200.json`
+- `results/incremental/learned_interface/effect32_film/seed0/oracle_hierarchy_eval_200.json`
+
+### Interpretation
+
+`effect32_film` is currently the strongest real-compatible closed-loop
+hierarchy found in this pass: learned-high success is `0.655`, above concat
+VAE512 n1800 seed0 at `0.582`. Oracle-goal success is also high at `0.720`.
+
+However, the low-level goal-use gate still looks weak: goal-shuffle action L2
+is only `0.0622` while frame-shuffle action L2 is `0.9503`. This suggests the
+effect representation improves the imitation/high-level stack but does not by
+itself solve the low-level goal-conditioning problem that blocks local
+reachability RL.
+
+### Decision
+
+Promote `effect32_film` as the best current supervised learned-interface
+baseline and as the lead for Phase 4 representation work. Do not treat it as a
+passed RL base yet; the next useful work is to combine effect/reachability
+latents with a stronger goal-use objective or architecture, then rerun the
+corrected diagnostics before PPO.
+
+## 2026-06-25 — Existing Candidate Goal-Use Screen
+
+### Hypothesis
+
+Some already-trained learned-interface candidates may have a better
+closed-loop/goal-use tradeoff than the main VAE512 concat, VAE512 FiLM, or
+effect32 FiLM candidates.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  goal-diagnostics --n-demo 1800 --candidate <candidate> \
+  --samples 5000 --horizons 2,5,10 --force
+```
+
+Candidates screened: `vae256_b1e5`, `jepa256_r01_v1_c01`, `effect32`,
+`dae256_n010`, `ae256_film`.
+
+### Results
+
+| candidate | learned eval100 success | goal-shuffle L2 | max goal sensitivity | frame-shuffle L2 |
+| --- | ---: | ---: | ---: | ---: |
+| vae256_b1e5 | 0.650 | 0.0405 | 0.0205 | 0.9653 |
+| jepa256_r01_v1_c01 | 0.650 | 0.0408 | 0.0246 | 0.9687 |
+| effect32 | 0.620 | 0.0279 | 0.0178 | 0.9661 |
+| dae256_n010 | 0.590 | 0.0772 | 0.0286 | 0.9488 |
+| ae256_film | 0.550 | 0.2506 | 0.0937 | 0.8645 |
+| effect32_film | 0.690 | 0.0622 | 0.0368 | 0.9503 |
+| vae512_b1e6_film | n/a | 0.2783 | 0.1266 | 0.8213 |
+
+### Interpretation
+
+The current candidates expose the central tradeoff:
+
+- stronger closed-loop imitation candidates (`effect32_film`, `vae256_b1e5`,
+  `jepa256_r01_v1_c01`) still have weak low-level goal response;
+- stronger goal-use candidates (`vae512_b1e6_film`, `ae256_film`) have weaker
+  closed-loop task success.
+
+### Decision
+
+Do not spend PPO budget on this candidate set as-is. The next architecture or
+objective should explicitly preserve task imitation while increasing goal
+dependence, rather than choosing between those two failure modes.
+
+## 2026-06-25 — Closed-Loop Shuffled-Goal Ablation
+
+### Hypothesis
+
+One-step action sensitivity may underestimate goal dependence. A stronger gate
+is to run the hierarchy closed-loop while shuffling predicted high-level goals
+across vectorized environments at each replan. If success remains high, the
+policy is effectively goal-agnostic; if success collapses, the held goal matters
+in closed loop.
+
+### Implementation
+
+Added `goal_source=shuffled` to `learned-interface-eval`. The evaluator still
+uses the learned high-level prediction, but permutes selected goals among the
+currently replanning environments before the low-level rollout. The result JSON
+records `shuffled_goal_l2`.
+
+### Commands
+
+```bash
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film --goal-source shuffled \
+  --episodes 200 --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate vae512_b1e6_film --goal-source shuffled \
+  --episodes 200 --force
+```
+
+### Results
+
+| candidate | goal source | episodes | success | max reward | final reward | shuffled-goal L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | learned | 200 | 0.655 | 0.752 | 0.741 | n/a |
+| effect32_film | oracle | 200 | 0.720 | 0.804 | 0.798 | n/a |
+| effect32_film | shuffled | 200 | 0.275 | 0.462 | 0.436 | 6.109 |
+| vae512_b1e6_film | learned | 200 | 0.425 | 0.592 | 0.573 | n/a |
+| vae512_b1e6_film | oracle | 200 | 0.535 | 0.672 | 0.665 | n/a |
+| vae512_b1e6_film | shuffled | 200 | 0.010 | 0.205 | 0.140 | 24.805 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film/seed0/shuffled_hierarchy_eval_200.json`
+- `results/incremental/learned_interface/vae512_b1e6_film/seed0/shuffled_hierarchy_eval_200.json`
+
+### Interpretation
+
+Both FiLM policies are closed-loop goal-dependent despite weak one-step action
+sensitivity for `effect32_film`. Shuffling goals causes a large success drop:
+
+- `effect32_film`: `0.655 -> 0.275`
+- `vae512_b1e6_film`: `0.425 -> 0.010`
+
+This means the previous action-sensitivity gate was too strict as a standalone
+filter. The better gate is: closed-loop learned/oracle/shuffled evaluation plus
+offline action sensitivity. Under that gate, `effect32_film` is currently the
+best learned-interface base: it has strong learned/oracle success and a large
+shuffled-goal penalty.
+
+### Decision
+
+Promote `effect32_film` from "supervised baseline only" to the leading
+real-compatible candidate for the next reachability/RL experiment. Keep the
+one-step diagnostic as a warning signal, not a blocker, when closed-loop
+shuffled-goal ablation shows the policy actually depends on goals.
+
+## 2026-06-25 — Effect32 FiLM Reachability Distance
+
+### Hypothesis
+
+The effect-code representation needs its own reachability-distance data path.
+Unlike VAE/AE/JEPA latents, effect codes are pairwise future-effect embeddings,
+not unary state embeddings. A useful `D_phi` should compare achieved progress
+effect `(anchor -> current)` to requested target effect `(anchor -> future)`.
+
+### Implementation
+
+Extended `src/hcl_poc/reachability.py` so effect-code candidates build anchored
+effect-progress trajectories. For each anchor frame, the cache stores a short
+sequence of effects from the same anchor to later frames. The existing
+`ReachabilityDistance(start, goal)` model then trains on progress pairs within
+that anchored sequence.
+
+Cache:
+
+`artifacts/incremental/reachability_distance/effect32_film/seed0/effect_progress_h10_stride2_span41.pt`
+
+### Commands
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-reachability-distance --candidate effect32_film \
+  --horizon-steps 10 --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-reachability-distance --candidate effect32_film \
+  --samples 8192 --force
+```
+
+### Results
+
+| checkpoint | temporal MSE | temporal Spearman | near/far acc | shuffled AUC | demo decrease |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film D_phi | 0.03267 | 0.8333 | 0.9275 | 0.9074 | 0.7396 |
+| VAE512 global D_phi | 0.00777 | 0.9328 | 0.9885 | 0.8745 | 0.7048 |
+| VAE512 n1000 D_phi | 0.01125 | 0.9248 | 0.9866 | 0.8690 | 0.6824 |
+
+Artifacts:
+
+- `artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt`
+- `artifacts/incremental/reachability_distance/effect32_film/seed0/metrics.json`
+- `results/incremental/reachability_distance/effect32_film/seed0/eval.json`
+
+### Interpretation
+
+Effect-progress `D_phi` is less clean as a temporal-distance regressor than the
+VAE512 state-latent `D_phi`, but it separates shuffled targets better and has
+better demo-decrease accuracy. This fits the representation tradeoff: effect
+codes are less like a smooth state coordinate system, but may better encode
+task-relevant controllable changes.
+
+### Decision
+
+Keep `effect32_film` plus anchored effect-progress `D_phi` as the lead
+real-compatible path for the next local reachability RL implementation. The
+next code change should adapt local RL reward computation so the achieved
+effect is encoded from the episode anchor to the current observation and scored
+against the held target effect.
+
+## 2026-06-25 — Effect32 FiLM Local RL Smoke with D_phi Reward
+
+### Hypothesis
+
+If the local RL wrapper scores achieved effect progress with the anchored
+effect-progress `D_phi`, residual PPO should at least run end-to-end and show a
+directional local-distance improvement over the frozen `effect32_film` policy.
+
+### Implementation
+
+Extended `src/hcl_poc/low_level_rl.py` so non-VAE learned-interface candidates
+can be loaded by name. For effect-code candidates, each held-goal segment now
+stores the anchor frame at replan time and encodes the achieved effect
+`(anchor_frame -> current_frame)` at every step. This achieved effect is scored
+against the held target effect with either raw effect MSE or the learned
+`D_phi`.
+
+Also added `--candidate`, `--distance-metric`, and `--reachability-checkpoint`
+support to the low-level eval path so frozen baselines can be evaluated under
+the same selected metric as tuned checkpoints.
+
+### Commands
+
+Frozen D_phi baseline:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen \
+  --episodes 100 --seed-start 3400000 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+R1 residual PPO smoke:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r1 \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_r1_smoke_20k \
+  --steps 20000 --alpha 0.05 --terminal-weight 1.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_r1_smoke_20k \
+  --episodes 100 --seed-start 3400000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_smoke_20k/latest.pt \
+  --force
+```
+
+### Results
+
+100-episode eval on seed bank `3400000`:
+
+| policy | success | max reward | D_phi reduction | raw effect reduction | reach rate | terminal AUC | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.600 | 0.711 | 0.0766 | 0.3532 | 0.734 | 0.801 | 0.0000 |
+| R1 smoke 20k | 0.650 | 0.749 | 0.0957 | 0.4038 | 0.710 | 0.805 | 0.0110 |
+
+Training latest row:
+
+| metric | value |
+| --- | ---: |
+| global step | 20160 |
+| mean reward | -0.0546 |
+| mean latent distance | 0.6755 |
+| mean terminal distance | 0.7106 |
+| mean residual L2 | 0.0136 |
+| clip fraction | 0.542 |
+| action saturation rate | 0.000 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_smoke_20k/latest.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen/eval_100_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_smoke_20k/eval_100_seed3400000.json`
+
+### Interpretation
+
+The effect-code local RL path is now technically viable: it trains, evaluates,
+and produces nonzero residuals without action saturation. The 20k-step smoke
+improves task success and both selected/raw local distance reductions on the
+100-episode bank, but the training reward is still negative and the PPO clip
+fraction is high. This is a smoke result only.
+
+### Decision
+
+Promote this path to a serious dev run candidate, but tune PPO before spending a
+large budget. The next run should use many envs, lower effective update
+aggressiveness, and a longer step budget, then compare against the frozen
+baseline on 300-500 episodes.
+
+## 2026-06-25 — Effect32 FiLM 4096-Env D_phi R1 Scale Smoke
+
+### Hypothesis
+
+The effect-code `D_phi` residual PPO path should run at the plan-required
+4096-env scale. A one-rollout run will not prove RL improvement, but it should
+reveal whether the implementation is stable and whether PPO updates produce
+meaningful residuals without the high clip fraction seen in the 32-env smoke.
+
+### Command
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r1 \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_r1_4096_smoke_40k \
+  --steps 40960 --num-envs 4096 --rollout-steps 10 \
+  --num-minibatches 8 --update-epochs 2 --learning-rate 3e-5 \
+  --alpha 0.05 --terminal-weight 1.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+### Results
+
+100-episode eval on seed bank `3400000`:
+
+| policy | success | max reward | D_phi reduction | raw effect reduction | reach rate | terminal AUC | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.600 | 0.711 | 0.0766 | 0.3532 | 0.734 | 0.801 | 0.0000 |
+| R1 32-env smoke 20k | 0.650 | 0.749 | 0.0957 | 0.4038 | 0.710 | 0.805 | 0.0110 |
+| R1 4096-env smoke 40k | 0.610 | 0.727 | 0.0767 | 0.3944 | 0.730 | 0.809 | 0.0002 |
+
+4096-env training latest row:
+
+| metric | value |
+| --- | ---: |
+| global step | 40960 |
+| mean reward | -0.0376 |
+| mean latent distance | 0.5745 |
+| mean terminal distance | 0.5821 |
+| mean residual L2 | 0.0079 |
+| clip fraction | 0.0030 |
+| action saturation rate | 0.2373 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_smoke_40k/latest.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_smoke_40k/eval_100_seed3400000.json`
+
+### Interpretation
+
+The 4096-env path is stable and fast enough, but one conservative update barely
+moves the policy in closed-loop eval. It avoids the 32-env run's high clip
+fraction, but eval residual L2 is nearly zero. The high train-time saturation
+rate is suspicious and may mean sampled residuals are being clipped during the
+rollout even though deterministic eval actions are not.
+
+### Decision
+
+Do not judge the formulation from this one-update run. The next dev run should
+keep 4096 envs but increase policy movement carefully: more total updates,
+possibly larger `alpha` or higher logstd, and monitor train/eval residual L2
+and saturation. The 32-env smoke remains evidence that the reward path can
+produce a positive local/task shift, but the proper conclusion needs a real
+4096-env dev run.
+
+## 2026-06-25 — Effect32 FiLM 4096-Env D_phi R1 Dev Run
+
+### Hypothesis
+
+The one-update 4096-env smoke was too conservative. A five-rollout dev run with
+larger residual scale, lower residual penalty, and more PPO update epochs should
+move the policy enough to test whether the effect-progress `D_phi` reward
+improves the frozen hierarchy.
+
+### Command
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r1 \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_r1_4096_dev_200k_a10 \
+  --steps 204800 --num-envs 4096 --rollout-steps 10 \
+  --num-minibatches 16 --update-epochs 3 \
+  --learning-rate 1e-4 --initial-logstd -1.8 \
+  --residual-penalty-weight 0.001 \
+  --alpha 0.1 --terminal-weight 1.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Evaluated frozen, the prior 32-env smoke, and the 4096-env best-training
+checkpoint on the same 300-episode seed bank:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --episodes 300 --seed-start 3400000 ...
+```
+
+### Results
+
+300-episode eval on seed bank `3400000`:
+
+| policy | success | max reward | D_phi reduction | raw effect reduction | reach rate | terminal AUC | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.633 | 0.740 | 0.0794 | 0.3899 | 0.735 | 0.786 | 0.0000 |
+| R1 32-env smoke 20k | 0.597 | 0.707 | 0.0807 | 0.3791 | 0.701 | 0.806 | 0.0109 |
+| R1 4096-env best 200k | 0.643 | 0.746 | 0.0740 | 0.3643 | 0.735 | 0.803 | 0.0034 |
+
+Training latest row for the 4096-env dev run:
+
+| metric | value |
+| --- | ---: |
+| global step | 204800 |
+| mean reward | -0.0458 |
+| mean latent distance | 0.5827 |
+| mean terminal distance | 0.5746 |
+| mean residual L2 | 0.0260 |
+| clip fraction | 0.067 |
+| action saturation rate | 0.0023 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_dev_200k_a10/latest.pt`
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_dev_200k_a10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen/eval_300_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_smoke_20k/eval_300_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_dev_200k_a10_best/eval_300_seed3400000.json`
+
+### Interpretation
+
+The longer 4096-env dev run does not provide a convincing RL improvement. The
+best-training checkpoint is only `+0.010` absolute success over frozen on 300
+episodes, and its raw effect-distance reduction is worse than frozen. The prior
+32-env apparent gain disappears at 300 episodes.
+
+The implementation is useful because it verifies that effect-code local RL with
+anchored `D_phi` can run at 4096 envs, but the reward/optimization is not yet
+good enough to claim improvement.
+
+### Decision
+
+Do not promote this R1 residual recipe. The next experiment should change the
+objective rather than just run longer: paired improvement against the frozen
+effect32 baseline, terminal-only `D_phi` reward, or a direct low-policy update
+with a BC anchor are more promising than the current dense residual-progress
+reward.
+
+## 2026-06-25 — Effect32 FiLM Terminal-Only D_phi R1 Smoke
+
+### Hypothesis
+
+The dense progress reward may be misleading for the learned `D_phi`. A
+terminal-only objective should avoid rewarding small per-step metric artifacts
+and optimize only the end-of-segment effect distance.
+
+### Implementation
+
+Added `distance_progress_weight` to `low_level_rl`. Existing runs keep the old
+behavior with `distance_progress_weight=1.0`; terminal-only runs use
+`--distance-progress-weight 0.0`.
+
+### Command
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r1 \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_r1_4096_terminal_smoke_40k \
+  --steps 40960 --num-envs 4096 --rollout-steps 10 \
+  --num-minibatches 16 --update-epochs 3 \
+  --learning-rate 1e-4 --initial-logstd -1.8 \
+  --residual-penalty-weight 0.001 \
+  --alpha 0.1 --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+### Results
+
+300-episode eval on seed bank `3400000`:
+
+| policy | success | max reward | D_phi reduction | raw effect reduction | reach rate | terminal AUC | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.633 | 0.740 | 0.0794 | 0.3899 | 0.735 | 0.786 | 0.0000 |
+| dense R1 4096 best 200k | 0.643 | 0.746 | 0.0740 | 0.3643 | 0.735 | 0.803 | 0.0034 |
+| terminal-only R1 4096 40k | 0.650 | 0.748 | 0.0678 | 0.3669 | 0.716 | 0.804 | 0.0013 |
+
+Training latest row:
+
+| metric | value |
+| --- | ---: |
+| global step | 40960 |
+| mean reward | -0.0580 |
+| mean latent distance | 0.5745 |
+| mean terminal distance | 0.5799 |
+| mean residual L2 | 0.0258 |
+| clip fraction | 0.0396 |
+| action saturation rate | 0.2549 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_smoke_40k/latest.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_smoke_40k/eval_300_seed3400000.json`
+
+### Interpretation
+
+Terminal-only `D_phi` is the best 4096-env R1 recipe so far, but the gain is
+still modest: `+0.017` absolute success over frozen on 300 episodes. It improves
+task success while local distance metrics get slightly worse, suggesting the
+residual may be exploiting useful action changes not captured by this
+effect-distance metric, or the measured local metric is not aligned enough with
+task success.
+
+### Decision
+
+Keep terminal-only `D_phi` as the current best effect-code R1 recipe, but do not
+claim solved RL fine-tuning. The next meaningful step is either a longer
+terminal-only 4096-env run with checkpoint selection by dev success, or a paired
+improvement reward that explicitly compares tuned versus frozen terminal
+distance per segment.
+
+## 2026-06-25 — Effect32 FiLM Longer Terminal-Only D_phi R1 Dev Run
+
+### Hypothesis
+
+The one-rollout terminal-only run may have been undertrained. A five-rollout
+4096-env run with the same terminal-only reward should either improve over the
+40k smoke or show that the early update was a transient best point.
+
+### Command
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r1 \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_r1_4096_terminal_dev_200k \
+  --steps 204800 --num-envs 4096 --rollout-steps 10 \
+  --num-minibatches 16 --update-epochs 3 \
+  --learning-rate 1e-4 --initial-logstd -1.8 \
+  --residual-penalty-weight 0.001 \
+  --alpha 0.1 --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+### Results
+
+300-episode eval on seed bank `3400000`:
+
+| policy | success | max reward | D_phi reduction | raw effect reduction | reach rate | terminal AUC | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.633 | 0.740 | 0.0794 | 0.3899 | 0.735 | 0.786 | 0.0000 |
+| terminal-only R1 4096 40k | 0.650 | 0.748 | 0.0678 | 0.3669 | 0.716 | 0.804 | 0.0013 |
+| terminal-only R1 4096 200k latest | 0.627 | 0.736 | 0.0829 | 0.3994 | 0.737 | 0.796 | 0.0035 |
+| terminal-only R1 4096 200k best-train | 0.627 | 0.734 | 0.0697 | 0.3748 | 0.710 | 0.818 | 0.0035 |
+| terminal-only R1 4096 200k step163840 | 0.620 | 0.730 | 0.0761 | 0.3956 | 0.717 | 0.806 | 0.0031 |
+
+100-episode checkpoint screen:
+
+| checkpoint | success | max reward | note |
+| --- | ---: | ---: | --- |
+| frozen | 0.600 | 0.711 | baseline |
+| 40k smoke | 0.690 | 0.772 | best 100-episode terminal-only checkpoint |
+| 200k step040960 | 0.680 | 0.772 | close to 40k smoke |
+| 200k step081920 | 0.610 | 0.728 | reject |
+| 200k step122880 | 0.630 | 0.741 | reject |
+| 200k step163840 | 0.690 | 0.782 | failed to hold at 300 episodes |
+
+Training latest row:
+
+| metric | value |
+| --- | ---: |
+| global step | 204800 |
+| mean reward | -0.0565 |
+| mean latent distance | 0.5827 |
+| mean terminal distance | 0.5650 |
+| mean residual L2 | 0.0260 |
+| clip fraction | 0.0666 |
+| action saturation rate | 0.0025 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_dev_200k/latest.pt`
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_dev_200k/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_dev_200k/eval_300_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_dev_200k_best/eval_300_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_dev_200k_step163840/eval_300_seed3400000.json`
+
+### Interpretation
+
+Running longer did not improve the terminal-only R1 recipe. The one-rollout
+40k terminal-only checkpoint remains the best 4096-env R1 result on the
+300-episode bank. Later checkpoints improve some local metrics, but task
+success regresses to frozen or worse.
+
+This points to a credit/objective issue rather than simply needing more PPO
+steps. Checkpoint selection by training terminal distance is not reliable for
+task success.
+
+### Decision
+
+Reject longer dense or terminal-only R1 residual PPO as the next main path.
+Keep the 40k terminal-only checkpoint as a weak positive reference, but move to
+a paired-improvement reward or direct low-policy update with BC anchoring. The
+next experiment should make the objective explicitly compare tuned versus
+frozen terminal outcomes instead of relying on absolute `D_phi` distance alone.
+
+## 2026-06-25 — Effect32 FiLM Direct Low-Policy R3 Smoke
+
+### Hypothesis
+
+A direct final-layer low-policy update with BC anchoring may be more stable
+than an additive residual policy for the effect-code `D_phi` objective.
+
+### Implementation
+
+Extended `DirectLowActorCritic` to support FiLM low policies by training
+`low_model.output_layer` when present. The previous R3 path only supported
+concat/delta policies with `low_model.policy.net[-1]`. Also fixed the CLI
+override helper so `train-r3 --learning-rate` and `--initial-logstd` map to the
+direct-policy config keys.
+
+### Command
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r3 \
+  --candidate effect32_film --n-demo 1000 --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10 \
+  --steps 40960 --num-envs 4096 --rollout-steps 10 \
+  --num-minibatches 16 --update-epochs 3 \
+  --learning-rate 3e-5 --initial-logstd -4.0 \
+  --bc-weight 10.0 --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+### Results
+
+300-episode eval on seed bank `3400000`:
+
+| policy | success | max reward | D_phi reduction | raw effect reduction | reach rate | terminal AUC | residual/direct L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.633 | 0.740 | 0.0794 | 0.3899 | 0.735 | 0.786 | 0.0000 |
+| terminal-only R1 4096 40k | 0.650 | 0.748 | 0.0678 | 0.3669 | 0.716 | 0.804 | 0.0013 |
+| terminal-only R3 4096 40k bc10 | 0.643 | 0.746 | 0.0740 | 0.3971 | 0.739 | 0.805 | 0.0010 |
+
+Training latest row:
+
+| metric | value |
+| --- | ---: |
+| global step | 40960 |
+| mean reward | -0.0576 |
+| mean latent distance | 0.5751 |
+| mean terminal distance | 0.5757 |
+| mean direct delta L2 | 0.0293 |
+| BC loss | 8.35e-7 |
+| clip fraction | 0.0352 |
+| action saturation rate | 0.2587 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/latest.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/eval_300_seed3400000.json`
+
+### Interpretation
+
+R3 final-layer FiLM tuning works technically, but it does not beat the simpler
+R1 terminal-only smoke. The BC anchor keeps the policy close to frozen, and the
+task gain remains small.
+
+### Decision
+
+Do not promote this R3 recipe. The strongest current effect-code RL checkpoint
+remains `hcl_next_effect32_dphi_r1_4096_terminal_smoke_40k`, but even that is a
+weak positive reference rather than a solved RL result. The next substantive
+objective change should be paired improvement against the frozen rollout.
+
+## Experiment E1: learned reachability distance on VAE512 latents
+
+Implemented a lightweight reachability-distance module and CLI commands:
+
+- `src/hcl_poc/reachability.py`
+- `hcl-poc rl-rerun train-reachability-distance`
+- `hcl-poc rl-rerun eval-reachability-distance`
+
+The model uses the existing cached VAE512 latent trajectories from:
+
+`artifacts/incremental/learned_interface/vae512_w2048_b1e6/seed0/encoded_episodes.pt`
+
+Training target:
+
+```text
+D_phi(z_i, z_j) ~= min((j - i) / H, 1)
+```
+
+with same-trajectory future pairs plus reversed and cross-trajectory negatives.
+The output is sigmoid-bounded to `[0, 1]`, matching the clipped temporal target.
+
+Command:
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-reachability-distance \
+  --candidate vae512_w2048_b1e6 \
+  --seed 0 \
+  --epochs 30 \
+  --batches-per-epoch 200 \
+  --batch-size 512 \
+  --hidden-dim 512 \
+  --depth 3 \
+  --force
+```
+
+Evaluation:
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-reachability-distance \
+  --candidate vae512_w2048_b1e6 \
+  --seed 0 \
+  --samples 4096 \
+  --force
+```
+
+### Results
+
+| metric | value |
+| --- | ---: |
+| temporal MSE | 0.00793 |
+| temporal Spearman | 0.9296 |
+| near mean D_phi | 0.5648 |
+| far mean D_phi | 0.9886 |
+| near/far accuracy | 0.9841 |
+| shuffled AUC | 0.8769 |
+| demo decrease accuracy | 0.7031 |
+
+Artifacts:
+
+- `artifacts/incremental/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt`
+- `artifacts/incremental/reachability_distance/vae512_w2048_b1e6/seed0/metrics.json`
+- `results/incremental/reachability_distance/vae512_w2048_b1e6/seed0/eval.json`
+
+### Interpretation
+
+E1 passes the non-environment validation checks from the plan: temporal
+ordering is strong, near-future states are reliably closer than far-future
+states, and shuffled goals are mostly separated from trajectory futures.
+The weakest diagnostic is demo-decrease accuracy, which is still clearly above
+chance but only around 0.70. The remaining required checks before using this as
+an RL/local-control reward are correlation with privileged/TCP distance and
+correlation with local rollout success.
+
+### Matching VAE-scaling checkpoints for low-level RL
+
+Added `--n-demo` to the reachability CLI so `D_phi` can be trained/evaluated
+under the same VAE-scaling artifact tree as the frozen low-level hierarchy:
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-reachability-distance \
+  --n-demo 1000 \
+  --candidate vae512_w2048_b1e6 \
+  --seed 0 \
+  --epochs 30 \
+  --batches-per-epoch 200 \
+  --batch-size 512 \
+  --hidden-dim 512 \
+  --depth 3 \
+  --force
+```
+
+Validation results:
+
+| n_demo | temporal MSE | temporal Spearman | near/far acc | shuffled AUC | demo decrease acc |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 0.01540 | 0.9103 | 0.9832 | 0.8568 | 0.6658 |
+| 1000 | 0.01184 | 0.9214 | 0.9827 | 0.8688 | 0.6873 |
+| 1800 | 0.00793 | 0.9296 | 0.9841 | 0.8769 | 0.7031 |
+
+Artifacts:
+
+- `artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt`
+- `artifacts/incremental/vae512_scaling/n1000/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt`
+
+The lower-data runs degrade smoothly but still pass the offline ordering checks.
+These are the correct checkpoints to use for low-level RL reward comparisons at
+`n_demo=500` and `n_demo=1000`; do not mix the global `n1800` distance model
+with those frozen hierarchies.
+
+## Experiment E1 reward hook: use D_phi in learned-latent low-level RL
+
+Added a minimal reward-metric switch to the learned-latent low-level RL rollout:
+
+```bash
+uv run hcl-poc low-level-rl ... train-r1 --distance-metric raw_l2|reachability
+uv run hcl-poc low-level-rl ... train-r3 --distance-metric raw_l2|reachability
+```
+
+Default remains `raw_l2`, preserving existing behavior. With
+`--distance-metric reachability`, the trainer loads the matching checkpoint:
+
+```text
+artifacts/incremental/vae512_scaling/n{n_demo}/reachability_distance/vae512_w2048_b1e6/seed{seed}/d_phi.pt
+```
+
+unless `--reachability-checkpoint` is provided. The low-level policy condition
+is unchanged; only the progress and terminal distance used for reward are
+swapped from raw latent MSE to learned `D_phi`.
+
+Smoke run:
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_dphi_smoke_n1000_r3_1k \
+  --steps 1024 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --distance-metric reachability \
+  --force
+```
+
+Latest smoke metrics:
+
+| metric | value |
+| --- | ---: |
+| global step | 1280 |
+| mean D_phi distance | 0.7516 |
+| mean terminal D_phi distance | 0.7878 |
+| mean reward | -0.0646 |
+| mean direct delta L2 | 0.0294 |
+| action saturation rate | 0.0094 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_smoke_n1000_r3_1k/latest.pt`
+- `results/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_smoke_n1000_r3_1k/train_metrics.json`
+
+### Interpretation
+
+The learned-distance reward path loads and runs. This is not yet an RL result;
+it is only a short integration smoke test. The next meaningful comparison is a
+matched raw-L2 vs D_phi low-level RL run at the same budget and training steps,
+followed by normal evaluation.
+
+## Experiment E1 matched low-level RL comparison: raw L2 vs D_phi
+
+Compared the existing raw-L2 low-level RL baselines against matched `D_phi`
+reward runs on the same frozen `n_demo=1000`, `seed=0` VAE512 hierarchy and the
+same 300-episode development evaluation:
+
+```text
+episodes: 300
+seed_start: 3200000
+evaluation checkpoint: best_train_latent.pt unless noted
+```
+
+Raw-L2 baselines already present:
+
+- `artifacts/incremental/low_level_rl/n1000/seed0/r1_a005_progress1_50k/best_train_latent.pt`
+- `artifacts/incremental/low_level_rl/n1000/seed0/r3_bc1_lownoise_progress1_50k/best_train_latent.pt`
+
+New D_phi runs:
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r1 \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_dphi_n1000_r1_a005_50k \
+  --steps 50000 \
+  --alpha 0.05 \
+  --terminal-weight 1.0 \
+  --distance-metric reachability \
+  --force
+```
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_dphi_n1000_r3_bc1_50k \
+  --steps 50000 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --distance-metric reachability \
+  --force
+```
+
+Also tested two targeted R3 variants:
+
+- `hcl_next_dphi_n1000_r3_bc5_50k`: stronger BC regularization.
+- `hcl_next_dphi_n1000_r3_bc1_tw0_50k`: progress-only reward with no terminal
+  D_phi penalty.
+
+### Results
+
+| policy | reward metric | variant | eval success | max reward | action/residual L2 | notes |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| frozen hierarchy | none | reference | 0.553 | 0.676 | 0.000 | best overall in this set |
+| R1 residual | raw L2 | alpha 0.05, 50k | 0.527 | 0.656 | 0.004 | existing baseline |
+| R3 direct | raw L2 | bc 1, 50k | 0.493 | 0.629 | 0.012 | existing baseline |
+| R1 residual | D_phi | alpha 0.05, 50k | 0.390 | 0.564 | 0.021 | worse |
+| R3 direct | D_phi | bc 1, terminal 1, 50k best | 0.547 | 0.666 | 0.009 | best D_phi, near frozen |
+| R3 direct | D_phi | bc 1, terminal 1, 50k latest | 0.480 | 0.621 | 0.023 | training drifted |
+| R3 direct | D_phi | bc 5, terminal 1, 50k | 0.490 | 0.631 | 0.013 | stronger BC did not help |
+| R3 direct | D_phi | bc 1, terminal 0, 50k | 0.400 | 0.564 | 0.017 | progress-only did not help |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r1_a005_50k/best_train_latent.pt`
+- `artifacts/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc1_50k/best_train_latent.pt`
+- `artifacts/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc5_50k/best_train_latent.pt`
+- `artifacts/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc1_tw0_50k/best_train_latent.pt`
+
+Evaluation outputs:
+
+- `results/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r1_a005_50k/eval_300_seed3200000.json`
+- `results/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc1_50k/eval_300_seed3200000.json`
+- `results/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc1_50k_latest300/eval_300_seed3200000.json`
+- `results/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc5_50k/eval_300_seed3200000.json`
+- `results/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc1_tw0_50k/eval_300_seed3200000.json`
+
+### Refreshed evaluator and rollout-success diagnostic
+
+Fixed low-level RL evaluation so segment-distance diagnostics use the distance
+metric recorded in the checkpoint recipe. Before this fix, environment success
+was still valid, but D_phi-trained checkpoints would have reported raw-L2
+segment distances during evaluation.
+
+Added raw local-reach diagnostics to all low-level evals:
+
+- `raw_segment_initial_distance`
+- `raw_segment_final_distance`
+- `raw_segment_distance_reduction`
+- `segment_goal_reach_rate`, computed with the raw-L2 teacher threshold even
+  when the selected reward metric is D_phi
+- `selected_metric_terminal_reach_auc`, using lower selected terminal distance
+  to predict raw local reaching
+
+After rerunning the frozen, raw-L2, and best D_phi evals with the refreshed
+evaluator, the current authoritative development comparison is:
+
+| policy | reward metric | eval success | max reward | raw local reduction | raw reach rate | terminal metric reach AUC | action/residual L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen hierarchy | none | 0.507 | 0.640 | 0.184 | 0.759 | 1.000 | 0.000 |
+| R1 residual | raw L2 | 0.510 | 0.640 | 0.164 | 0.743 | 1.000 | 0.004 |
+| R3 direct | raw L2 | 0.470 | 0.617 | 0.169 | 0.767 | 1.000 | 0.012 |
+| R3 direct | D_phi | 0.537 | 0.662 | 0.183 | 0.758 | 0.774 | 0.009 |
+
+The AUC of `0.774` means D_phi terminal distance is meaningfully predictive of
+raw local reaching, but not as aligned as the raw-L2 metric with the raw-L2
+teacher threshold. The best D_phi R3 run is now the top current development
+result in this matched set, but the margin is small enough that it needs a
+larger/final-seed confirmation before promotion.
+
+### Interpretation
+
+E1's learned distance passes offline temporal/reachability diagnostics, the
+reward hook runs, and the best R3 D_phi run gives a small development-set
+improvement over the refreshed frozen/raw baselines. The result is not yet
+strong: training still drifts when continuing to the latest checkpoint, and
+D_phi terminal distance is only moderately aligned with raw local reaching.
+
+This suggests the next bottleneck is not only the distance metric. The policy
+update/reward formulation is still weak or partially misaligned:
+
+- best-train selection by D_phi terminal distance does not reliably select
+  higher environment success;
+- R1 residual updates became too disruptive under D_phi;
+- direct R3 updates can find a small improvement, but it is not robust across
+  reward variants;
+- removing the terminal D_phi penalty made performance worse, so the issue is
+  not only terminal weighting.
+
+Next recommended step: confirm the best D_phi R3 checkpoint on the final seed
+range and compare against a privileged/TCP upper-bound or paired-improvement
+reward before running broader PPO sweeps.
+
+### Final-seed confirmation
+
+Confirmed the best development D_phi R3 checkpoint on the final seed range:
+
+```text
+episodes: 500
+seed_start: 3400000
+```
+
+Commands:
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_dphi_n1000_r3_bc1_50k_final500 \
+  --episodes 500 \
+  --seed-start 3400000 \
+  --checkpoint artifacts/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc1_50k/best_train_latent.pt \
+  --force
+```
+
+| policy | checkpoint | success | max reward | raw local reduction | raw reach rate | terminal metric reach AUC | action/residual L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen hierarchy | none | 0.512 | 0.641 | 0.165 | 0.758 | 1.000 | 0.000 |
+| R1 residual raw L2 | `r1_a005_progress1_50k/best_train_latent.pt` | 0.514 | 0.649 | 0.179 | 0.766 | 1.000 | 0.004 |
+| R3 direct D_phi | `hcl_next_dphi_n1000_r3_bc1_50k/best_train_latent.pt` | 0.546 | 0.669 | 0.187 | 0.773 | 0.803 | 0.009 |
+
+Final outputs:
+
+- `results/incremental/low_level_rl/n1000/seed0/frozen_reference_final500/eval_500_seed3400000.json`
+- `results/incremental/low_level_rl/n1000/seed0/r1_a005_progress1_50k_final500/eval_500_seed3400000.json`
+- `results/incremental/low_level_rl/n1000/seed0/hcl_next_dphi_n1000_r3_bc1_50k_final500/eval_500_seed3400000.json`
+
+### Decision
+
+Promote `hcl_next_dphi_n1000_r3_bc1_50k/best_train_latent.pt` as the current
+best low-level RL checkpoint for the learned VAE512 stack. The improvement is
+modest but replicated on the final seed range:
+
+```text
+D_phi R3 final success: 0.546
+frozen final success:   0.512
+raw R1 final success:   0.514
+```
+
+This is the first learned-distance low-level RL result in this run that improves
+over both frozen and raw-L2 RL baselines on a held-out seed range. Next
+recommended step: test whether the same D_phi reward improves `n_demo=500`, and
+then compare against the privileged/TCP upper-bound reward.
+
+## Experiment E1 lower-data check: n_demo=500 D_phi R3
+
+Tested the same D_phi R3 recipe at `n_demo=500`, using the matching
+VAE-scaling D_phi checkpoint:
+
+`artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt`
+
+Command:
+
+```bash
+env TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_dphi_n500_r3_bc1_50k \
+  --steps 50000 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --distance-metric reachability \
+  --force
+```
+
+Development eval:
+
+```text
+episodes: 300
+seed_start: 3200000
+checkpoint: best_train_latent.pt
+```
+
+| policy | reward metric | success | max reward | raw local reduction | raw reach rate | terminal metric reach AUC | action/residual L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen hierarchy | none | 0.313 | 0.494 | n/a | 0.578 | n/a | 0.000 |
+| R1 residual | raw L2 | 0.370 | 0.537 | n/a | 0.603 | n/a | 0.005 |
+| R3 direct | raw L2 | 0.390 | 0.547 | n/a | 0.588 | n/a | 0.006 |
+| R3 direct | D_phi | 0.347 | 0.517 | 0.141 | 0.603 | 0.717 | 0.017 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/n500/seed0/hcl_next_dphi_n500_r3_bc1_50k/best_train_latent.pt`
+- `results/incremental/low_level_rl/n500/seed0/hcl_next_dphi_n500_r3_bc1_50k/eval_300_seed3200000.json`
+
+### Interpretation
+
+The D_phi reward improvement does not transfer directly to the lower-data
+`n_demo=500` hierarchy. D_phi terminal distance is still predictive of raw local
+reaching (`AUC=0.717`), but the policy update is too disruptive and trails the
+existing raw-L2 R3 baseline. Keep the n1000 D_phi result as the current
+positive result; do not promote the n500 D_phi run.
+
+## Experiment C1: privileged/TCP paired-reward upper-bound check
+
+The plan asks to validate paired-improvement reward with a privileged/TCP
+distance before relying on learned distances. Existing 1M-step paired-reward
+runs were already available, so I first inspected them instead of launching a
+new sweep.
+
+Base checkpoint:
+
+`artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+
+Init dataset:
+
+`data/rl_rerun/privileged_z_residual_init_B_clean_disturbed_n4096_b2.h5`
+
+### Existing residual paired-reward runs
+
+| run | alpha in recipe | train mean paired improvement | train fraction improved | replay eval mean paired improvement | replay eval fraction improved |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `hcl_next_paired_reward_n4096_alpha025_1m` | 0.25 | -0.0113 | 0.341 | 0.0644 | 0.384 |
+| `hcl_next_paired_reward_n4096_alpha05_1m` | 0.50 | -0.0598 | 0.246 | 0.1069 | 0.353 |
+| `hcl_next_paired_reward_n4096_alpha10_1m` | 1.00 | -0.2529 | 0.116 | 0.0735 | 0.151 |
+
+These miss the plan's local pass criterion:
+
+```text
+fraction_improved > 0.55
+mean_paired_improvement > 0
+```
+
+The replay-eval mean improvements are positive only because of heavy-tailed
+outliers; medians are near zero or negative and the improved fraction is too
+low.
+
+### Existing direct paired-reward runs
+
+Most direct paired local replay evals also miss the pass criterion, with
+`fraction_improved` around `0.26-0.48`. One hard-start direct run passes the
+training-batch criterion but not replay eval:
+
+| run | train mean paired improvement | train fraction improved | replay eval mean paired improvement | replay eval fraction improved |
+| --- | ---: | ---: | ---: | ---: |
+| `hcl_next_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m` | 0.0057 | 0.577 | 0.0821 | 0.442 |
+
+### Closed-loop task check
+
+Refreshed 200-episode closed-loop evaluations on `seed_start=9900000`:
+
+| policy | mode | success | return | mean action delta |
+| --- | --- | ---: | ---: | ---: |
+| base privileged-z | hierarchy | 0.545 | 41.58 | 0.000 |
+| residual paired alpha025 | hierarchy | 0.550 | 40.89 | 0.016 |
+| direct paired hard-start | hierarchy | 0.515 | 40.47 | 0.010 |
+| base privileged-z | oracle_hierarchy | 0.700 | 46.75 | 0.000 |
+| residual paired alpha025 | oracle_hierarchy | 0.690 | 46.73 | 0.015 |
+| direct paired hard-start | oracle_hierarchy | 0.700 | 47.11 | 0.014 |
+
+Outputs:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_base_clean_disturbed_n1800_hierarchy_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_paired_reward_alpha025_1m_hierarchy_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_hierarchy_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_base_clean_disturbed_n1800_oracle_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_paired_reward_alpha025_1m_oracle_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_oracle_200eps.json`
+
+### Decision
+
+Do not promote the privileged/TCP paired-reward runs. The residual run gives a
+tiny hierarchy success increase on this 200-episode slice (`+0.005`) but lowers
+return and fails local improvement criteria. The direct hard-start run can pass
+training-batch local improvement, but replay local eval and closed-loop
+hierarchy success contradict promotion.
+
+This is useful evidence: even with privileged-state distance, the current
+paired reward formulation is not reliably solving local RL. That supports the
+plan's diagnosis that the PPO/local-control formulation itself still needs
+work, not only the representation or distance metric.
+
+## Experiment B: offline goal-identifiability diagnostics for VAE512 low levels
+
+Implemented a reusable offline goal-diagnostics module:
+
+- `src/hcl_poc/goal_diagnostics.py`
+- CLI: `hcl-poc rl-rerun goal-diagnostics`
+
+The diagnostic uses cached validation trajectories and frozen VAE512 low-level
+policies. It does not run the simulator. It reports:
+
+- same-current-state action sensitivity for valid future goals at horizons
+  `2`, `5`, and `10`;
+- action MAE per horizon;
+- condition-block shuffle sensitivity for frame, goal, previous action, and
+  remaining-time inputs.
+
+Command template:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --n-demo 1000 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --force
+```
+
+### Results
+
+| n_demo | action MAE k10 | max same-state goal sensitivity | goal-shuffle action L2 | goal-shuffle MAE gap | frame-shuffle action L2 | prev-action shuffle L2 | remaining shuffle L2 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 0.0653 | 0.0236 | 0.0489 | 0.0074 | 0.9609 | 0.0813 | 0.0009 |
+| 1000 | 0.0507 | 0.0276 | 0.0649 | 0.0119 | 0.9546 | 0.1106 | 0.0012 |
+| 1800 | 0.0419 | 0.0308 | 0.0740 | 0.0153 | 0.9498 | 0.1285 | 0.0013 |
+
+Outputs:
+
+- `results/incremental/goal_diagnostics/n500/seed0/vae512.json`
+- `results/incremental/goal_diagnostics/n1000/seed0/vae512.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/vae512.json`
+
+### Interpretation
+
+The VAE512 concat low levels still mostly ignore the goal compared with the
+current visual/state input:
+
+- frame shuffle changes action by about `0.95` L2;
+- goal shuffle changes action by only `0.05-0.07` L2;
+- same-state valid future-goal sensitivity is only `0.02-0.03` L2;
+- remaining-time sensitivity is effectively zero.
+
+This reproduces the plan's stated failure mode: the supervised low level can
+get good action MAE while remaining weakly goal-conditioned. Increasing demos
+from 500 to 1800 improves action MAE and slightly increases goal sensitivity,
+but it does not approach the target scale mentioned in the plan, where
+privileged-state sensitivity was around `0.26`.
+
+Decision: keep using the n1000 D_phi R3 result as a useful positive RL result,
+but treat VAE512 concat as failing the full Experiment B goal-identifiability
+gate. The next implementation step should be a FiLM/gated or goal-residual
+low-level architecture, then rerun this same diagnostic before launching more
+expensive RL.
+
+Keep goal-NN79 as the best oracle-goal/low-level diagnostic, but do not use it
+as the current learned-high checkpoint.
+
+## State+goal-NN79 improve-weight sweep
+
+After promoting the state+goal-NN79 `improve_npz_weight=0.1` checkpoint, I ran
+a narrow weight sweep to check whether the selected branch pressure was too
+weak or too strong.
+
+### Setup
+
+Same bank and training recipe as the promoted state+goal-NN79 run, changing
+only:
+
+```text
+--improve-npz-weight 0.05
+--improve-npz-weight 0.15
+```
+
+Artifacts:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp005_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp015_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| improve NPZ weight | mode | success | return | decision |
+| ---: | --- | ---: | ---: | --- |
+| 0.05 | hierarchy | 0.540 | 41.20 | reject |
+| 0.05 | oracle_hierarchy | 0.695 | 47.14 | diagnostic only |
+| 0.10 | hierarchy | 0.575 | 41.89 | keep current best |
+| 0.10 | oracle_hierarchy | 0.705 | 46.69 | matched already run |
+| 0.15 | hierarchy | 0.565 | 41.81 | reject |
+| 0.15 | oracle_hierarchy | 0.705 | 47.09 | diagnostic only |
+
+The `0.05` and `0.15` variants did not clear the promoted `0.10` hierarchy dev
+bar, so I skipped matched 3x500 evaluations for both.
+
+### Interpretation
+
+For this selected branch bank, the useful update is weight-sensitive and peaks
+near `0.1` in the tested range. Lower weight appears too weak to move the
+learned-high rollout distribution, while higher weight does not improve the
+hierarchy and does not recover the oracle-goal gap.
+
+### Decision
+
+Keep the state+goal-NN79 `improve_npz_weight=0.1` checkpoint as the current
+learned-high best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+## State+goal-NN79 high-level projection and local gate diagnostics
+
+After promoting the state+goal-NN79 checkpoint, I reran two high-level/local
+diagnostics on the new best: eval-time prototype projection from Experiment H
+and local oracle gating of tuned low-level segments.
+
+### Prototype projection
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --high-goal-projection nearest_oracle_bank \
+  --high-goal-bank-episodes 200 \
+  --high-goal-bank-seed-start 9800000 \
+  --high-goal-bank-num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_projected_200eps.json \
+  --force
+```
+
+Results:
+
+| checkpoint | projection | success | return | bank size | predicted-to-prototype MSE median | predicted-to-prototype MSE p90 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| state+goal-NN79 imp0.1 | none | 0.575 | 41.89 | n/a | n/a | n/a |
+| state+goal-NN79 imp0.1 | nearest oracle bank | 0.350 | 35.94 | 2000 | 0.0357 | 0.3162 |
+
+Projection is strongly harmful again. The nearest teacher prototypes are close
+in normalized privileged-state MSE, but replacing the continuous learned
+high-level output changes the control target enough to collapse task success.
+
+### Local oracle gate
+
+I evaluated an oracle local segment gate that rolls out both base and tuned
+low-level policies for the current held goal, then uses the tuned action only
+when the tuned terminal MSE is no worse than the base terminal MSE plus a
+tolerance.
+
+Results on the 200-episode dev window:
+
+| mode | gate max degradation MSE | success | return | tuned fraction | paired improvement MSE mean | decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| hierarchy | always tuned | 0.575 | 41.89 | 1.000 | n/a | keep |
+| hierarchy | 0.00 | 0.520 | 41.24 | 0.396 | -0.364 | reject |
+| hierarchy | 0.05 | 0.535 | 41.24 | 0.759 | -0.362 | reject |
+| oracle_hierarchy | always tuned | 0.705 | 46.69 | 1.000 | n/a | diagnostic |
+| oracle_hierarchy | 0.00 | 0.725 | 47.02 | 0.478 | 0.458 | diagnostic |
+
+Artifacts:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_projected_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_local_oracle_gate0_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_local_oracle_gate005_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_local_oracle_gate0_200eps.json`
+
+### Interpretation
+
+The projection result reinforces the earlier Experiment H conclusion: naive
+nearest-prototype projection is not a valid mitigation for learned high-level
+goals, even when the selected prototype is close in normalized state space.
+
+The local gate gives a sharper diagnostic. Under learned-high goals, terminal
+MSE gating rejects many tuned segments and reduces task success. Even a relaxed
+`0.05` tolerance remains below always-tuned. Under oracle goals, the same gate
+improves dev success from `0.705` to `0.725`, which means local MSE is useful
+for oracle-goal correction but misaligned with learned-high task success. This
+matches the branch-selection result: the best learned-high selector was based
+on state+goal distribution matching and outcome labels, not purely local MSE.
+
+### Decision
+
+Keep the state+goal-NN79 always-tuned checkpoint as current learned-high best.
+Do not use nearest-prototype projection or local terminal-MSE gating as an
+eval-time learned-high mitigation. Future selection should optimize learned-high
+closed-loop outcomes directly, or learn a selector from state+goal branch
+features and task-outcome labels rather than relying on local terminal MSE.
+
+## Hybrid state+goal proximity plus return selector
+
+The previous selectors exposed a tradeoff:
+
+- state+goal-NN79 gave the best learned-high success but weak oracle-goal
+  success;
+- goal-NN79 and return-heavy subsets improved oracle-goal behavior but did not
+  improve learned-high success.
+
+I tested a simple hybrid selector before implementing a learned selector:
+restrict to branches near the preserve-bank learned-high state+goal
+distribution, then choose the strongest return-improving branches within that
+pool.
+
+### Setup
+
+Source bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_300eps_b4_c16.npz`
+
+Reference distribution:
+
+- `data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz`
+
+Selection:
+
+- compute first-row state+held-goal nearest-neighbor MSE to preserve-bank rows
+  using condition slice `[0:62]`, standardized by the preserve-bank
+  distribution;
+- keep the closest 120 branches;
+- from those, select the top 79 branches by `selected_return_delta`;
+- preserve full 10-step branch blocks.
+
+Filtered bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn120_topret79_preserve.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 79 |
+| horizon rows | 790 |
+| preserve state+goal NN MSE mean/max | 0.0824 / 0.1525 |
+| return delta mean | 35.71 |
+| success delta mean | 0.532 |
+| action delta mean | 0.194 |
+| source seed counts | 9900000: 24, 9910000: 30, 9920000: 25 |
+
+Training used the current-best recipe:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn120_topret79_preserve.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_multi3_stategoalnn120_topret79_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return |
+| --- | --- | ---: | ---: |
+| state+goal-NN120 top-return79 | hierarchy | 0.550 | 41.86 |
+| state+goal-NN120 top-return79 | oracle_hierarchy | 0.755 | 48.47 |
+| state+goal-NN79 current learned-high best | hierarchy | 0.575 | 41.89 |
+| state+goal-NN79 current learned-high best | oracle_hierarchy | 0.705 | 46.69 |
+| goal-NN79 oracle diagnostic | hierarchy | 0.555 | 41.36 |
+| goal-NN79 oracle diagnostic | oracle_hierarchy | 0.725 | 47.16 |
+
+The hybrid selector failed the learned-high dev gate, so I skipped matched
+learned-high evaluation. Because oracle dev was strong, I ran matched oracle
+3x500:
+
+| checkpoint | mode | seed 10000000 | seed 10100000 | seed 10200000 | success mean | return mean |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| state+goal-NN120 top-return79 | oracle_hierarchy | 0.738 | 0.748 | 0.710 | 0.7320 | 48.25 |
+| goal-NN79 oracle diagnostic | oracle_hierarchy | 0.742 | 0.750 | 0.706 | 0.7327 | 48.55 |
+| state+goal-NN79 current learned-high best | oracle_hierarchy | 0.708 | 0.738 | 0.684 | 0.7100 | 47.92 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn120_topret79_preserve.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn120_topret79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn120_topret79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn120_topret79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn120_topret79_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn120_topret79_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn120_topret79_imp01_seed10200000_500eps.json`
+
+### Interpretation
+
+Adding stronger return filtering inside a preserve-proximal state+goal pool
+recovers oracle-goal quality on the dev window, but the matched oracle result
+is only a near-tie with goal-NN79 and the learned-high dev result drops below
+the current best. The selector therefore moves back toward the oracle-goal
+tradeoff rather than improving the learned-high distribution.
+
+This narrows the next selector direction: simple scalar mixing of proximity and
+return is not enough. The useful signal likely needs either a learned selector
+over branch features or additional learned-high outcome labels that are not
+captured by return delta and nearest-neighbor proximity alone.
+
+### Decision
+
+Do not promote the hybrid selector. Keep:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+as the learned-high best, and keep goal-NN79 as the marginally best
+oracle-goal diagnostic.
+
+## Fourth branch-outcome window and multi4 state+goal selector
+
+To check whether the state+goal selector was overfitting the three available
+outcome windows, I collected one more learned-high branch-outcome window and
+reran the closest-state+goal 79-branch selector over the expanded pool.
+
+### Fresh outcome window
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 100 \
+  --seed-start 9930000 \
+  --num-envs 100 \
+  --random-candidates 16 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.01 \
+  --max-action-delta-l2 0.25 \
+  --max-branch-batches 4 \
+  --max-rollout-steps 120 \
+  --bank-output data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9930000_100eps_b4_c16.npz \
+  --bank-min-return-delta 5 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_return_delta_ge5_seed9930000_100eps_b4_c16.json \
+  --force
+```
+
+The new window had base closed-loop success `0.480` and produced 70
+return-positive branches:
+
+| metric | value |
+| --- | ---: |
+| branches | 70 |
+| return delta mean/median | 22.50 / 18.49 |
+| success delta mean | 0.343 |
+| return delta min/max | 5.04 / 54.89 |
+
+Merged bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_9930000_400eps_b4_c16.npz`
+
+Merged summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 285 |
+| horizon rows | 2850 |
+| return delta mean | 24.56 |
+| success delta mean | 0.337 |
+| action delta mean | 0.167 |
+| source seed counts | 9900000: 79, 9910000: 71, 9920000: 65, 9930000: 70 |
+
+### Multi4 selector
+
+Selection:
+
+- compute first-row state+held-goal nearest-neighbor MSE to preserve-bank rows
+  using condition slice `[0:62]`;
+- select the 79 branches closest to the preserve-bank learned-high
+  state+goal distribution.
+
+Filtered bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi4_stategoalnn79_preserve.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 79 |
+| horizon rows | 790 |
+| preserve state+goal NN MSE mean/max | 0.0470 / 0.0895 |
+| return delta mean | 27.81 |
+| success delta mean | 0.430 |
+| action delta mean | 0.194 |
+| source seed counts | 9900000: 21, 9910000: 21, 9920000: 17, 9930000: 20 |
+
+Training:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi4_stategoalnn79_preserve.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_multi4_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return | decision |
+| --- | --- | ---: | ---: | --- |
+| multi4 state+goal-NN79 | hierarchy | 0.535 | 41.68 | reject |
+| multi4 state+goal-NN79 | oracle_hierarchy | 0.715 | 47.40 | diagnostic only |
+| multi3 state+goal-NN79 current best | hierarchy | 0.575 | 41.89 | keep |
+| multi3 state+goal-NN79 current best | oracle_hierarchy | 0.705 | 46.69 | diagnostic |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9930000_100eps_b4_c16.npz`
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_9930000_400eps_b4_c16.npz`
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi4_stategoalnn79_preserve.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi4_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_return_delta_ge5_seed9930000_100eps_b4_c16.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi4_stategoalnn79_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi4_stategoalnn79_imp01_200eps.json`
+
+### Interpretation
+
+Adding a fourth outcome window made the nearest-state+goal selected bank more
+distribution-close, but it reduced the outcome strength relative to the
+three-window state+goal-NN79 bank and hurt learned-high dev success. More
+outcome diversity alone is therefore not enough; the selector needs to preserve
+the particular learned-high-improving cases rather than simply tracking the
+nearest preserve distribution more tightly.
+
+### Decision
+
+Do not promote multi4 state+goal-NN79. Keep the multi3 state+goal-NN79
+checkpoint as current learned-high best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+## Multi4 fail-to-success outcome-label selector
+
+The merged four-window branch-outcome bank contains 96 clean fail-to-success
+branches:
+
+```text
+selected_base_success == 0
+selected_candidate_success == 1
+```
+
+This is the most direct learned-high success label in the bank, so I tested it
+as an explicit selector.
+
+### Setup
+
+Source bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_9930000_400eps_b4_c16.npz`
+
+Filtered bank:
+
+- `data/manifests/privileged_z_branch_outcome_fail_to_success_multi4_96.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 96 |
+| horizon rows | 960 |
+| return delta mean/median | 33.74 / 36.61 |
+| action delta mean | 0.182 |
+| source seed counts | 9900000: 27, 9910000: 22, 9920000: 23, 9930000: 24 |
+
+Training used the same current recipe:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_fail_to_success_multi4_96.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_fail_to_success_multi4_96_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return | decision |
+| --- | --- | ---: | ---: | --- |
+| multi4 fail-to-success | hierarchy | 0.505 | 40.83 | reject |
+| multi4 fail-to-success | oracle_hierarchy | 0.695 | 45.54 | reject |
+| multi3 state+goal-NN79 current best | hierarchy | 0.575 | 41.89 | keep |
+| multi3 state+goal-NN79 current best | oracle_hierarchy | 0.705 | 46.69 | keep |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_fail_to_success_multi4_96.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_fail_to_success_multi4_96_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_fail_to_success_multi4_96_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_fail_to_success_multi4_96_imp01_200eps.json`
+
+### Interpretation
+
+Hard fail-to-success labels are too blunt as distillation targets. They are
+strong learned-high outcome labels in the collection rollouts, but imitating
+all of them hurts both learned-high and oracle-goal dev performance. This
+suggests the useful branches are not simply all success flips; they must also
+match the stable learned-high operating distribution. The earlier state+goal
+distribution match remains the only selector that improved learned-high
+matched success.
+
+### Decision
+
+Reject the fail-to-success bank and keep the multi3 state+goal-NN79 checkpoint
+as current learned-high best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+## Proximity-filtered success-flip selector
+
+The full multi4 fail-to-success bank was too broad. I tested whether the same
+hard success-flip signal becomes useful when restricted to branches that are
+also close to the learned-high preserve-bank state+goal distribution.
+
+### Setup
+
+Source bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_seed9900000_9910000_9920000_9930000_400eps_b4_c16.npz`
+
+Selection:
+
+- require `selected_success_delta > 0`;
+- compute nearest-neighbor MSE from the first branch row's state+held-goal
+  condition slice `[0:62]` to the preserve-bank first-row state+goal
+  distribution;
+- select the closest 40 success-flip branches.
+
+Filtered bank:
+
+- `data/manifests/privileged_z_branch_outcome_success_delta_pos_multi4_stategoalnn40_preserve.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 40 |
+| horizon rows | 400 |
+| preserve state+goal NN MSE mean/max | 0.0547 / 0.1018 |
+| return delta mean | 40.66 |
+| success delta mean | 1.000 |
+| action delta mean | 0.213 |
+| source seed counts | 9900000: 14, 9910000: 9, 9920000: 11, 9930000: 6 |
+
+Training used the same current recipe:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_success_delta_pos_multi4_stategoalnn40_preserve.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_success_delta_pos_multi4_stategoalnn40_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return | decision |
+| --- | --- | ---: | ---: | --- |
+| success-flip state+goal-NN40 | hierarchy | 0.530 | 41.88 | reject |
+| success-flip state+goal-NN40 | oracle_hierarchy | 0.710 | 46.43 | reject |
+| multi3 state+goal-NN79 current best | hierarchy | 0.575 | 41.89 | keep |
+| multi3 state+goal-NN79 current best | oracle_hierarchy | 0.705 | 46.69 | keep |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_success_delta_pos_multi4_stategoalnn40_preserve.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_success_delta_pos_multi4_stategoalnn40_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_success_delta_pos_multi4_stategoalnn40_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_success_delta_pos_multi4_stategoalnn40_imp01_200eps.json`
+
+### Interpretation
+
+Even success-flip branches that are close to the learned-high state+goal
+distribution do not improve learned-high success. This rules out the simple
+"success flips plus proximity" selector. The only selector that has improved
+matched learned-high success remains the multi3 state+goal-NN79 bank, whose
+success labels are weaker but whose branch mix appears better aligned with the
+learned-high rollout distribution.
+
+### Decision
+
+Reject success-flip state+goal-NN40 and keep the multi3 state+goal-NN79
+checkpoint as current learned-high best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+## Multi3/multi4 stable-core selector
+
+The rejected multi4 state+goal-NN79 bank still overlapped the promoted multi3
+state+goal-NN79 bank on 59 of 79 branches. I tested whether training only on
+this stable intersection preserves the useful learned-high behavior while
+discarding the 20 replacement branches introduced by the fourth outcome window.
+
+### Setup
+
+Intersection bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi4_stategoal_intersection59_preserve.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 59 |
+| horizon rows | 590 |
+| return delta mean | 29.29 |
+| success delta mean | 0.475 |
+| action delta mean | 0.210 |
+| source seed counts | 9900000: 21, 9910000: 21, 9920000: 17 |
+
+Training used the same current recipe:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi4_stategoal_intersection59_preserve.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_multi4_stategoal_intersection59_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return | decision |
+| --- | --- | ---: | ---: | --- |
+| stable intersection59 | hierarchy | 0.570 | 41.98 | reject |
+| stable intersection59 | oracle_hierarchy | 0.715 | 48.12 | diagnostic only |
+| multi3 state+goal-NN79 current best | hierarchy | 0.575 | 41.89 | keep |
+| multi3 state+goal-NN79 current best | oracle_hierarchy | 0.705 | 46.69 | keep |
+| multi4 state+goal-NN79 | hierarchy | 0.535 | 41.68 | rejected earlier |
+| multi4 state+goal-NN79 | oracle_hierarchy | 0.715 | 47.40 | rejected earlier |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi4_stategoal_intersection59_preserve.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi4_stategoal_intersection59_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi4_stategoal_intersection59_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi4_stategoal_intersection59_imp01_200eps.json`
+
+### Interpretation
+
+The stable-core bank recovers most of the learned-high performance lost by the
+full multi4 selector, so the fourth-window replacement branches were likely
+harmful. However, the stable-core hierarchy result still does not beat the
+promoted full multi3 state+goal-NN79 bank. The 20 non-overlap branches in the
+multi3 bank appear to be part of the useful learned-high mix, not just noise.
+
+The oracle-goal diagnostic improves to `0.715`, matching the full multi4 oracle
+result and exceeding the current learned-high best's oracle dev score, but this
+does not transfer to learned-high task success.
+
+### Decision
+
+Reject the stable intersection59 selector and keep the multi3 state+goal-NN79
+checkpoint as current learned-high best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+## Multi3 state+goal-NN79 plus fourth-window augmentation
+
+The stable-core experiment showed that the fourth-window replacement branches
+hurt learned-high performance, but it did not test whether fourth-window
+branches are useful as additional data when the promoted multi3 branch set is
+kept intact. I therefore built an augmentation bank that preserves all 79
+branches from the current multi3 state+goal-NN79 bank and adds the 20
+`seed_start=9930000` branches selected by the multi4 state+goal proximity rule.
+
+### Setup
+
+Augmented bank:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn79_plus_multi4_seed993_top20_preserve.npz`
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 99 |
+| horizon rows | 990 |
+| return delta mean | 26.66 |
+| success delta mean | 0.414 |
+| action delta mean | 0.182 |
+| source seed counts | 9900000: 31, 9910000: 28, 9920000: 20, 9930000: 20 |
+
+Training used the same final-layer distillation recipe and weights as the
+current best:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn79_plus_multi4_seed993_top20_preserve.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_plus_multi4_seed993_top20_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return | decision |
+| --- | --- | ---: | ---: | --- |
+| multi3 + seed993 top20 | hierarchy | 0.540 | 42.06 | reject |
+| multi3 + seed993 top20 | oracle_hierarchy | 0.710 | 48.09 | diagnostic only |
+| multi3 state+goal-NN79 current best | hierarchy | 0.575 | 41.89 | keep |
+| multi3 state+goal-NN79 current best | oracle_hierarchy | 0.705 | 46.69 | keep |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_return_delta_ge5_multi3_stategoalnn79_plus_multi4_seed993_top20_preserve.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_plus_multi4_seed993_top20_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_branch_outcome_return_ge5_multi3_stategoalnn79_plus_multi4_seed993_top20_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_branch_outcome_return_ge5_multi3_stategoalnn79_plus_multi4_seed993_top20_imp01_200eps.json`
+
+### Interpretation
+
+Adding the fourth-window branches is harmful even when the promoted multi3 bank
+is not displaced. The oracle-goal score remains slightly above the current
+learned-high best, but learned-high success drops sharply from `0.575` to
+`0.540`. This suggests the fourth-window proximity-selected branches are not
+just neutral extra data; under the current distillation recipe, they pull the
+low level away from the learned-high operating distribution that produced the
+matched 3x500 improvement.
+
+### Decision
+
+Reject the fourth-window augmentation. Keep the multi3 state+goal-NN79
+checkpoint as current learned-high best:
+
+`artifacts/incremental/privileged_z_direct_distill/hcl_next_branch_outcome_return_ge5_multi3_stategoalnn79_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+## Experiment G probe: oracle-low-level branch generator
+
+The previous branch-outcome banks used random-noise local action search around
+the frozen learned-high segment. Experiment G explicitly warns that random
+actions are a weak branch generator, so I added a competent local branch source
+to `eval-privileged-z-branch-outcomes`:
+
+```text
+--branch-source random_search|oracle_low_level
+```
+
+The new `oracle_low_level` mode rolls the privileged PPO teacher for `k=10`
+steps from the current simulator state to get an oracle continuation goal, then
+executes the frozen low level toward that oracle goal. For distillation, it
+stores the same current states and previous actions but keeps the learned
+high-level goal in the condition. This tests whether competent oracle-local
+actions can correct learned-high rollouts without replacing the high level.
+
+### Smoke
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 20 \
+  --seed-start 9940000 \
+  --num-envs 20 \
+  --branch-source oracle_low_level \
+  --random-candidates 1 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.0 \
+  --max-action-delta-l2 1.0 \
+  --max-branch-batches 2 \
+  --max-rollout-steps 120 \
+  --bank-output data/manifests/privileged_z_branch_outcome_oracle_low_level_seed9940000_20eps_b2.npz \
+  --bank-min-return-delta 5 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_seed9940000_20eps_b2.json \
+  --force
+```
+
+The smoke path executed and wrote an 8-branch return-positive bank.
+
+### Main 100-episode bank
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 100 \
+  --seed-start 9940000 \
+  --num-envs 100 \
+  --branch-source oracle_low_level \
+  --random-candidates 1 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.0 \
+  --max-action-delta-l2 1.0 \
+  --max-branch-batches 4 \
+  --max-rollout-steps 120 \
+  --bank-output data/manifests/privileged_z_branch_outcome_oracle_low_level_return_delta_ge5_seed9940000_100eps_b4.npz \
+  --bank-min-return-delta 5 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_seed9940000_100eps_b4.json \
+  --force
+```
+
+Bank summary:
+
+| metric | value |
+| --- | ---: |
+| branches | 100 |
+| horizon rows | 1000 |
+| success delta mean | 0.410 |
+| return delta mean | 24.97 |
+| return delta median | 20.77 |
+| return delta min/max | 5.37 / 60.05 |
+
+All-branch summary from the attribution run:
+
+| branch set | count | success delta | return-delta median | candidate better return fraction |
+| --- | ---: | ---: | ---: | ---: |
+| all oracle-low-level branches | 400 | +0.015 | 0.014 | 0.518 |
+| locally rejected | 281 | +0.028 | 0.109 | 0.559 |
+
+As in earlier outcome attribution, local learned-goal MSE is not the right
+selector: many oracle-low-level branches that are locally rejected still improve
+return.
+
+### Distillation and dev evaluation
+
+Training:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_oracle_low_level_return_delta_ge5_seed9940000_100eps_b4.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_oracle_low_level_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return | decision |
+| --- | --- | ---: | ---: | --- |
+| oracle-low-level branch bank | hierarchy | 0.565 | 42.76 | reject |
+| oracle-low-level branch bank | oracle_hierarchy | 0.685 | 46.20 | reject |
+| multi3 state+goal-NN79 current best | hierarchy | 0.575 | 41.89 | keep |
+| multi3 state+goal-NN79 current best | oracle_hierarchy | 0.705 | 46.69 | keep |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_oracle_low_level_seed9940000_20eps_b2.npz`
+- `data/manifests/privileged_z_branch_outcome_oracle_low_level_return_delta_ge5_seed9940000_100eps_b4.npz`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_seed9940000_20eps_b2.json`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_seed9940000_100eps_b4.json`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_branch_return_ge5_seed9940000_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_oracle_low_level_branch_return_ge5_seed9940000_imp01_200eps.json`
+
+### Interpretation
+
+The new branch source confirms the Experiment G warning in a useful way:
+competent oracle-low-level branches create a clean return-positive bank, but
+distilling those actions into the learned-goal low level still does not beat the
+selector-based current best. The oracle-goal result also drops, so this is not
+only a learned-high mismatch; the training target likely mixes incompatible
+semantics by asking the low level to execute oracle-goal actions while
+conditioning on the learned high-level goal.
+
+### Decision
+
+Keep `--branch-source oracle_low_level` as an implemented diagnostic branch
+generator, but do not promote the distilled checkpoint. The result suggests
+that true branch data should store and train on explicit alternative branch
+goals, and likely requires high-level retraining/prototype IDs, rather than
+forcing oracle-local actions under the existing learned goal.
+
+## Experiment G probe: explicit oracle branch-goal conditioning
+
+The previous oracle-low-level branch bank used competent branch actions but
+stored the learned high-level goal in the low-level condition. That is
+semantically inconsistent: the action sequence was generated for an oracle
+branch goal while the model was asked to associate it with the learned goal.
+
+I added a second switch to the branch-outcome command:
+
+```text
+--branch-condition-goal-source learned_high|oracle_goal
+```
+
+For `branch_source=oracle_low_level`, `oracle_goal` stores the teacher's
+10-step oracle continuation goal in the bank condition. This directly tests
+Experiment G's explicit alternative branch-goal setup.
+
+### Bank Collection
+
+Command:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 100 \
+  --seed-start 9940000 \
+  --num-envs 100 \
+  --branch-source oracle_low_level \
+  --branch-condition-goal-source oracle_goal \
+  --random-candidates 1 \
+  --random-noise-std 0.05 \
+  --min-improvement-mse 0.0 \
+  --max-action-delta-l2 1.0 \
+  --max-branch-batches 4 \
+  --max-rollout-steps 120 \
+  --bank-output data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_return_delta_ge5_seed9940000_100eps_b4.npz \
+  --bank-min-return-delta 5 \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_oraclegoal_seed9940000_100eps_b4.json \
+  --force
+```
+
+The outcome labels are the same as the learned-goal-conditioned oracle branch
+bank because only the stored training goal changed:
+
+| metric | value |
+| --- | ---: |
+| branches | 100 |
+| horizon rows | 1000 |
+| success delta mean | 0.410 |
+| return delta mean | 24.97 |
+| return delta median | 20.77 |
+
+The NPZ stores:
+
+```text
+branch_source = oracle_low_level
+branch_condition_goal_source = oracle_goal
+```
+
+### Distillation
+
+Training:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  train-privileged-z-local-replay-distill \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --manifest data/manifests/local_reset_bank_n1800_seed0_k10_hard_mse_ge_0p05.json \
+  --preserve-manifest data/manifests/local_reset_bank_n1800_seed0_k10_easy_mse_lt_0p05.json \
+  --preserve-npz data/manifests/privileged_z_closed_loop_preserve_hierarchy_n512_seed9900000.npz \
+  --improve-npz data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_return_delta_ge5_seed9940000_100eps_b4.npz \
+  --replay-weight 0.25 \
+  --preserve-weight 1.0 \
+  --preserve-npz-weight 1.0 \
+  --improve-npz-weight 0.1 \
+  --run-tag hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200 \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --learning-rate 1e-4 \
+  --train-scope final_layer \
+  --force
+```
+
+### Results
+
+Quick 200-episode dev check on `seed_start=9900000`:
+
+| checkpoint | mode | success | return |
+| --- | --- | ---: | ---: |
+| oracle-low-level explicit oracle goal | hierarchy | 0.535 | 41.54 |
+| oracle-low-level explicit oracle goal | oracle_hierarchy | 0.730 | 47.17 |
+| oracle-low-level learned-goal condition | hierarchy | 0.565 | 42.76 |
+| oracle-low-level learned-goal condition | oracle_hierarchy | 0.685 | 46.20 |
+| multi3 state+goal-NN79 current best | hierarchy | 0.575 | 41.89 |
+| multi3 state+goal-NN79 current best | oracle_hierarchy | 0.705 | 46.69 |
+
+Because oracle-goal dev success improved, I ran matched oracle 3x500:
+
+| seed start | success | return |
+| ---: | ---: | ---: |
+| 10000000 | 0.692 | 45.94 |
+| 10100000 | 0.730 | 48.30 |
+| 10200000 | 0.710 | 48.11 |
+| mean | 0.7107 | 47.45 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_return_delta_ge5_seed9940000_100eps_b4.npz`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_oraclegoal_seed9940000_100eps_b4.json`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_seed10000000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_seed10100000_500eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_seed10200000_500eps.json`
+
+### Interpretation
+
+Explicit oracle branch-goal conditioning fixes the semantic mismatch for
+oracle-goal evaluation on the dev slice, but the improvement does not survive
+matched 3x500 validation. The mean oracle success `0.7107` is essentially tied
+with the current learned-high best's oracle matched score (`0.7100`) and below
+the earlier goal-NN79 oracle diagnostic (`0.7327`).
+
+The learned-high hierarchy result drops to `0.535`, which is expected because
+the learned high level still emits learned goals, not oracle branch goals.
+
+### Decision
+
+Keep `--branch-condition-goal-source oracle_goal` as the correct way to create
+explicit branch-goal banks, but do not promote this checkpoint. The result
+supports the next Experiment G conclusion: explicit branch goals are necessary,
+but this needs high-level/prototype training to emit those branch goals; simply
+adding a small oracle-goal branch bank to the existing low-level distillation is
+not enough.
+
+## Experiment G/H bridge: explicit-branch low level plus nearest oracle prototypes
+
+The explicit oracle-goal branch low level works only when supplied oracle-like
+goals. I tested whether the existing H4 nearest-oracle prototype projection can
+bridge that gap by replacing learned high-level predictions with nearest
+teacher-state prototypes at eval time.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --high-goal-projection nearest_oracle_bank \
+  --high-goal-bank-episodes 200 \
+  --high-goal-bank-seed-start 9800000 \
+  --high-goal-bank-num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_projected_200eps.json \
+  --force
+```
+
+### Results
+
+| checkpoint | high-goal projection | success | return | predicted-to-prototype MSE median | predicted-to-prototype MSE p90 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| explicit oracle-goal branch low level | none | 0.535 | 41.54 | n/a | n/a |
+| explicit oracle-goal branch low level | nearest oracle bank | 0.315 | 34.05 | 0.0396 | 0.3297 |
+| current learned-high best | none | 0.575 | 41.89 | n/a | n/a |
+
+Artifact:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_projected_200eps.json`
+
+### Interpretation
+
+Nearest-neighbor prototype projection remains harmful even with a low level
+distilled on explicit oracle branch goals. The selected prototypes are close in
+normalized privileged-state MSE, but replacing the continuous learned-high goal
+with a nearby teacher-state prototype changes the control semantics enough to
+collapse learned-high task success.
+
+### Decision
+
+Reject simple nearest-prototype bridging. The next high-level branch-goal path
+needs a trained selector/predictor over branch goals or prototype IDs with
+closed-loop outcome supervision; nearest geometry alone is not sufficient.
+
+## Oracle-low-level all-branch selector diagnostic
+
+The explicit oracle-goal branch bank above only kept branches with positive
+return deltas. To check whether the rejection filter itself was hiding useful
+selector structure, I collected the full oracle-low-level branch set with no
+minimum return-delta filter and ran an offline selector diagnostic over branch
+features and outcomes.
+
+### Artifacts
+
+- `data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_all_seed9940000_100eps_b4.npz`
+- `results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_oraclegoal_all_seed9940000_100eps_b4.json`
+- `results/hcl_next_phase1/privileged_z_oracle_low_level_oraclegoal_selector_offline_seed9940000_b4.json`
+
+### Full-branch bank summary
+
+| metric | value |
+| --- | ---: |
+| branches | 400 |
+| rows | 4000 |
+| mean success delta | 0.015 |
+| mean return delta | 1.524 |
+| median return delta | 0.0138 |
+| p90 return delta | 25.62 |
+| return-positive fraction, delta > 5 | 0.25 |
+| locally rejected branch success delta | 0.028 |
+| locally rejected median return delta | 0.109 |
+| locally rejected better-return fraction | 0.559 |
+
+### Offline selector results
+
+| selector | return-positive AUC | success-positive AUC | top100 return delta mean | top100 success delta mean |
+| --- | ---: | ---: | ---: | ---: |
+| ridge return-positive score | 0.5826 | n/a | 5.43 | -0.01 |
+| ridge success-positive score | n/a | 0.6865 | 5.78 | 0.15 |
+| local improvement | 0.450 | n/a | -1.22 | -0.02 |
+| negative action delta | 0.408 | n/a | 1.71 | n/a |
+| low base rollout return | 0.677 | n/a | 8.65 | 0.20 |
+
+The strongest simple signal is low base rollout return, not local action-space
+improvement. Selecting the 40 lowest-base-return branches gives mean return
+delta `16.40`, mean success delta `0.275`, and return-positive fraction `0.65`.
+
+### Interpretation
+
+The local held-goal MSE/action improvement signal is anti-correlated or weak for
+task-level outcome. The branch outcome label is most predictable from whether
+the current closed-loop state is already doing badly. This supports a selector
+that is explicitly conditioned on closed-loop failure states, but it also means
+the resulting data is narrow and likely to hurt learned-high behavior if used as
+a direct low-level replay target.
+
+## Oracle-low-level explicit-goal low-base-return top40 distillation
+
+I distilled the explicit oracle-goal low level using the 40 oracle-low-level
+branches selected by lowest base rollout return from the full branch bank.
+
+### Artifacts
+
+- `data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_low_base_return_top40_seed9940000_100eps_b4.npz`
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_low_base_return_top40_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_low_base_return_top40_imp01_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_oracle_oracle_low_level_oraclegoal_low_base_return_top40_imp01_200eps.json`
+
+### Selected branch bank
+
+| metric | value |
+| --- | ---: |
+| branches | 40 |
+| rows | 400 |
+| base return mean | 6.923 |
+| base return median | 6.656 |
+| base return min | 1.170 |
+| base return max | 17.403 |
+| return delta mean | 16.403 |
+| return delta median | 13.248 |
+| return delta min | -10.886 |
+| return delta max | 60.054 |
+| success delta mean | 0.275 |
+| return-positive fraction, delta > 5 | 0.65 |
+
+### Evaluation
+
+| mode | episodes | seed start | success | return |
+| --- | ---: | ---: | ---: | ---: |
+| hierarchy | 200 | 9900000 | 0.515 | 41.69 |
+| oracle_hierarchy | 200 | 9900000 | 0.725 | 47.04 |
+
+### Decision
+
+Reject the low-base-return top40 checkpoint. The selector does identify branches
+with strong oracle-goal outcome deltas, but direct replay distillation again
+hurts the learned-high hierarchy (`0.515` versus current best `0.575`). The
+oracle result is close to the explicit oracle-goal branch replay result but does
+not exceed the best oracle-goal diagnostic.
+
+The useful retained conclusion is narrower: low base rollout return is a good
+diagnostic selector for finding high-upside branch opportunities. It is not by
+itself a deployable low-level distillation recipe, because learned-high still
+does not emit the branch-goal distribution that made those actions useful.
+
+## Experiment H4: nearest explicit branch-goal projection
+
+After rejecting the generic nearest-oracle-bank projection, I added a more
+targeted projection mode for the explicit branch-goal setting:
+
+```bash
+--high-goal-projection nearest_branch_goal_bank
+--high-goal-branch-bank <branch_outcome_npz>
+```
+
+This mode loads branch-bank `conditions`, takes one row per branch, and projects
+each learned high-level goal to the stored branch goal with minimum average MSE
+over:
+
+```text
+current normalized privileged state
+learned high-level predicted goal
+```
+
+The intent was to test whether learned-high predictions can be bridged to the
+same explicit oracle-goal distribution used by the branch low level, without
+training a new high-level classifier.
+
+### Evaluations
+
+Both runs use the explicit oracle-goal branch low level:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+| branch projection bank | bank size | success | return | projected MSE median | projected MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| return-delta > 5 selected bank | 100 | 0.070 | 20.46 | 0.615 | 1.502 |
+| all oracle-low-level branches | 400 | 0.100 | 23.98 | 0.257 | 1.134 |
+| all oracle-low-level branches, state-only match | 400 | 0.050 | 18.96 | 0.318 | 1.889 |
+
+Artifacts:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_nearest_branch_goal_bank_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_nearest_branch_goal_bank_all400_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_nearest_branch_state_bank_all400_200eps.json`
+
+### Decision
+
+Reject nearest explicit branch-goal projection. Even the full 400-branch bank
+collapses learned-high success to `0.100`, far below the unprojected explicit
+branch low-level result (`0.535`) and the current learned-high best (`0.575`).
+Matching only on current state is worse (`0.050`), so the failure is not just
+the learned high-level goal contaminating the nearest-neighbor score.
+
+This rules out a simple non-parametric bridge from learned high-level regression
+outputs to sparse branch goals. The next high-level path should train a real
+selector/policy over candidate branch goals using closed-loop outcome labels, or
+collect a much denser branch bank before revisiting prototype selection.
+
+## Experiment H4 follow-up: denser explicit branch-goal bank
+
+To separate "nearest branch-goal projection is bad" from "the branch bank is too
+sparse", I collected a denser explicit oracle-goal branch bank on fresh seeds:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml \
+  eval-privileged-z-branch-outcomes \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --episodes 200 \
+  --seed-start 9950000 \
+  --num-envs 200 \
+  --branch-source oracle_low_level \
+  --branch-condition-goal-source oracle_goal \
+  --min-improvement-mse 0.0 \
+  --max-action-delta-l2 100.0 \
+  --max-branch-batches 10 \
+  --max-rollout-steps 120 \
+  --bank-output data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_all_seed9950000_200eps_b10.npz \
+  --output results/hcl_next_phase1/privileged_z_branch_outcome_oracle_low_level_oraclegoal_all_seed9950000_200eps_b10.json \
+  --force
+```
+
+The relaxed local filters make this a true all-branch bank for this source,
+rather than the earlier locally accepted subset.
+
+### Dense bank summary
+
+| metric | value |
+| --- | ---: |
+| branches | 2000 |
+| rows | 20000 |
+| base closed-loop success | 0.580 |
+| base closed-loop return | 43.57 |
+| mean success delta | 0.0195 |
+| mean return delta | -0.180 |
+| median return delta | 0.0 |
+| p90 return delta | 17.58 |
+| return delta > 5 branches | 328 |
+| return delta > 10 branches | 242 |
+| success-positive branches | 160 |
+| top-return100 mean return delta | 53.24 |
+| top-return100 mean success delta | 0.710 |
+
+I added `scripts/filter_privileged_z_branch_bank.py` to create filtered views of
+an existing branch-outcome NPZ without rerunning environment rollouts.
+
+Filtered artifacts:
+
+- `data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_return_delta_ge5_seed9950000_200eps_b10.npz`
+- `data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_top_return100_seed9950000_200eps_b10.npz`
+
+### Projection evaluations
+
+All runs use the explicit oracle-goal branch low level:
+
+- `artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+
+| branch projection bank | bank size | success | return | projected MSE median | projected MSE p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| sparse all bank, previous result | 400 | 0.100 | 23.98 | 0.257 | 1.134 |
+| dense all bank | 2000 | 0.285 | 32.54 | 0.126 | 0.716 |
+| dense return-delta >= 5 bank | 328 | 0.165 | 25.33 | 0.219 | 0.767 |
+| dense top-return100 bank | 100 | 0.040 | 18.94 | 0.648 | 1.507 |
+
+Artifacts:
+
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_nearest_branch_goal_bank_dense2000_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_nearest_branch_goal_bank_dense_return_ge5_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_nearest_branch_goal_bank_dense_top_return100_200eps.json`
+
+### Interpretation
+
+Denser coverage helps: median projection MSE drops from `0.257` to `0.126`, and
+success improves from `0.100` to `0.285`. But this remains far below the
+unprojected learned-high baseline (`0.535` for the explicit branch low level,
+`0.575` for the current best learned-high checkpoint).
+
+Outcome filtering does not make the non-parametric bridge deployable. The
+return-delta >= 5 bank is worse than the dense all-bank result, and the
+top-return100 bank collapses almost completely. High-upside branch goals are
+too sparse and state-specific to use as a nearest-neighbor target set.
+
+### Decision
+
+Reject nearest/prototype branch-goal projection even with a 2000-branch bank.
+The result is useful diagnostically: branch-bank density matters, but successful
+deployment needs a learned high-level selector/policy trained on branch outcomes
+or a much broader branch-data distribution. Filtering to only high-return
+branches makes coverage worse and is not a substitute for a selector.
+
+## Experiment H4/H5: learned branch-goal selector
+
+I implemented a learned branch-goal selector as the next step after rejecting
+nearest-only and outcome-filter-only projection.
+
+New artifacts/code:
+
+- `scripts/train_privileged_z_branch_selector.py`
+- `eval-privileged-z --high-goal-projection learned_branch_goal_selector`
+- `--high-goal-branch-selector <selector.pt>`
+
+The selector is a small MLP scorer. It scores candidate branch goals using:
+
+```text
+current normalized privileged state
+learned high-level predicted goal
+previous action
+candidate branch start state
+candidate branch goal
+candidate previous action
+state/goal/previous deltas and MSEs
+candidate outcome priors from the branch bank
+```
+
+Training pairs are sampled from the dense 2000-branch bank. The target rewards
+candidate return delta but penalizes state/goal mismatch:
+
+```text
+target = zscore(candidate_return_delta) - distance_penalty * pair_distance
+```
+
+This is a first learned selector over closed-loop branch outcome labels, not a
+full high-level RL policy.
+
+### Selector checkpoints
+
+| selector | distance penalty | validation MSE | final train MSE |
+| --- | ---: | ---: | ---: |
+| `hcl_next_dense2000_penalty1_seed0.pt` | 1 | 0.0078 | 0.0024 |
+| `hcl_next_dense2000_penalty5_seed0.pt` | 5 | 0.1468 | 0.0964 |
+| `hcl_next_dense2000_penalty10_seed0.pt` | 10 | 0.7155 | 0.8980 |
+| `hcl_next_dense2000_penalty20_seed0.pt` | 20 | 3.8361 | 5.3766 |
+
+### Closed-loop evaluation
+
+All runs use:
+
+- base hierarchy: `artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt`
+- branch low level: `artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt`
+- evaluation: 200 episodes, seed start `9900000`
+
+| high-goal selection | success | return | projected MSE median | projected MSE p90 |
+| --- | ---: | ---: | ---: | ---: |
+| dense nearest bank baseline | 0.285 | 32.54 | 0.126 | 0.716 |
+| learned selector, penalty 1 | 0.035 | 19.47 | 0.527 | 1.512 |
+| learned selector, penalty 5 | 0.135 | 24.79 | 0.226 | 0.884 |
+| learned selector, penalty 10 | 0.220 | 29.36 | 0.137 | 0.643 |
+| learned selector, penalty 20 | 0.250 | 31.13 | 0.083 | 0.522 |
+
+Artifacts:
+
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_dense2000_penalty1_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_dense2000_penalty5_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_dense2000_penalty10_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_dense2000_penalty20_seed0.pt`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_learned_branch_selector_dense2000_penalty1_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_learned_branch_selector_dense2000_penalty5_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_learned_branch_selector_dense2000_penalty10_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_hierarchy_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_learned_branch_selector_dense2000_penalty20_200eps.json`
+
+### Interpretation
+
+The learned selector confirms the previous diagnosis. If outcome weight is too
+strong, the selector chooses high-return but badly matched branch goals and task
+success collapses. Increasing the distance penalty improves closed-loop success
+monotonically in this sweep (`0.035 -> 0.250`) and reduces projection distance,
+but even penalty 20 remains below the dense nearest-bank baseline (`0.285`) and
+far below the unprojected learned-high baseline.
+
+The learned scorer is therefore not yet useful as a high-level replacement. Its
+best behavior is to approximate dense nearest-neighbor matching, which itself is
+not good enough.
+
+### Decision
+
+Reject this first learned branch-goal selector as a promotion candidate. Keep
+the implementation because it is now a reusable harness for branch-outcome
+selectors. The next selector should either:
+
+- train on actual counterfactual candidates evaluated for the same query state,
+  not synthetic pair labels built from each candidate's own rollout outcome; or
+- generate branch goals on-policy from the current learned-high state
+  distribution and then train a selector/policy from those query-specific
+  outcome labels.
+
+## Experiment H5: query-specific branch-goal counterfactuals
+
+The first learned branch-goal selector failed because each candidate carried its
+own rollout outcome from a different source state. I added a query-specific
+counterfactual collector:
+
+- `scripts/collect_privileged_z_branch_counterfactuals.py`
+
+For each learned-high replan state, the collector:
+
+1. predicts the current learned high-level goal;
+2. retrieves the nearest `k` candidate branch goals from the dense 2000-branch
+   bank;
+3. evaluates the base learned-high rollout from that exact simulator state;
+4. evaluates each candidate branch goal from the same simulator state, using the
+   explicit branch-goal low level for the first segment and then base learned
+   hierarchy continuation;
+5. saves query-specific return/success deltas.
+
+This directly measures the selector target that the previous synthetic selector
+was missing.
+
+### Counterfactual banks
+
+| bank | queries | candidates/query | base success | base return | nearest return delta | best-of-k return delta | positive best > 5 | best success delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `seed9960000_q64_k8` | 64 | 8 | 0.531 | 41.68 | -6.04 | 14.71 | 0.563 | 0.313 |
+| `seed9961000_q128_k8` | 128 | 8 | 0.445 | 41.32 | -4.19 | 14.63 | 0.523 | 0.328 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9960000_q64_k8.npz`
+- `data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9961000_q128_k8.npz`
+
+### Immediate diagnostics
+
+On the 64-query bank:
+
+| selector | return delta | success delta |
+| --- | ---: | ---: |
+| nearest candidate | -6.04 | -0.109 |
+| max source-return candidate | -6.63 | -0.109 |
+| oracle best-of-8 | 14.71 | 0.297 |
+
+The candidate's source-state branch return delta is essentially useless for the
+new query (`corr = -0.025` with query-specific return delta). Nearest distance
+is also weak (`corr = 0.079` for negative distance).
+
+### Offline query-specific selector
+
+I added a small offline trainer:
+
+- `scripts/train_privileged_z_counterfactual_selector.py`
+
+Training on the 128-query bank, split by query, gives:
+
+| split | learned selector return delta | learned selector success delta | nearest return delta | nearest success delta | oracle return delta | oracle success delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| train | 2.70 | 0.073 | -5.07 | -0.094 | 14.13 | 0.323 |
+| validation | 3.82 | 0.000 | -1.56 | 0.000 | 16.15 | 0.313 |
+
+Artifact:
+
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_seed0.pt`
+
+### Interpretation
+
+This is the clearest positive signal so far for the branch-goal direction:
+query-specific best-of-8 candidate goals have large upside from the exact
+learned-high states where nearest/prototype projection fails. The nearest
+candidate is negative on average, so the issue is not simply branch-bank
+coverage; it is candidate choice for the current query.
+
+The first query-specific learned selector improves over nearest on held-out
+queries (`+3.82` return delta versus `-1.56`), but captures only a small part of
+the oracle best-of-8 upside (`+16.15`). This is not yet deployable, but it
+validates the next direction: collect more query-specific counterfactual labels
+and train/evaluate a selector from those labels, rather than using candidate
+source outcomes or nearest geometry.
+
+### Decision
+
+Do not promote a closed-loop selector yet. Keep the counterfactual collector and
+offline selector trainer as the next experimental harness. The next useful run
+is a larger query-specific bank, then either:
+
+- train a selector that can be plugged into `eval-privileged-z`, or
+- collect on-policy candidate sets from the selector itself and iterate.
+
+## Experiment H5 follow-up: larger counterfactual bank and grouped selector loss
+
+I expanded the query-specific counterfactual bank and made the offline selector
+artifact more deployment-oriented. `scripts/train_privileged_z_counterfactual_selector.py`
+now stores the source checkpoint, tuned checkpoint, branch-bank path, rollout
+settings, and baseline selection metrics in the selector checkpoint. I also
+added a grouped best-candidate classification objective:
+
+```bash
+--loss best_ce
+```
+
+This trains the model to choose the candidate with maximum query-specific return
+delta from the candidate set, instead of regressing return delta independently
+for every candidate.
+
+### Larger counterfactual bank
+
+```bash
+uv run scripts/collect_privileged_z_branch_counterfactuals.py \
+  --config configs/pusht_incremental.yaml \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --branch-bank data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_all_seed9950000_200eps_b10.npz \
+  --output data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9962000_q256_k8.npz \
+  --seed-start 9962000 \
+  --num-envs 64 \
+  --query-batches 4 \
+  --candidates-per-query 8 \
+  --max-rollout-steps 120
+```
+
+| bank | queries | candidates/query | base success | base return | nearest return delta | nearest success delta | oracle return delta | oracle success delta | positive best > 5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `seed9962000_q256_k8` | 256 | 8 | 0.445 | 44.07 | -0.531 | 0.004 | 13.03 | 0.219 | 0.469 |
+
+Artifact:
+
+- `data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9962000_q256_k8.npz`
+
+The larger bank preserves the important conclusion: the candidate set contains
+large query-specific upside, but nearest selection still does not extract it.
+
+### Selector objectives on q256/k8
+
+| selector objective | validation selected return delta | validation selected success delta | validation nearest return delta | validation source-return-argmax return delta | validation oracle return delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| return regression (`mse`) | 0.118 | 0.031 | -0.151 | -1.666 | 13.07 |
+| grouped best-candidate CE (`best_ce`) | -3.941 | -0.063 | -0.151 | -1.666 | 13.07 |
+
+Artifacts:
+
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_bestce_seed0.pt`
+
+### Interpretation
+
+More query-specific data did not make the simple selector deployable. Return
+regression remains slightly better than nearest on validation, but only by a
+small amount (`+0.118` versus `-0.151`) and far below the oracle candidate-set
+upper bound (`+13.07`). The grouped CE objective is worse, likely because the
+best candidate label is too noisy/discontinuous for a small dataset and the
+available features.
+
+This narrows the next branch-goal selector direction: the problem is not just
+the loss function. The selector probably needs either more query coverage, a
+better candidate-generation distribution, or richer features from actual
+candidate rollout prefixes/final states. The current static features
+`(query, candidate goal, source outcome)` are not sufficient to recover the
+best candidate.
+
+### Decision
+
+Keep the counterfactual collector and selector scripts, but do not spend more
+time on small static-feature selector losses. The next useful experiment should
+change the data/modeling problem, for example:
+
+- collect candidate rollout prefix/final-state features for each query;
+- train a selector on the actual local candidate outcome after the first
+  segment, not only branch-goal identity;
+- or move back to reachability/effect-latent experiments now that the
+  privileged branch-goal path has exposed its current bottleneck.
+
+## Effect32 FiLM D_phi R3 fresh-seed confirmation
+
+After the branch-goal selector bottleneck, I returned to the real-compatible
+effect/reachability path. Existing 300-episode effect32 D_phi evals on
+`seed_start=3400000` showed only a small margin:
+
+| policy | 300-episode success | max reward | raw local reduction | reach rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.633 | 0.740 | 0.390 | 0.735 |
+| R1 terminal smoke 40k | 0.650 | 0.749 | 0.367 | 0.716 |
+| R3 terminal smoke 40k bc10 | 0.643 | 0.746 | 0.397 | 0.739 |
+
+I first tried to run frozen/R1/R3 500-episode confirmation evals in parallel on
+fresh `seed_start=3500000`, but effect-code evals repeatedly encode image
+features and the parallel jobs contended heavily. I interrupted those jobs and
+reran serially.
+
+### Fresh 200-episode check
+
+| policy | success | max reward | raw local reduction | reach rate | terminal AUC |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.655 | 0.756 | 0.447 | 0.726 | 0.804 |
+| R1 terminal smoke 40k | 0.655 | 0.755 | 0.396 | 0.726 | 0.832 |
+| R3 terminal smoke 40k bc10 | 0.675 | 0.766 | 0.389 | 0.728 | 0.800 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final200_seed3500000/eval_200_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r1_4096_terminal_smoke_40k_final200_seed3500000/eval_200_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final200_seed3500000/eval_200_seed3500000.json`
+
+### Fresh 500-episode confirmation
+
+The R1 run tied frozen on the fresh 200-episode check, so I spent the larger
+confirmation budget on frozen versus the R3 bc10 candidate.
+
+| policy | checkpoint | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | none | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.000 |
+| R3 terminal smoke 40k bc10 | `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt` | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | small direct update |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3500000/eval_500_seed3500000.json`
+
+### Decision
+
+Promote:
+
+`artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt`
+
+as the current best real-compatible effect-latent local RL checkpoint. Unlike
+the earlier R1 effect result, this fresh 500-episode confirmation shows a clear
+task improvement over frozen:
+
+```text
+R3 effect32 D_phi final success: 0.684
+frozen effect32 final success:   0.634
+```
+
+The improvement also comes with better max reward, raw local reduction, and
+reach rate. This is now the strongest evidence that the learned
+effect/reachability path can improve a supervised hierarchy without privileged
+state at deployment. The next useful step is to compare this checkpoint against
+the supervised learned/oracle/shuffled effect32 baselines on matched final seeds
+and then investigate why the R3 40k recipe works better than the longer R1 dev
+runs.
+
+## Effect32 FiLM matched supervised baseline comparison
+
+I added `--eval-seed-start` to `learned-interface-eval` so learned/oracle/shuffled
+supervised hierarchy baselines can be run on the same seed range as low-level
+RL confirmations. When a custom seed is supplied, the output filename includes
+the seed start to avoid overwriting default-seed results.
+
+### Command template
+
+```bash
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film \
+  --goal-source learned|oracle|shuffled \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+```
+
+### Matched fresh-seed supervised baselines
+
+| evaluator | policy / goal source | episodes | seed start | success | max reward | final reward |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| learned-interface | learned | 200 | 3500000 | 0.645 | 0.742 | 0.735 |
+| learned-interface | oracle | 200 | 3500000 | 0.645 | 0.746 | 0.740 |
+| learned-interface | shuffled | 200 | 3500000 | 0.280 | 0.460 | 0.425 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film/seed0/shuffled_hierarchy_eval_200_seed3500000.json`
+
+The shuffled ablation still confirms strong closed-loop goal dependence on this
+fresh seed bank (`0.645 -> 0.280`). Oracle goals do not improve success over
+learned goals on this seed range, but do slightly improve reward and teacher
+MAE.
+
+### RL comparison on same seed range
+
+The promoted RL checkpoint is evaluated through the low-level RL evaluator, not
+the learned-interface evaluator, so the comparison is not a byte-identical code
+path. The frozen low-level eval gives a close supervised reference on the same
+wrapper:
+
+| evaluator | policy | episodes | seed start | success | max reward | raw local reduction | reach rate |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| low-level-rl | frozen effect32_film | 500 | 3500000 | 0.634 | 0.738 | 0.397 | 0.718 |
+| low-level-rl | R3 effect32 D_phi bc10 | 500 | 3500000 | 0.684 | 0.773 | 0.410 | 0.731 |
+
+### Interpretation
+
+The promoted R3 effect32 D_phi checkpoint improves over the frozen low-level
+reference by `+0.050` success on 500 fresh episodes. It also sits above the
+200-episode learned-interface learned/oracle baselines on the same seed start
+(`0.684` versus `0.645`), though that cross-evaluator comparison should be
+treated as secondary evidence.
+
+The main conclusion is robust enough for the current proof of concept:
+effect32_film remains goal-dependent in closed loop, and the D_phi R3 update
+can improve task performance without privileged deployment state.
+
+### Decision
+
+Keep `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt`
+as the current best real-compatible RL checkpoint. The next technical question
+is no longer whether effect32 D_phi can produce a positive result; it is why the
+short R3 bc10 recipe works while longer R1 runs do not. Useful next checks:
+
+- inspect train curves/checkpoint selection for the R3 bc10 run;
+- run a matched R3 bc10 repeat with a different seed or slightly longer budget;
+- compare R3 direct action deltas against R1 residual deltas to see whether R1
+  is under-moving or moving in the wrong local directions.
+
+## Effect32 FiLM R3 200k continuation diagnostic
+
+I ran a direct follow-up to test whether the promoted short R3 recipe keeps
+improving when trained for the same 200k-step budget used by the longer R1 dev
+runs.
+
+### Command
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10 \
+  --steps 204800 \
+  --num-envs 4096 \
+  --rollout-steps 10 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --bc-weight 10 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --force
+```
+
+The train curve improved its own terminal-distance selection objective by the
+final update:
+
+| step | train terminal D_phi distance | direct delta L2 | BC loss | action saturation |
+| ---: | ---: | ---: | ---: | ---: |
+| 40960 | 0.576 | 0.0293 | 0.000001 | 0.259 |
+| 81920 | 0.612 | 0.0293 | 0.000001 | 0.094 |
+| 122880 | 0.636 | 0.0292 | 0.000001 | 0.008 |
+| 163840 | 0.584 | 0.0293 | 0.000003 | 0.006 |
+| 204800 | 0.557 | 0.0292 | 0.000002 | 0.002 |
+
+Then I evaluated the selected best checkpoint on the same fresh 500-episode
+seed bank used for the promoted 40k checkpoint:
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_final500_seed3500000 \
+  --episodes 500 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10/best_train_latent.pt \
+  --distance-metric reachability \
+  --force
+```
+
+### Matched 500-episode result
+
+| policy | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.0000 |
+| R3 terminal smoke 40k bc10 | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | 0.0010 |
+| R3 terminal dev 200k bc10 | 0.656 | 0.753 | 0.418 | 0.723 | 0.793 | 0.0026 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_final500_seed3500000/eval_500_seed3500000.json`
+
+### Interpretation
+
+The 200k R3 run remains better than frozen, but it gives back most of the
+40k task-success gain (`0.684 -> 0.656`) even while its train terminal D_phi
+distance improves (`0.576 -> 0.557`). That means the current train-selection
+proxy is not aligned well enough with full-task success for long PPO runs.
+
+The useful result is the 40k update, not the longer checkpoint. The direct R3
+method can produce a small but real improvement, but further training appears
+to over-optimize the local reachability proxy. For the next stage, keep the
+40k checkpoint promoted and prefer either:
+
+- early stopping/checkpoint selection by held-out rollout success or reward,
+  not train terminal D_phi distance; or
+- a different reachability objective that includes task-relevant local progress
+  rather than only terminal latent distance.
+
+## Effect32 FiLM R3 checkpoint-selection audit
+
+Because the 200k R3 run saved update checkpoints, I evaluated each checkpoint
+on a cheap 100-episode held-out bank to test whether held-out task success
+would select a better checkpoint than train terminal D_phi distance.
+
+### 100-episode sweep, seed start 3400000
+
+| checkpoint step | train terminal D_phi | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 40960 | 0.576 | 0.630 | 0.739 | 0.374 | 0.709 | 0.814 | 0.0009 |
+| 81920 | 0.612 | 0.660 | 0.757 | 0.427 | 0.720 | 0.775 | 0.0015 |
+| 122880 | 0.636 | 0.610 | 0.720 | 0.411 | 0.733 | 0.822 | 0.0016 |
+| 163840 | 0.584 | 0.690 | 0.779 | 0.386 | 0.722 | 0.818 | 0.0020 |
+| 204800 | 0.557 | 0.600 | 0.718 | 0.427 | 0.728 | 0.792 | 0.0027 |
+
+The 100-episode held-out sweep would have selected the 163840-step checkpoint.
+I therefore ran a 500-episode confirmation on the same fresh seed bank used for
+the promoted checkpoint.
+
+### 500-episode confirmation, seed start 3500000
+
+| policy | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.0000 |
+| R3 terminal smoke 40k bc10 | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | 0.0010 |
+| R3 dev 200k step163840 | 0.626 | 0.734 | 0.421 | 0.722 | 0.799 | 0.0020 |
+| R3 dev 200k best-train/final | 0.656 | 0.753 | 0.418 | 0.723 | 0.793 | 0.0026 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_step000040960_eval100_seed3400000/eval_100_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_step000081920_eval100_seed3400000/eval_100_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_step000122880_eval100_seed3400000/eval_100_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_step000163840_eval100_seed3400000/eval_100_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_step000204800_eval100_seed3400000/eval_100_seed3400000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_dev_200k_bc10_step163840_final500_seed3500000/eval_500_seed3500000.json`
+
+### Interpretation
+
+The 100-episode held-out sweep is too noisy for reliable checkpoint selection:
+it selected step 163840 at `0.690` success, but that checkpoint fell to
+`0.626` on the 500-episode fresh bank. The final 200k train-selected checkpoint
+is still above frozen on the 500-episode bank, but it remains weaker than the
+original 40k promoted checkpoint.
+
+Decision remains unchanged: keep the 40k R3 bc10 checkpoint promoted. The
+checkpoint-selection lesson is sharper now: if early stopping is added to the
+training loop, the held-out bank must be large enough to avoid selecting noise.
+For this setup, 100 episodes is not enough; 500 episodes was the first bank
+that clearly separated the promoted 40k checkpoint from later R3 checkpoints.
+
+## Effect32 FiLM R3 dense-progress reward check
+
+The 200k continuation showed that improving terminal `D_phi` distance does not
+necessarily improve task success. I ran one short reward-alignment check: keep
+the promoted R3 direct-last-layer recipe, but add dense `D_phi` progress reward
+back on top of the terminal segment-end penalty.
+
+### Command
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_progress_smoke_40k_bc10 \
+  --steps 40960 \
+  --num-envs 4096 \
+  --rollout-steps 10 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --bc-weight 10 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 1.0 \
+  --distance-metric reachability \
+  --force
+```
+
+The single train row was nearly identical to the terminal-only 40k run in
+distance/action terms, but the reward scale changed because the dense progress
+term was active:
+
+| mean reward | terminal D_phi distance | direct delta L2 | BC loss | action saturation |
+| ---: | ---: | ---: | ---: | ---: |
+| -0.0363 | 0.5757 | 0.0293 | 0.000001 | 0.259 |
+
+### Matched 500-episode result
+
+| policy | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.0000 |
+| R3 terminal-only 40k bc10 | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | 0.0010 |
+| R3 terminal+progress 40k bc10 | 0.662 | 0.754 | 0.410 | 0.713 | 0.787 | 0.0010 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_progress_smoke_40k_bc10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_progress_smoke_40k_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_progress_smoke_40k_bc10_final500_seed3500000/eval_500_seed3500000.json`
+
+### Interpretation
+
+Adding dense `D_phi` progress did not recover the terminal-only 40k result. It
+still beats frozen on the matched 500-episode bank (`0.662` versus `0.634`), but
+it is weaker than terminal-only (`0.684`). The raw local distance reduction is
+similar, while reach rate and terminal AUC are lower.
+
+This supports the earlier suspicion that dense learned-metric progress can
+reward local metric artifacts that are not task-useful. For effect32 R3, the
+best short recipe remains terminal-only `D_phi` with a strong BC anchor.
+
+## Effect32 FiLM R3 PPO-seed robustness check
+
+The promoted R3 result used the same frozen effect32 hierarchy seed and the
+default low-level PPO seed. To test whether the 40k terminal-only gain is
+robust to PPO initialization and train rollout seeds, I added a separate
+`--rl-seed-offset` option to low-level R1/R3 training. The default remains
+`0`, so existing recipes are unchanged. The offset is recorded in the
+checkpoint recipe and shifts both:
+
+- the PyTorch/NumPy/random seed used for PPO initialization;
+- the vectorized training environment seed window.
+
+### Repeat commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --rl-seed-offset 1 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed1 \
+  --steps 40960 \
+  --num-envs 4096 \
+  --rollout-steps 10 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --bc-weight 10 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --force
+```
+
+The same command was repeated with `--rl-seed-offset 2` and run name
+`hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed2`.
+
+### Matched 500-episode result
+
+All checkpoints were evaluated on the same fresh seed bank:
+`episodes=500`, `seed_start=3500000`.
+
+| policy | PPO seed offset | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | n/a | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.0000 |
+| R3 terminal-only 40k bc10 | 0 | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | 0.0010 |
+| R3 terminal-only 40k bc10 | 1 | 0.662 | 0.753 | 0.394 | 0.706 | 0.794 | 0.0011 |
+| R3 terminal-only 40k bc10 | 2 | 0.610 | 0.719 | 0.402 | 0.711 | 0.806 | 0.0008 |
+
+Across the three PPO seeds:
+
+| metric | value |
+| --- | ---: |
+| mean success | 0.652 |
+| min success | 0.610 |
+| max success | 0.684 |
+| frozen success | 0.634 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed1/best_train_latent.pt`
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed2/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed1_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed2_final500_seed3500000/eval_500_seed3500000.json`
+
+### Interpretation
+
+The effect32 R3 terminal-only recipe is promising but not yet robust. The
+three-seed mean is above frozen (`0.652` versus `0.634`), and two of three PPO
+seeds beat frozen, but the third seed falls below frozen (`0.610`). This means
+the original `0.684` should be treated as the best observed checkpoint, not as a
+stable expected improvement.
+
+Decision:
+
+- keep `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt`
+  as the best real-compatible checkpoint;
+- do not claim the recipe is robust yet;
+- next improvement should target variance reduction or stronger selection, for
+  example evaluating multiple short PPO seeds and promoting by a sufficiently
+  large held-out bank, or adding a better local/task-aligned selection signal.
