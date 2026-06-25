@@ -1505,6 +1505,47 @@ def _encode_rerun_frames(frozen: Any, frames: np.ndarray, device: torch.device) 
     )
 
 
+def _summarize_float_array(values: np.ndarray) -> dict[str, float]:
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        raise ValueError("Cannot summarize an empty array")
+    return {
+        "mean": float(np.mean(values)),
+        "median": float(np.median(values)),
+        "p90": float(np.quantile(values, 0.9)),
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+    }
+
+
+def _nearest_l2_distances(
+    queries: np.ndarray,
+    bank: np.ndarray,
+    *,
+    exclude_self: bool = False,
+    chunk_size: int = 512,
+) -> np.ndarray:
+    if queries.ndim != 2 or bank.ndim != 2:
+        raise ValueError("queries and bank must be rank-2 arrays")
+    if queries.shape[1] != bank.shape[1]:
+        raise ValueError("queries and bank dimensions do not match")
+    if bank.shape[0] == 0:
+        raise ValueError("nearest-neighbor bank is empty")
+    distances: list[np.ndarray] = []
+    bank_f32 = bank.astype(np.float32)
+    for start in range(0, len(queries), chunk_size):
+        chunk = queries[start : start + chunk_size].astype(np.float32)
+        diff = chunk[:, None, :] - bank_f32[None, :, :]
+        squared = np.sum(diff * diff, axis=-1)
+        if exclude_self:
+            row_count = squared.shape[0]
+            col_indices = np.arange(start, start + row_count)
+            valid = col_indices < squared.shape[1]
+            squared[np.arange(row_count)[valid], col_indices[valid]] = np.inf
+        distances.append(np.sqrt(np.min(squared, axis=1)).astype(np.float32))
+    return np.concatenate(distances, axis=0)
+
+
 def _local_condition_dim(frozen: Any) -> int:
     goal_features = 2 * frozen.goal_dim if frozen.conditioning == "relation" else frozen.goal_dim
     return int(frozen.frame_dim + goal_features + 4)
@@ -3458,6 +3499,194 @@ def evaluate_rl_rerun_local_r3(
         manifest_path=manifest_path,
         output_path=output_path,
     )
+
+
+@torch.inference_mode()
+def evaluate_rl_rerun_learned_goal_validity(
+    config: Config,
+    dataset_path: Path | None = None,
+    n_demo: int = 500,
+    seed: int = 0,
+    samples: int = 4096,
+    sample_seed: int = 0,
+    horizon: int | None = None,
+    output_path: Path | None = None,
+) -> Path:
+    from hcl_poc.learned_interface import _low_condition_array
+    from hcl_poc.low_level_rl import _load_frozen
+
+    if samples <= 0:
+        raise ValueError("samples must be positive")
+    path = dataset_path or _vector_dataset_path(config)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    device = default_device()
+    rerun_config = _rerun_base_config(config, path)
+    frozen = _load_frozen(rerun_config, n_demo, seed, device)
+    horizon_steps = int(frozen.horizon_steps if horizon is None else horizon)
+    if horizon_steps <= 0:
+        raise ValueError("horizon must be positive")
+
+    current_frames: list[np.ndarray] = []
+    future_frames: list[np.ndarray] = []
+    previous_actions: list[np.ndarray] = []
+    sampled_entries: list[dict[str, Any]] = []
+    with h5py.File(path, "r") as h5:
+        max_steps = int(h5["meta"].attrs["max_steps"])
+        num_envs = int(h5["meta"].attrs["num_envs"])
+        if horizon_steps > max_steps:
+            raise ValueError(
+                f"horizon {horizon_steps} exceeds dataset max_steps {max_steps}"
+            )
+        batch_keys = sorted(key for key in h5.keys() if key.startswith("batch_"))
+        if not batch_keys:
+            raise ValueError(f"No vector batches found in {path}")
+        rng = np.random.default_rng(sample_seed)
+        entries_needed = int(np.ceil(samples / num_envs))
+        for _ in range(entries_needed):
+            key = str(rng.choice(batch_keys))
+            timestep = int(rng.integers(0, max_steps - horizon_steps + 1))
+            group = h5[key]
+            current_frames.append(
+                np.concatenate(
+                    [
+                        np.asarray(group["dino"][timestep], dtype=np.float32),
+                        np.asarray(group["proprio"][timestep], dtype=np.float32),
+                    ],
+                    axis=-1,
+                )
+            )
+            future_frames.append(
+                np.concatenate(
+                    [
+                        np.asarray(group["dino"][timestep + horizon_steps], dtype=np.float32),
+                        np.asarray(
+                            group["proprio"][timestep + horizon_steps],
+                            dtype=np.float32,
+                        ),
+                    ],
+                    axis=-1,
+                )
+            )
+            previous_actions.append(
+                np.asarray(
+                    group["previous_executed_actions"][timestep],
+                    dtype=np.float32,
+                )
+            )
+            sampled_entries.append({"batch": key, "timestep": timestep})
+
+    current = np.concatenate(current_frames, axis=0)[:samples].astype(np.float32)
+    future = np.concatenate(future_frames, axis=0)[:samples].astype(np.float32)
+    previous_raw = np.concatenate(previous_actions, axis=0)[:samples].astype(np.float32)
+
+    def encode_all(frames: np.ndarray) -> np.ndarray:
+        encoded: list[np.ndarray] = []
+        for start in range(0, len(frames), 2048):
+            encoded.append(_encode_rerun_frames(frozen, frames[start : start + 2048], device))
+        return np.concatenate(encoded, axis=0).astype(np.float32)
+
+    normalized_current = frozen.frame_norm.transform(current)
+    previous = frozen.action_norm.transform(previous_raw)
+    current_goal = encode_all(current)
+    replay_goal = encode_all(future)
+    high_condition = np.concatenate([normalized_current, previous], axis=-1)
+    predicted_goal = (
+        frozen.high_model(torch.from_numpy(high_condition).to(device).float())
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    remaining = np.ones((len(current), 1), dtype=np.float32)
+    predicted_condition = _low_condition_array(
+        normalized_current,
+        current_goal,
+        predicted_goal,
+        previous,
+        remaining,
+        frozen.conditioning,
+    )
+    replay_condition = _low_condition_array(
+        normalized_current,
+        current_goal,
+        replay_goal,
+        previous,
+        remaining,
+        frozen.conditioning,
+    )
+    predicted_action = frozen.action_norm.inverse(
+        frozen.low_model(torch.from_numpy(predicted_condition).to(device).float())
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    replay_action = frozen.action_norm.inverse(
+        frozen.low_model(torch.from_numpy(replay_condition).to(device).float())
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+
+    rng = np.random.default_rng(sample_seed + 1)
+    random_goal = rng.standard_normal(size=replay_goal.shape).astype(np.float32)
+    shuffled_goal = replay_goal[rng.permutation(len(replay_goal))]
+    predicted_to_replay = np.linalg.norm(predicted_goal - replay_goal, axis=-1)
+    current_to_predicted = np.linalg.norm(predicted_goal - current_goal, axis=-1)
+    current_to_replay = np.linalg.norm(replay_goal - current_goal, axis=-1)
+    shuffled_to_replay = np.linalg.norm(shuffled_goal - replay_goal, axis=-1)
+    predicted_nearest = _nearest_l2_distances(predicted_goal, replay_goal)
+    replay_nearest = _nearest_l2_distances(
+        replay_goal,
+        replay_goal,
+        exclude_self=len(replay_goal) > 1,
+    )
+    random_nearest = _nearest_l2_distances(random_goal, replay_goal)
+    action_delta = np.linalg.norm(predicted_action - replay_action, axis=-1)
+
+    result = {
+        "method": "rl_rerun_learned_goal_validity",
+        "git": _git_metadata(),
+        "dataset": str(path),
+        "frozen_checkpoint": str(frozen.checkpoint_path),
+        "n_demo": int(n_demo),
+        "seed": int(seed),
+        "samples": int(len(current)),
+        "sample_seed": int(sample_seed),
+        "horizon": int(horizon_steps),
+        "sampled_entries": sampled_entries,
+        "current_to_predicted_goal_l2": _summarize_float_array(current_to_predicted),
+        "current_to_replay_goal_l2": _summarize_float_array(current_to_replay),
+        "predicted_to_replay_goal_l2": _summarize_float_array(predicted_to_replay),
+        "shuffled_replay_to_matching_replay_goal_l2": _summarize_float_array(
+            shuffled_to_replay
+        ),
+        "predicted_goal_nearest_replay_l2": _summarize_float_array(predicted_nearest),
+        "replay_goal_leave_one_out_nearest_l2": _summarize_float_array(replay_nearest),
+        "random_goal_nearest_replay_l2": _summarize_float_array(random_nearest),
+        "predicted_vs_replay_low_action_l2": _summarize_float_array(action_delta),
+        "predicted_nn_over_replay_nn_mean_ratio": float(
+            np.mean(predicted_nearest) / max(np.mean(replay_nearest), 1e-8)
+        ),
+        "predicted_to_replay_over_shuffled_mean_ratio": float(
+            np.mean(predicted_to_replay) / max(np.mean(shuffled_to_replay), 1e-8)
+        ),
+    }
+    default_name = (
+        f"learned_goal_validity_n{n_demo}_seed{seed}"
+        f"_samples{len(current)}_sample{sample_seed}.json"
+    )
+    out_path = output_path or (
+        _state_audit_result_dir(config)
+        / "goal_validity"
+        / default_name
+    )
+    ensure_dir(out_path.parent)
+    write_json(out_path, result)
+    return out_path
 
 
 @torch.inference_mode()

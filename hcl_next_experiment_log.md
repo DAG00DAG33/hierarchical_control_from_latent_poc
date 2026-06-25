@@ -10315,6 +10315,76 @@ behind the learned high-level goal distribution. The next experiment should
 therefore change the goal regime or train for robustness to learned-goal error,
 rather than continue scalar fallback gates for the current learned-goal policy.
 
+## 2026-06-26 - Learned-latent goal-manifold validity diagnostic
+
+I added an offline `rl-rerun` diagnostic command:
+
+```text
+uv run hcl-poc rl-rerun eval-learned-goal-validity
+```
+
+It samples local decisions from the vector validation dataset, compares the
+high-level predicted latent goal to the replay future-goal latent, and reports
+nearest-neighbor distance to the replay future-goal bank. It also measures how
+much the frozen low-level action changes when the goal is swapped from predicted
+to replay future.
+
+Full validation command:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-learned-goal-validity \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 4096 \
+  --sample-seed 4630000 \
+  --output results/rl_rerun/goal_validity/learned_goal_validity_n500_seed0_samples4096_sample4630000.json
+```
+
+Results:
+
+| metric | mean | median | p90 |
+| --- | ---: | ---: | ---: |
+| current to predicted goal L2 | 24.0533 | 23.4380 | 32.5118 |
+| current to replay goal L2 | 23.6467 | 23.3056 | 32.3340 |
+| predicted to replay goal L2 | 19.8424 | 19.1047 | 25.5270 |
+| shuffled replay to matching replay L2 | 27.8451 | 27.5906 | 34.1877 |
+| predicted nearest replay-goal L2 | 15.6886 | 15.1471 | 20.0201 |
+| replay leave-one-out nearest replay-goal L2 | 14.2781 | 13.6449 | 18.7135 |
+| random nearest replay-goal L2 | 25.2707 | 25.2723 | 26.1552 |
+| predicted-vs-replay low-action L2 | 0.0109 | 0.0083 | 0.0198 |
+
+Two summary ratios:
+
+| ratio | value |
+| --- | ---: |
+| predicted nearest replay / replay leave-one-out nearest | 1.099 |
+| predicted-to-replay / shuffled-to-replay | 0.713 |
+
+Artifacts:
+
+- `results/rl_rerun/goal_validity/learned_goal_validity_n500_seed0_samples256_sample4630000.json`
+- `results/rl_rerun/goal_validity/learned_goal_validity_n500_seed0_samples4096_sample4630000.json`
+
+Interpretation:
+
+The high-level predicted goals are not obviously random or severely
+off-manifold in this VAE512 latent space. Their nearest replay-goal distance is
+only about `10%` worse than replay leave-one-out nearest-neighbor distance, and
+much better than random Gaussian goals. The predicted goals are also closer to
+their matched replay future than shuffled replay futures are.
+
+The weak point is still control sensitivity: replacing the predicted goal with
+the replay future goal changes the frozen low-level action by only `0.0109` L2
+on average. This supports a narrower interpretation of Experiment H for this
+checkpoint: high-level goal validity is not the dominant failure by a simple
+manifold-distance test. The low-level policy remains too insensitive to
+meaningful goal swaps, so the next representation/architecture work should
+emphasize goal-conditioned control sensitivity, not just high-level validity
+penalties.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:

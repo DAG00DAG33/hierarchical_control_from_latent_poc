@@ -524,6 +524,24 @@ with a two-window mean delta of `-0.028` success and `-0.0175` max reward. For
 this branch, the next useful target is high-level goal validity or robustness to
 learned-goal errors, not another scalar action gate.
 
+I added `eval-learned-goal-validity` to test the simplest high-level
+off-manifold hypothesis on the `N=500` VAE512 learned-latent hierarchy. On 4096
+sampled validation decisions, predicted goals were fairly close to the replay
+future-goal manifold:
+
+| metric | mean |
+| --- | ---: |
+| predicted nearest replay-goal L2 | 15.689 |
+| replay leave-one-out nearest replay-goal L2 | 14.278 |
+| random nearest replay-goal L2 | 25.271 |
+| predicted-to-replay goal L2 | 19.842 |
+| shuffled-to-replay goal L2 | 27.845 |
+| predicted-vs-replay low-action L2 | 0.0109 |
+
+So the learned high-level goals are not obviously random/off-manifold by this
+nearest-neighbor test. The low-level remains the sharper failure: even a large
+predicted-vs-replay goal difference causes only a tiny action change.
+
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.
 On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance

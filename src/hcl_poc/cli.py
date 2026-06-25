@@ -145,6 +145,7 @@ from hcl_poc.rl_rerun import (
     evaluate_rl_rerun_closed_loop_r1,
     evaluate_rl_rerun_closed_loop_r2,
     evaluate_rl_rerun_closed_loop_r3,
+    evaluate_rl_rerun_learned_goal_validity,
     evaluate_rl_rerun_local_r1,
     evaluate_rl_rerun_local_r2,
     evaluate_rl_rerun_local_r3,
@@ -635,6 +636,19 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 action_delta_gate_min=args.action_delta_gate_min,
                 goal_l2_gate_min=args.goal_l2_gate_min,
                 diagnose_oracle_goals=args.diagnose_oracle_goals,
+                output_path=Path(args.output) if args.output else None,
+            )
+        )
+    elif args.rl_rerun_command == "eval-learned-goal-validity":
+        console.print(
+            evaluate_rl_rerun_learned_goal_validity(
+                config,
+                dataset_path=Path(args.dataset) if args.dataset else None,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                samples=args.samples,
+                sample_seed=args.sample_seed,
+                horizon=args.horizon,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -2335,6 +2349,21 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r3.add_argument("--diagnose-oracle-goals", action="store_true")
     eval_closed_loop_r3.add_argument("--output")
     eval_closed_loop_r3.set_defaults(func=rl_rerun_cmd)
+    eval_learned_goal_validity = rl_rerun_sub.add_parser(
+        "eval-learned-goal-validity"
+    )
+    eval_learned_goal_validity.add_argument("--dataset")
+    eval_learned_goal_validity.add_argument(
+        "--n-demo", type=int, choices=[500, 1000], default=500
+    )
+    eval_learned_goal_validity.add_argument(
+        "--seed", type=int, choices=[0, 1, 2], default=0
+    )
+    eval_learned_goal_validity.add_argument("--samples", type=int, default=4096)
+    eval_learned_goal_validity.add_argument("--sample-seed", type=int, default=0)
+    eval_learned_goal_validity.add_argument("--horizon", type=int)
+    eval_learned_goal_validity.add_argument("--output")
+    eval_learned_goal_validity.set_defaults(func=rl_rerun_cmd)
     record_rerun_videos = rl_rerun_sub.add_parser("record-videos")
     record_rerun_videos.add_argument("--checkpoint", required=True)
     record_rerun_videos.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)
