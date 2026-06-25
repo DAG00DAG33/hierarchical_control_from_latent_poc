@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import copy
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -336,6 +337,60 @@ def _binary_auc(scores: np.ndarray, labels: np.ndarray) -> float | None:
             + 0.5 * (positives[:, None] == negatives[None, :]).mean()
         )
     )
+
+
+def compare_serial_low_level_eval(
+    base_json: Path,
+    candidate_json: Path,
+    output: Path | None = None,
+    force: bool = False,
+) -> Path:
+    output = output or candidate_json.with_name(
+        f"{candidate_json.stem}_vs_{base_json.stem}.json"
+    )
+    if output.exists() and not force:
+        return output
+    base = json.loads(base_json.read_text())
+    candidate = json.loads(candidate_json.read_text())
+    base_seeds = base.get("episode_seed")
+    candidate_seeds = candidate.get("episode_seed")
+    if base_seeds is None or candidate_seeds is None:
+        raise ValueError("Both serial eval JSONs must contain episode_seed")
+    if base_seeds != candidate_seeds:
+        raise ValueError("Serial eval episode_seed arrays do not match")
+    base_success = np.asarray(base["episode_success"], dtype=np.float32)
+    candidate_success = np.asarray(candidate["episode_success"], dtype=np.float32)
+    if len(base_success) != len(candidate_success):
+        raise ValueError("Serial eval episode_success arrays have different lengths")
+    improvements = (base_success == 0.0) & (candidate_success == 1.0)
+    regressions = (base_success == 1.0) & (candidate_success == 0.0)
+    payload = {
+        "base_json": str(base_json),
+        "candidate_json": str(candidate_json),
+        "episodes": int(len(base_success)),
+        "episode_seed_start": int(base_seeds[0]) if base_seeds else None,
+        "episode_seed_end": int(base_seeds[-1]) if base_seeds else None,
+        "base_success": float(base_success.mean()) if len(base_success) else None,
+        "candidate_success": float(candidate_success.mean())
+        if len(candidate_success)
+        else None,
+        "success_delta": float(candidate_success.mean() - base_success.mean())
+        if len(base_success)
+        else None,
+        "improvements": int(improvements.sum()),
+        "regressions": int(regressions.sum()),
+        "net_improvements": int(improvements.sum() - regressions.sum()),
+        "both_success": int(((base_success == 1.0) & (candidate_success == 1.0)).sum()),
+        "both_fail": int(((base_success == 0.0) & (candidate_success == 0.0)).sum()),
+        "improvement_seeds": [
+            int(seed) for seed, value in zip(base_seeds, improvements, strict=True) if value
+        ],
+        "regression_seeds": [
+            int(seed) for seed, value in zip(base_seeds, regressions, strict=True) if value
+        ],
+    }
+    write_json(output, payload)
+    return output
 
 
 class HierarchyRollout:

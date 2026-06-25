@@ -102,6 +102,7 @@ from hcl_poc.learned_interface import (
 )
 from hcl_poc.low_level_rl import (
     audit_low_level_rl,
+    compare_serial_low_level_eval,
     evaluate_residual_rl,
     evaluate_residual_rl_serial,
     record_low_level_rl_videos,
@@ -218,6 +219,15 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.low_level_rl_command == "audit":
         console.print(audit_low_level_rl(config, args.n_demo, args.seed))
+    elif args.low_level_rl_command == "compare-serial":
+        console.print(
+            compare_serial_low_level_eval(
+                Path(args.base_json),
+                Path(args.candidate_json),
+                output=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
     elif args.low_level_rl_command == "train-r1":
         run_config = _low_level_config_with_overrides(config, args)
         console.print(
@@ -1895,6 +1905,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
     audit.add_argument("--seed", type=int, choices=[0, 1, 2], default=0)
     audit.set_defaults(func=low_level_rl_cmd)
+    compare_serial = low_level_rl_sub.add_parser("compare-serial")
+    compare_serial.add_argument("--base-json", required=True)
+    compare_serial.add_argument("--candidate-json", required=True)
+    compare_serial.add_argument("--output")
+    compare_serial.add_argument("--force", action="store_true")
+    compare_serial.set_defaults(func=low_level_rl_cmd)
     train_r1 = low_level_rl_sub.add_parser("train-r1")
     train_r1.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
     train_r1.add_argument("--candidate", default="vae512_w2048_b1e6")

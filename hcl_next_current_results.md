@@ -227,6 +227,9 @@ This confirms that serial exact-seed eval is the right small-window tool for
 selector debugging. It also further weakens the initial linear selector: with
 reliable pairing, it underperforms ungated R3 on this window.
 
+I also added `low-level-rl compare-serial`, which writes exact paired counts
+only after verifying matching `episode_seed` arrays.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -305,4 +308,6 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4501000/serial_eval_50_seed4501000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/serial_eval_50_seed4501000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_serial50_seed4501000/serial_eval_50_seed4501000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/paired_vs_frozen_serial50_seed4501000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_serial50_seed4501000/paired_vs_frozen_serial50_seed4501000.json
 ```
