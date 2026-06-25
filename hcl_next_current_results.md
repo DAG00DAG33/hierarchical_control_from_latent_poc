@@ -229,7 +229,8 @@ selector debugging. It also further weakens the initial linear selector: with
 reliable pairing, it underperforms ungated R3 on this window.
 
 I also added `low-level-rl compare-serial`, which writes exact paired counts
-only after verifying matching `episode_seed` arrays.
+only after verifying matching `episode_seed` arrays. Vector eval JSONs are now
+marked `eval_mode: vector_auto_reset_unpaired` with `episode_seed: null`.
 
 ## Current Best Policies
 

@@ -1184,6 +1184,8 @@ def evaluate_residual_rl(
         "rl_steps": global_step,
         "episodes": count,
         "seed_start": seed_start,
+        "eval_mode": "vector_auto_reset_unpaired",
+        "episode_seed": None,
         "success": float(np.mean(successes[:count])),
         "final_reward": float(np.mean(finals[:count])),
         "max_reward": float(np.mean(maxima[:count])),
@@ -1202,7 +1204,9 @@ def evaluate_residual_rl(
         "residual_l2_mean": float(np.mean(residual_magnitudes)),
         "selected_distance_gate_rate": distance_gate_count / max(action_count, 1),
         "initial_selector_tuned_rate": initial_selector_tuned_count
-        / max(initial_selector_episode_count, 1),
+        / max(initial_selector_episode_count, 1)
+        if has_initial_selector
+        else None,
         "episode_success": successes[:count],
         "episode_final_reward": finals[:count],
         "episode_max_reward": maxima[:count],
