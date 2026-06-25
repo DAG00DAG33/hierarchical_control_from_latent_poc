@@ -9384,3 +9384,77 @@ Interpretation: paired terminal reward is a cleaner objective than absolute
 terminal distance, and it improves local raw reduction on this 50-seed window,
 but the scaled run is neutral on task success. It is not yet a robust
 improvement over frozen.
+
+## 2026-06-25 - Multifeature serial segment selector diagnostic
+
+The previous one-dimensional segment diagnostics showed weak scalar separation
+between helpful and harmful R3 segments. I added a reproducible offline
+segment-selector diagnostic:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  fit-serial-segment-selector \
+  --base-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentdetail_serial50_seed4503000/serial_eval_50_seed4503000.json \
+  --candidate-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/serial_eval_50_seed4503000.json \
+  --validation-base-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json \
+  --validation-candidate-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json \
+  --output results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/segment_selector_fit_train4503000_valid4506000.json \
+  --ridge 1.0 \
+  --force
+```
+
+The selector uses only segment-start features available before choosing tuned
+or frozen:
+
+```text
+initial selected distance
+initial raw distance
+initial base action L2
+initial previous action L2
+segment start step
+```
+
+I generated a fresh exact serial validation window at `4506000..4506049` for
+frozen and the R3 bc10 checkpoint. Episode-level validation on this window was
+negative for ungated R3:
+
+| policy | success | max reward | raw local reduction | selected reduction |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.720 | 0.802 | 0.451 | 0.092 |
+| R3 bc10 | 0.700 | 0.783 | 0.461 | 0.090 |
+
+Exact paired counts:
+
+| improvements | regressions | net |
+| ---: | ---: | ---: |
+| 7 | 8 | -1 |
+
+Offline segment-selector local metric:
+
+| split | base raw reduction | R3 raw reduction | selector raw reduction | selector delta vs base | selector use R3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| train 4503000 | 0.414 | 0.417 | 0.478 | +0.064 | 0.796 |
+| validation 4506000 | 0.451 | 0.461 | 0.515 | +0.063 | 0.788 |
+
+The fitted selector had validation AUC `0.584` for segment-level helpfulness.
+It kept 207 helpful R3 segments and 187 harmful R3 segments on validation,
+which is still noisy, but the local raw-reduction aggregate improved more than
+the ungated R3 aggregate.
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentselector_serial50_seed4506000/paired_vs_frozen_serial50_seed4506000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/segment_selector_fit_train4503000_valid4506000.json`
+
+Interpretation:
+
+This is the first state/goal-aware selector diagnostic that generalizes on a
+held-out exact segment window for local raw reduction. It does not prove a task
+success gain: the ungated R3 policy is negative on the same validation window,
+and this selector has only been evaluated offline at the segment level. The next
+step is to add a direct serial evaluator that applies a segment-start selector
+online, then test whether the local raw-reduction gain transfers to episode
+success.

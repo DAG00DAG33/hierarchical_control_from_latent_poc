@@ -353,6 +353,26 @@ currently establish a robust learned-high deployment improvement. The current
 bottleneck is not only visual representation; it is the objective/deployment
 alignment of local RL updates.
 
+### Multifeature segment gating has local signal
+
+I added `low-level-rl fit-serial-segment-selector`, which fits an offline linear
+selector from exact paired serial segment data using only segment-start features:
+initial selected distance, initial raw distance, base action L2, previous action
+L2, and segment start step.
+
+Training on `4503000..4503049` and validating on `4506000..4506049`:
+
+| split | base raw reduction | R3 raw reduction | selector raw reduction | selector delta vs base | selector use R3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| train | 0.414 | 0.417 | 0.478 | +0.064 | 0.796 |
+| validation | 0.451 | 0.461 | 0.515 | +0.063 | 0.788 |
+
+Validation AUC for segment helpfulness was only `0.584`, but the aggregate local
+raw-reduction gain held out. On the same validation window, ungated R3 was still
+negative for episode success (`0.700` vs frozen `0.720`), so this is not yet a
+deployment win. It is evidence that multifeature segment-start gating is more
+promising than the earlier scalar gates and should be evaluated online next.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -383,12 +403,11 @@ The next useful directions are:
 1. Add a state/goal-aware gate.
    The eval path now records per-episode success, reward, residual magnitude,
    saturation, local progress, and compact pre-decision state/goal features.
-   Initial episode features and scalar current-distance gating are both weak.
-   A next gate should not be trained from unaligned vector-eval arrays. First
-   add explicit episode identity or a fixed reset-bank evaluator, then train a
-   multifeature step/segment selector. The exact-serial initial selector already
-   failed validation, and simple segment-start features are weak, so avoid more
-   one-dimensional gates.
+   Initial episode features and scalar current-distance gating are both weak,
+   but the new exact-serial multifeature segment selector improves held-out
+   local raw reduction offline. The next gate step should be an online serial
+   evaluator that applies this segment-start selector during rollout and reports
+   exact episode success.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not
@@ -455,6 +474,9 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_p
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/train_metrics.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/serial_eval_50_seed4505000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/paired_vs_frozen_serial50_seed4505000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/segment_selector_fit_train4503000_valid4506000.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json

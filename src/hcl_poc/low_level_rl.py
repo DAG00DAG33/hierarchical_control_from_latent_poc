@@ -656,6 +656,197 @@ def fit_serial_initial_selector(
     return output
 
 
+def fit_serial_segment_selector(
+    base_json: Path,
+    candidate_json: Path,
+    output: Path,
+    validation_base_json: Path | None = None,
+    validation_candidate_json: Path | None = None,
+    ridge: float = 1.0,
+    force: bool = False,
+) -> Path:
+    if output.exists() and not force:
+        return output
+    if ridge < 0.0:
+        raise ValueError("ridge must be non-negative")
+    feature_names = [
+        "serial_segment_initial_selected_distance",
+        "serial_segment_initial_raw_distance",
+        "serial_segment_initial_base_action_l2",
+        "serial_segment_initial_previous_action_norm_l2",
+        "serial_segment_start_step",
+    ]
+
+    def load_pair(
+        left_path: Path,
+        right_path: Path,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        left = json.loads(left_path.read_text())
+        right = json.loads(right_path.read_text())
+        required = [
+            "serial_segment_episode_seed",
+            "serial_segment_index",
+            "serial_segment_raw_distance_reduction",
+            *feature_names,
+        ]
+        for payload, name in ((left, "base"), (right, "candidate")):
+            missing = [key for key in required if key not in payload]
+            if missing:
+                raise ValueError(f"{name} serial eval is missing segment fields: {missing}")
+
+        def segment_map(payload: dict[str, Any]) -> dict[tuple[int, int], int]:
+            seeds = payload["serial_segment_episode_seed"]
+            indices = payload["serial_segment_index"]
+            if len(seeds) != len(indices):
+                raise ValueError("serial segment seed/index arrays have different lengths")
+            return {
+                (int(seed), int(index)): offset
+                for offset, (seed, index) in enumerate(zip(seeds, indices, strict=True))
+            }
+
+        left_map = segment_map(left)
+        right_map = segment_map(right)
+        common_keys = [key for key in left_map if key in right_map]
+        if not common_keys:
+            raise ValueError("No matching serial segments found")
+        features = np.stack(
+            [
+                np.asarray(
+                    [left[name][left_map[key]] for key in common_keys],
+                    dtype=np.float32,
+                )
+                for name in feature_names
+            ],
+            axis=1,
+        )
+        base_reduction = np.asarray(
+            [
+                left["serial_segment_raw_distance_reduction"][left_map[key]]
+                for key in common_keys
+            ],
+            dtype=np.float32,
+        )
+        candidate_reduction = np.asarray(
+            [
+                right["serial_segment_raw_distance_reduction"][right_map[key]]
+                for key in common_keys
+            ],
+            dtype=np.float32,
+        )
+        segment_ids = np.asarray(
+            [seed * 1000 + index for seed, index in common_keys],
+            dtype=np.int64,
+        )
+        return features, base_reduction, candidate_reduction, segment_ids
+
+    train_x, train_base_reduction, train_candidate_reduction, train_ids = load_pair(
+        base_json,
+        candidate_json,
+    )
+    delta = train_candidate_reduction - train_base_reduction
+    helpful = delta > 0.0
+    harmful = delta < 0.0
+    if not np.any(helpful) or not np.any(harmful):
+        raise ValueError("Segment selector requires both helpful and harmful segments")
+    mean = train_x.mean(axis=0)
+    std = train_x.std(axis=0) + 1e-6
+    train_z = (train_x - mean) / std
+    labels = np.where(helpful, 1.0, -1.0).astype(np.float32)
+    weights = np.linalg.solve(
+        train_z.T @ train_z + float(ridge) * np.eye(train_z.shape[1], dtype=np.float32),
+        train_z.T @ labels,
+    ).astype(np.float32)
+
+    def evaluate_split(
+        features: np.ndarray,
+        base_reduction: np.ndarray,
+        candidate_reduction: np.ndarray,
+        segment_ids: np.ndarray,
+        threshold: float,
+    ) -> dict[str, Any]:
+        scores = ((features - mean) / std) @ weights
+        use_candidate = scores >= threshold
+        mixed = np.where(use_candidate, candidate_reduction, base_reduction)
+        always_delta = candidate_reduction - base_reduction
+        mixed_delta = mixed - base_reduction
+        selected_improved = mixed_delta > 0.0
+        selected_harmed = mixed_delta < 0.0
+        return {
+            "segments": int(len(base_reduction)),
+            "segment_id_start": int(segment_ids[0]) if len(segment_ids) else None,
+            "segment_id_end": int(segment_ids[-1]) if len(segment_ids) else None,
+            "base_raw_reduction_mean": float(base_reduction.mean()),
+            "candidate_raw_reduction_mean": float(candidate_reduction.mean()),
+            "selector_raw_reduction_mean": float(mixed.mean()),
+            "candidate_delta_mean": float(always_delta.mean()),
+            "selector_delta_mean": float(mixed_delta.mean()),
+            "candidate_helpful_segments": int((always_delta > 0.0).sum()),
+            "candidate_harmful_segments": int((always_delta < 0.0).sum()),
+            "selector_helpful_segments": int(selected_improved.sum()),
+            "selector_harmful_segments": int(selected_harmed.sum()),
+            "selector_use_candidate_rate": float(use_candidate.mean()),
+            "selector_kept_candidate_helpful": int(
+                np.logical_and(use_candidate, always_delta > 0.0).sum()
+            ),
+            "selector_kept_candidate_harmful": int(
+                np.logical_and(use_candidate, always_delta < 0.0).sum()
+            ),
+            "selector_auc": _binary_auc(scores, (always_delta > 0.0).astype(np.float32)),
+        }
+
+    train_scores = train_z @ weights
+    best: tuple[float, float] | None = None
+    for threshold in np.unique(train_scores):
+        mixed = np.where(
+            train_scores >= threshold,
+            train_candidate_reduction,
+            train_base_reduction,
+        )
+        score = float(mixed.mean())
+        item = (score, float(threshold))
+        if best is None or item[0] > best[0]:
+            best = item
+    if best is None:
+        raise RuntimeError("Failed to choose segment selector threshold")
+    _train_best_reduction, threshold = best
+    payload: dict[str, Any] = {
+        "base_json": str(base_json),
+        "candidate_json": str(candidate_json),
+        "feature_names": feature_names,
+        "ridge": float(ridge),
+        "weights": weights.astype(float).tolist(),
+        "mean": mean.astype(float).tolist(),
+        "std": std.astype(float).tolist(),
+        "threshold": threshold,
+        "train": evaluate_split(
+            train_x,
+            train_base_reduction,
+            train_candidate_reduction,
+            train_ids,
+            threshold,
+        ),
+        "validation": None,
+    }
+    if validation_base_json is not None or validation_candidate_json is not None:
+        if validation_base_json is None or validation_candidate_json is None:
+            raise ValueError("Provide both validation base and candidate JSONs")
+        val_x, val_base_reduction, val_candidate_reduction, val_ids = load_pair(
+            validation_base_json,
+            validation_candidate_json,
+        )
+        payload["validation_base_json"] = str(validation_base_json)
+        payload["validation_candidate_json"] = str(validation_candidate_json)
+        payload["validation"] = evaluate_split(
+            val_x,
+            val_base_reduction,
+            val_candidate_reduction,
+            val_ids,
+            threshold,
+        )
+    write_json(output, payload)
+    return output
+
+
 class HierarchyRollout:
     def __init__(
         self,
