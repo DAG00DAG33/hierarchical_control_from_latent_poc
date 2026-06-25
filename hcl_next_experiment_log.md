@@ -10385,6 +10385,78 @@ meaningful goal swaps, so the next representation/architecture work should
 emphasize goal-conditioned control sensitivity, not just high-level validity
 penalties.
 
+## 2026-06-26 - Goal-sensitivity regularized R3 closed-loop transfer
+
+I found an existing `rl-rerun` R3 checkpoint trained with in-batch valid-goal
+swap sensitivity regularization:
+
+```text
+artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt
+```
+
+Recipe:
+
+| field | value |
+| --- | ---: |
+| global steps | 40960 |
+| BC weight | 1.0 |
+| terminal weight | 1.0 |
+| learning rate | 1e-5 |
+| initial logstd | -4.0 |
+| goal sensitivity weight | 10.0 |
+| goal sensitivity margin | 0.05 |
+
+Training/local diagnostics:
+
+| metric | value |
+| --- | ---: |
+| train mean terminal distance | 0.6089 |
+| train mean action delta L2 | 0.0293 |
+| train goal-swap action sensitivity L2 | 0.0319 |
+| eval local initial distance | 1.0884 |
+| eval local final distance | 0.6215 |
+| eval local distance reduction | 0.4669 |
+| eval local mean action delta L2 | 0.0011 |
+
+I then ran fresh 500-episode closed-loop transfer checks:
+
+| seed start | goal source | frozen success | tuned success | success delta | frozen max reward | tuned max reward | max-reward delta | action delta L2 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4800000 | learned | 0.306 | 0.324 | +0.018 | 0.4954 | 0.5042 | +0.0088 | 0.000973 |
+| 4800000 | oracle | 0.328 | 0.340 | +0.012 | 0.5164 | 0.5231 | +0.0068 | 0.000982 |
+| 4900000 | learned | 0.294 | 0.296 | +0.002 | 0.4793 | 0.4833 | +0.0040 | 0.000940 |
+
+Learned-goal aggregate over the two fresh windows:
+
+| metric | mean delta |
+| --- | ---: |
+| success | +0.010 |
+| max reward | +0.0064 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/closed_loop_learned_500_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/closed_loop_oracle_state_dict_500_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/closed_loop_learned_500_seed4900000.json`
+
+Interpretation:
+
+This is the first `rl-rerun` local R3 variant in the current branch that
+transfers positively under learned high-level goals on fresh 500-episode
+windows. The effect is small, but the sign is better than the task-reward-debug
+checkpoint, which averaged `-0.028` learned-goal success delta on its two
+500-episode windows. It also remains positive under oracle goals on the checked
+window.
+
+The useful change is not simply larger arbitrary actions: closed-loop action
+delta is still only about `0.001` L2. The sensitivity regularizer appears to
+move the tuned policy into a less brittle regime where small goal-conditioned
+action changes do not hurt learned-goal deployment. This is not yet a robust
+policy improvement, but it is now the best `rl-rerun` lead for the VAE512
+learned-latent branch. The next validation should either run more fresh
+learned-goal windows or train a larger/longer sensitivity-regularized variant,
+while preserving deployment checks as the selector.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:

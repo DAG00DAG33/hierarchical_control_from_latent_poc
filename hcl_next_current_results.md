@@ -542,6 +542,26 @@ So the learned high-level goals are not obviously random/off-manifold by this
 nearest-neighbor test. The low-level remains the sharper failure: even a large
 predicted-vs-replay goal difference causes only a tiny action change.
 
+An existing R3 checkpoint trained with explicit goal-swap sensitivity
+regularization is now the first positive `rl-rerun` learned-goal transfer lead:
+
+```text
+artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_smoke_10k/latest.pt
+```
+
+Fresh closed-loop checks:
+
+| seed start | goal source | frozen success | tuned success | success delta | max-reward delta |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 4800000 | learned | 0.306 | 0.324 | +0.018 | +0.0088 |
+| 4800000 | oracle | 0.328 | 0.340 | +0.012 | +0.0068 |
+| 4900000 | learned | 0.294 | 0.296 | +0.002 | +0.0040 |
+
+Across the two learned-goal windows, the mean delta is `+0.010` success and
+`+0.0064` max reward. This is small, but it is the first positive fresh-window
+sign for the VAE512 `rl-rerun` learned-goal branch and is directionally better
+than the task-reward-debug checkpoint.
+
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.
 On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance
