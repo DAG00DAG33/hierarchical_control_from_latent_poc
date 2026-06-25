@@ -103,6 +103,7 @@ from hcl_poc.learned_interface import (
 from hcl_poc.low_level_rl import (
     audit_low_level_rl,
     compare_serial_low_level_eval,
+    compare_serial_low_level_segments,
     evaluate_residual_rl,
     evaluate_residual_rl_serial,
     fit_serial_initial_selector,
@@ -223,6 +224,15 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
     elif args.low_level_rl_command == "compare-serial":
         console.print(
             compare_serial_low_level_eval(
+                Path(args.base_json),
+                Path(args.candidate_json),
+                output=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.low_level_rl_command == "compare-serial-segments":
+        console.print(
+            compare_serial_low_level_segments(
                 Path(args.base_json),
                 Path(args.candidate_json),
                 output=Path(args.output) if args.output else None,
@@ -1928,6 +1938,12 @@ def build_parser() -> argparse.ArgumentParser:
     compare_serial.add_argument("--output")
     compare_serial.add_argument("--force", action="store_true")
     compare_serial.set_defaults(func=low_level_rl_cmd)
+    compare_serial_segments = low_level_rl_sub.add_parser("compare-serial-segments")
+    compare_serial_segments.add_argument("--base-json", required=True)
+    compare_serial_segments.add_argument("--candidate-json", required=True)
+    compare_serial_segments.add_argument("--output")
+    compare_serial_segments.add_argument("--force", action="store_true")
+    compare_serial_segments.set_defaults(func=low_level_rl_cmd)
     fit_serial_selector = low_level_rl_sub.add_parser("fit-serial-selector")
     fit_serial_selector.add_argument("--base-json", required=True)
     fit_serial_selector.add_argument("--candidate-json", required=True)

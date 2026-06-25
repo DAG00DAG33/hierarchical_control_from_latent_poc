@@ -9062,3 +9062,85 @@ features and toward either:
 - a larger fixed reset-bank dataset with enough samples to train a selector; or
 - a step/segment-level selector that can observe current trajectory state rather
   than committing at the first action.
+
+## Serial segment-level selector diagnostics
+
+I extended `low-level-rl eval-serial` with per-segment arrays for selector
+datasets:
+
+- `serial_segment_episode_seed`
+- `serial_segment_index`
+- `serial_segment_start_step`
+- `serial_segment_initial_selected_distance`
+- `serial_segment_initial_raw_distance`
+- `serial_segment_initial_base_action_l2`
+- `serial_segment_initial_previous_action_norm_l2`
+- `serial_segment_final_selected_distance`
+- `serial_segment_final_raw_distance`
+- `serial_segment_selected_distance_reduction`
+- `serial_segment_raw_distance_reduction`
+- `serial_segment_goal_reached`
+- `serial_segment_residual_l2_mean`
+- `serial_segment_action_saturation_rate`
+- `serial_segment_distance_gate_rate`
+
+I also added `low-level-rl compare-serial-segments`, which aligns two serial
+evals by `(episode_seed, segment_index)` and reports paired segment-level local
+improvement diagnostics.
+
+### Smoke check
+
+A 5-episode R3 smoke run produced 50 aligned ten-step segments with expected
+start steps:
+
+```text
+(4503000, 0, 0), (4503000, 1, 10), ..., (4503000, 4, 40)
+```
+
+### 50-episode paired segment diagnostic
+
+I then ran matched frozen/R3 serial evals over `4503000..4503049` and compared
+500 paired segments:
+
+| policy | task success | segment raw reduction |
+| --- | ---: | ---: |
+| frozen | 0.620 | 0.414 |
+| R3 ungated | 0.680 | 0.417 |
+
+Paired segment outcome:
+
+| metric | value |
+| --- | ---: |
+| common segments | 500 |
+| helpful R3 segments | 244 |
+| harmful R3 segments | 256 |
+| mean raw-reduction delta | 0.003 |
+
+Candidate segment-start feature signal for whether R3 improves raw local
+reduction over frozen:
+
+| feature | helpful AUC | oriented AUC | corr with raw-reduction delta |
+| --- | ---: | ---: | ---: |
+| initial raw distance | 0.567 | 0.567 | 0.179 |
+| initial base action L2 | 0.533 | 0.533 | 0.071 |
+| initial selected distance | 0.527 | 0.527 | 0.074 |
+| previous action norm L2 | 0.511 | 0.511 | 0.062 |
+| residual L2 mean | 0.509 | 0.509 | 0.019 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segment_smoke5_seed4503000/serial_eval_5_seed4503000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentdetail_serial50_seed4503000/serial_eval_50_seed4503000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/serial_eval_50_seed4503000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/paired_segments_vs_frozen_serial50_seed4503000.json`
+
+### Interpretation
+
+This is a negative result for simple segment-level gating. The segment arrays
+are now available and correctly aligned, but the obvious segment-start features
+barely separate helpful from harmful R3 segments. Initial raw distance is the
+best single signal, and its oriented AUC is only `0.567`.
+
+The practical implication is that a deployable segment selector probably needs
+more context than scalar distance/action norms, a larger fixed-bank dataset, or
+an objective that creates larger candidate-policy differences before gating.

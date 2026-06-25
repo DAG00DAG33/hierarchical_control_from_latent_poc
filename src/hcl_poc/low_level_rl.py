@@ -393,6 +393,120 @@ def compare_serial_low_level_eval(
     return output
 
 
+def compare_serial_low_level_segments(
+    base_json: Path,
+    candidate_json: Path,
+    output: Path | None = None,
+    force: bool = False,
+) -> Path:
+    output = output or candidate_json.with_name(
+        f"{candidate_json.stem}_segments_vs_{base_json.stem}.json"
+    )
+    if output.exists() and not force:
+        return output
+    base = json.loads(base_json.read_text())
+    candidate = json.loads(candidate_json.read_text())
+    required = [
+        "serial_segment_episode_seed",
+        "serial_segment_index",
+        "serial_segment_raw_distance_reduction",
+    ]
+    for payload, name in ((base, "base"), (candidate, "candidate")):
+        missing = [key for key in required if key not in payload]
+        if missing:
+            raise ValueError(f"{name} serial eval is missing segment fields: {missing}")
+
+    def segment_map(payload: dict[str, Any]) -> dict[tuple[int, int], int]:
+        seeds = payload["serial_segment_episode_seed"]
+        indices = payload["serial_segment_index"]
+        if len(seeds) != len(indices):
+            raise ValueError("serial segment seed/index arrays have different lengths")
+        return {
+            (int(seed), int(index)): offset
+            for offset, (seed, index) in enumerate(zip(seeds, indices, strict=True))
+        }
+
+    base_map = segment_map(base)
+    candidate_map = segment_map(candidate)
+    common_keys = [key for key in base_map if key in candidate_map]
+    if not common_keys:
+        raise ValueError("No matching serial segments found")
+    base_raw_reduction = np.asarray(
+        [base["serial_segment_raw_distance_reduction"][base_map[key]] for key in common_keys],
+        dtype=np.float32,
+    )
+    candidate_raw_reduction = np.asarray(
+        [
+            candidate["serial_segment_raw_distance_reduction"][candidate_map[key]]
+            for key in common_keys
+        ],
+        dtype=np.float32,
+    )
+    delta = candidate_raw_reduction - base_raw_reduction
+    helpful = delta > 0.0
+    harmful = delta < 0.0
+    feature_names = [
+        "serial_segment_initial_selected_distance",
+        "serial_segment_initial_raw_distance",
+        "serial_segment_initial_base_action_l2",
+        "serial_segment_initial_previous_action_norm_l2",
+        "serial_segment_residual_l2_mean",
+    ]
+    feature_diagnostics: dict[str, dict[str, float | None]] = {}
+    for name in feature_names:
+        if name not in candidate:
+            continue
+        values = np.asarray(
+            [candidate[name][candidate_map[key]] for key in common_keys],
+            dtype=np.float32,
+        )
+        auc = _binary_auc(values, helpful.astype(np.float32))
+        corr = (
+            float(np.corrcoef(values, delta)[0, 1])
+            if len(values) > 1 and np.std(values) > 0.0 and np.std(delta) > 0.0
+            else None
+        )
+        feature_diagnostics[name] = {
+            "helpful_auc": auc,
+            "oriented_helpful_auc": max(auc, 1.0 - auc) if auc is not None else None,
+            "corr_raw_reduction_delta": corr,
+            "helpful_mean": float(values[helpful].mean()) if np.any(helpful) else None,
+            "harmful_mean": float(values[harmful].mean()) if np.any(harmful) else None,
+        }
+    payload = {
+        "base_json": str(base_json),
+        "candidate_json": str(candidate_json),
+        "base_segments": int(len(base_map)),
+        "candidate_segments": int(len(candidate_map)),
+        "common_segments": int(len(common_keys)),
+        "aligned_order": [
+            (int(seed), int(index))
+            for seed, index in zip(
+                base["serial_segment_episode_seed"],
+                base["serial_segment_index"],
+                strict=True,
+            )
+        ]
+        == [
+            (int(seed), int(index))
+            for seed, index in zip(
+                candidate["serial_segment_episode_seed"],
+                candidate["serial_segment_index"],
+                strict=True,
+            )
+        ],
+        "base_raw_reduction_mean": float(base_raw_reduction.mean()),
+        "candidate_raw_reduction_mean": float(candidate_raw_reduction.mean()),
+        "raw_reduction_delta_mean": float(delta.mean()),
+        "helpful_segments": int(helpful.sum()),
+        "harmful_segments": int(harmful.sum()),
+        "neutral_segments": int((delta == 0.0).sum()),
+        "feature_diagnostics": feature_diagnostics,
+    }
+    write_json(output, payload)
+    return output
+
+
 def fit_serial_initial_selector(
     base_json: Path,
     candidate_json: Path,
@@ -1535,6 +1649,21 @@ def evaluate_residual_rl_serial(
     segment_final_distances: list[float] = []
     raw_segment_initial_distances: list[float] = []
     raw_segment_final_distances: list[float] = []
+    serial_segment_episode_seed: list[int] = []
+    serial_segment_index: list[int] = []
+    serial_segment_start_step: list[int] = []
+    serial_segment_initial_selected_distance: list[float] = []
+    serial_segment_initial_raw_distance: list[float] = []
+    serial_segment_initial_base_action_l2: list[float] = []
+    serial_segment_initial_previous_action_norm_l2: list[float] = []
+    serial_segment_final_selected_distance: list[float] = []
+    serial_segment_final_raw_distance: list[float] = []
+    serial_segment_selected_distance_reduction: list[float] = []
+    serial_segment_raw_distance_reduction: list[float] = []
+    serial_segment_goal_reached: list[float] = []
+    serial_segment_residual_l2_mean: list[float] = []
+    serial_segment_action_saturation_rate: list[float] = []
+    serial_segment_distance_gate_rate: list[float] = []
     reached: list[float] = []
     selected_metric_terminal_scores: list[float] = []
     total_saturation = 0
@@ -1568,6 +1697,13 @@ def evaluate_residual_rl_serial(
             segment_count = 0
             segment_initial = np.zeros(1, dtype=np.float32)
             segment_raw_initial = np.zeros(1, dtype=np.float32)
+            segment_start_step = 0
+            segment_start_base_action_l2 = 0.0
+            segment_start_previous_action_norm_l2 = 0.0
+            segment_residual_sum = 0.0
+            segment_saturation_sum = 0.0
+            segment_distance_gate_sum = 0.0
+            segment_step_count = 0
             step_count = 0
 
             for _step in range(max_steps):
@@ -1636,6 +1772,15 @@ def evaluate_residual_rl_serial(
                 if replan:
                     segment_initial = distance.copy()
                     segment_raw_initial = raw_distance.copy()
+                    segment_start_step = step_count
+                    segment_start_base_action_l2 = base_action_l2
+                    segment_start_previous_action_norm_l2 = float(
+                        np.linalg.norm(previous_action, axis=-1)[0]
+                    )
+                    segment_residual_sum = 0.0
+                    segment_saturation_sum = 0.0
+                    segment_distance_gate_sum = 0.0
+                    segment_step_count = 0
 
                 if direct_agent is not None:
                     unclipped = direct_agent.get_action_and_value(
@@ -1666,16 +1811,20 @@ def evaluate_residual_rl_serial(
                     unclipped = base_action
                     residual = torch.zeros_like(residual)
                     distance_gate_sum += 1.0
+                    segment_distance_gate_sum += 1.0
                     total_distance_gate += 1
 
                 action = torch.clamp(unclipped, action_low, action_high)
                 saturated = bool(torch.any(unclipped != action).cpu())
                 saturation_sum += float(saturated)
+                segment_saturation_sum += float(saturated)
                 total_saturation += int(saturated)
                 total_actions += 1
                 residual_norm = float(torch.linalg.vector_norm(residual, dim=-1).cpu()[0])
                 residual_sum += residual_norm
+                segment_residual_sum += residual_norm
                 residual_magnitudes.append(residual_norm)
+                segment_step_count += 1
 
                 next_obs, reward, terminated, truncated, info = env.step(action)
                 next_frames = _phase4_frame_inputs(
@@ -1698,6 +1847,34 @@ def evaluate_residual_rl_serial(
                     selected_reduction_sum += float(segment_initial[0] - next_distance[0])
                     reach_sum += reached_value
                     segment_count += 1
+                    segment_denominator = max(segment_step_count, 1)
+                    serial_segment_episode_seed.append(rollout_seed)
+                    serial_segment_index.append(segment_count - 1)
+                    serial_segment_start_step.append(segment_start_step)
+                    serial_segment_initial_selected_distance.append(float(segment_initial[0]))
+                    serial_segment_initial_raw_distance.append(float(segment_raw_initial[0]))
+                    serial_segment_initial_base_action_l2.append(segment_start_base_action_l2)
+                    serial_segment_initial_previous_action_norm_l2.append(
+                        segment_start_previous_action_norm_l2
+                    )
+                    serial_segment_final_selected_distance.append(float(next_distance[0]))
+                    serial_segment_final_raw_distance.append(float(raw_next_distance[0]))
+                    serial_segment_selected_distance_reduction.append(
+                        float(segment_initial[0] - next_distance[0])
+                    )
+                    serial_segment_raw_distance_reduction.append(
+                        float(segment_raw_initial[0] - raw_next_distance[0])
+                    )
+                    serial_segment_goal_reached.append(reached_value)
+                    serial_segment_residual_l2_mean.append(
+                        segment_residual_sum / segment_denominator
+                    )
+                    serial_segment_action_saturation_rate.append(
+                        segment_saturation_sum / segment_denominator
+                    )
+                    serial_segment_distance_gate_rate.append(
+                        segment_distance_gate_sum / segment_denominator
+                    )
 
                 previous_action = frozen.action_norm.transform(
                     action.cpu().numpy().astype(np.float32)
@@ -1827,6 +2004,25 @@ def evaluate_residual_rl_serial(
         "episode_raw_segment_distance_reduction": episode_raw_segment_distance_reduction,
         "episode_segment_distance_reduction": episode_segment_distance_reduction,
         "episode_segment_goal_reach_rate": episode_segment_goal_reach_rate,
+        "serial_segment_episode_seed": serial_segment_episode_seed,
+        "serial_segment_index": serial_segment_index,
+        "serial_segment_start_step": serial_segment_start_step,
+        "serial_segment_initial_selected_distance": serial_segment_initial_selected_distance,
+        "serial_segment_initial_raw_distance": serial_segment_initial_raw_distance,
+        "serial_segment_initial_base_action_l2": serial_segment_initial_base_action_l2,
+        "serial_segment_initial_previous_action_norm_l2": (
+            serial_segment_initial_previous_action_norm_l2
+        ),
+        "serial_segment_final_selected_distance": serial_segment_final_selected_distance,
+        "serial_segment_final_raw_distance": serial_segment_final_raw_distance,
+        "serial_segment_selected_distance_reduction": (
+            serial_segment_selected_distance_reduction
+        ),
+        "serial_segment_raw_distance_reduction": serial_segment_raw_distance_reduction,
+        "serial_segment_goal_reached": serial_segment_goal_reached,
+        "serial_segment_residual_l2_mean": serial_segment_residual_l2_mean,
+        "serial_segment_action_saturation_rate": serial_segment_action_saturation_rate,
+        "serial_segment_distance_gate_rate": serial_segment_distance_gate_rate,
     }
     write_json(output, payload)
     return output
