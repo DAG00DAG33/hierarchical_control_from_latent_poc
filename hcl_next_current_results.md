@@ -450,6 +450,18 @@ environment reward, mean environment reward, and success-once. The gain is still
 tiny (`+0.0037` success-once and about `+0.002` reward), so it is useful as a
 selection diagnostic but too small to justify closed-loop deployment.
 
+A direct 500-episode learned-goal closed-loop transfer check confirmed that this
+local signal is not enough:
+
+| policy | success | final reward | max reward |
+| --- | ---: | ---: | ---: |
+| frozen n500 | 0.334 | 0.4776 | 0.5061 |
+| terminal-only lr1e-5 logstd-5 | 0.294 | 0.4480 | 0.4760 |
+
+The tuned checkpoint loses `-0.040` success and about `-0.030` reward despite
+the weakly positive local diagnostics. Treat cached-paired local R3 as
+diagnostically useful infrastructure, not as a candidate deployment policy.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -498,7 +510,8 @@ The next useful directions are:
    LR/action noise improved the training metric but suppressed useful held-out
    action changes. A broader reset-bank validation changed the sign of the local
    mean effect but kept it near zero; task-reward diagnostics are also only
-   weakly positive. The next objective check should change the target regime,
+   weakly positive and the best local candidate failed a 500-episode closed-loop
+   transfer check. The next objective check should change the target regime,
    not simply scale the same formulation: move toward a stronger task-aligned
    signal than local reachability-distance improvement alone.
    The privileged direct hard-start check shows that large selected-local gains

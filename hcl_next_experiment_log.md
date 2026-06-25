@@ -9952,3 +9952,51 @@ the deployment conclusion. The current cached-paired R3 objective produces a
 measurable but tiny local effect; the next experiment should increase objective
 signal strength or move to a better task proxy rather than continue small
 learning-rate/noise sweeps.
+
+## 2026-06-25 - Closed-loop transfer check for lower-noise cached paired R3
+
+The lower-noise terminal-only cached-paired checkpoint was weakly positive on
+the broad local task diagnostics, so I ran a matched learned-goal closed-loop
+transfer check:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4600000 \
+  --num-envs 64 \
+  --output results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1/closed_loop_500_seed4600000.json
+```
+
+Matched result:
+
+| policy | success | final reward | max reward | action saturation | residual/action delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.334 | 0.4776 | 0.5061 | 0.0462 | - |
+| terminal-only lr1e-5 logstd-5 | 0.294 | 0.4480 | 0.4760 | 0.0448 | 0.0007 |
+
+Deltas vs frozen:
+
+| metric | delta |
+| --- | ---: |
+| success | -0.040 |
+| final reward | -0.0296 |
+| max reward | -0.0302 |
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1/closed_loop_500_seed4600000.json`
+
+Interpretation:
+
+The weakly positive broad-local diagnostics did not transfer to closed-loop
+learned-goal success. The residual/action change is extremely small, but still
+harmful on this 500-episode window. This is another instance of local
+reachability or local task-reward proxies being insufficient for reliable
+checkpoint promotion. Do not continue with small cached-paired local-R3 sweeps
+unless the objective changes enough to create a much larger local effect and is
+validated directly in closed loop.
