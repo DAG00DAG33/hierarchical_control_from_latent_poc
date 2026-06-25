@@ -8335,3 +8335,86 @@ residual-gated R3:  0.667
 This is still a modest effect, but it is now more stable than the ungated R3
 checkpoint. The next sensible check is a small threshold sweep around `0.00121`
 on held-out banks to ensure the gain is not an overly sharp threshold artifact.
+
+## Effect32 FiLM R3 residual-L2 gate threshold sweep
+
+I swept nearby residual-L2 gate thresholds around `0.00121` on the same three
+500-episode banks. The policy and checkpoint are unchanged; only the online
+fallback threshold changes.
+
+### Command template
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --episodes 500 \
+  --seed-start 3500000|3600000|3700000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --residual-l2-gate-max THRESHOLD \
+  --distance-metric reachability \
+  --force
+```
+
+Tested thresholds:
+
+```text
+0.0008, 0.0010, 0.00121, 0.0014, 0.0018
+```
+
+### Three-bank aggregate
+
+| policy | success values | mean success | mean max reward | action delta | paired improvements | paired regressions | net |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.634, 0.662, 0.622 | 0.639 | 0.743 | 0.00000 | n/a | n/a | n/a |
+| ungated R3 | 0.684, 0.638, 0.638 | 0.653 | 0.752 | 0.00100 | 338 | 317 | +21 |
+| gate 0.0008 | 0.668, 0.668, 0.626 | 0.654 | 0.752 | 0.00026 | 337 | 315 | +22 |
+| gate 0.0010 | 0.626, 0.614, 0.628 | 0.623 | 0.729 | 0.00035 | 324 | 349 | -25 |
+| gate 0.00121 | 0.684, 0.668, 0.650 | 0.667 | 0.761 | 0.00044 | 346 | 304 | +42 |
+| gate 0.0014 | 0.650, 0.646, 0.654 | 0.650 | 0.750 | 0.00052 | 331 | 315 | +16 |
+| gate 0.0018 | 0.658, 0.634, 0.664 | 0.652 | 0.749 | 0.00068 | 335 | 316 | +19 |
+
+Per-bank paired net:
+
+| policy | seed 3500000 | seed 3600000 | seed 3700000 |
+| --- | ---: | ---: | ---: |
+| gate 0.0008 | +17 | +3 | +2 |
+| gate 0.0010 | -4 | -24 | +3 |
+| gate 0.00121 | +25 | +3 | +14 |
+| gate 0.0014 | +8 | -8 | +16 |
+| gate 0.0018 | +12 | -14 | +21 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0008_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0008_final500_seed3600000/eval_500_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0008_final500_seed3700000/eval_500_seed3700000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0010_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0010_final500_seed3600000/eval_500_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0010_final500_seed3700000/eval_500_seed3700000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0014_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0014_final500_seed3600000/eval_500_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0014_final500_seed3700000/eval_500_seed3700000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0018_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0018_final500_seed3600000/eval_500_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate0018_final500_seed3700000/eval_500_seed3700000.json`
+
+### Interpretation
+
+The threshold sweep supports the residual-L2 gate, but it also shows the effect
+is threshold-sensitive. `0.00121` remains the best tested value, with the best
+mean success, max reward, and paired net wins. A too-strict threshold (`0.0010`)
+falls below frozen, so this is not simply "smaller updates are always better."
+
+The practical conclusion is:
+
+- promote residual-gated R3 at `0.00121` as the current best real-compatible
+  effect32 policy variant;
+- keep the claim modest because the threshold was selected from these eval
+  banks;
+- for a final claim, validate `0.00121` on additional fresh seed windows or
+  choose the threshold by a separate held-out selector bank before final test
+  reporting.
