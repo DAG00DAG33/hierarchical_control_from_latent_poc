@@ -10457,6 +10457,72 @@ learned-latent branch. The next validation should either run more fresh
 learned-goal windows or train a larger/longer sensitivity-regularized variant,
 while preserving deployment checks as the selector.
 
+## 2026-06-26 - Longer goal-sensitivity R3 scale-up check
+
+I trained a five-update version of the same sensitivity-regularized R3 recipe:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name goal_sensitivity_w10_m005_5update_bc1_lr1e5_logstd4 \
+  --steps 204800 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --learning-rate 1e-5 \
+  --initial-logstd -4.0 \
+  --goal-sensitivity-weight 10.0 \
+  --goal-sensitivity-margin 0.05
+```
+
+Final training metrics:
+
+| metric | value |
+| --- | ---: |
+| global steps | 204800 |
+| train mean terminal distance | 0.6929 |
+| train mean action delta L2 | 0.0294 |
+| train goal-swap action sensitivity L2 | 0.0307 |
+| train task-success diagnostic rate | 0.2075 |
+
+One-batch local eval on `pusht_vector_state_demos_n4096_val_b1.h5`:
+
+| run | initial distance | final distance | reduction | action delta L2 | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| one-update sensitivity | 1.0884 | 0.6215 | 0.4669 | 0.001065 | 0.0108 |
+| five-update sensitivity | 0.8286 | 0.5700 | 0.2586 | 0.002840 | 0.0018 |
+
+Fresh learned-goal closed-loop transfer on `seed_start=4800000`:
+
+| run | frozen success | tuned success | success delta | max-reward delta | action delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| one-update sensitivity | 0.306 | 0.324 | +0.018 | +0.0088 | 0.000973 |
+| five-update sensitivity | 0.306 | 0.310 | +0.004 | +0.0017 | 0.002954 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_5update_bc1_lr1e5_logstd4/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_5update_bc1_lr1e5_logstd4/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_5update_bc1_lr1e5_logstd4/eval_local_1batch_val_b1.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w10_m005_5update_bc1_lr1e5_logstd4/closed_loop_learned_500_seed4800000.json`
+
+Interpretation:
+
+Longer training did not improve the sensitivity lead. The five-update variant
+keeps a positive sign on the checked learned-goal window, but it is weaker than
+the one-update checkpoint and uses larger closed-loop action deltas. This
+repeats the broader pattern from the effect32 R3 work: pushing the local
+objective longer can degrade deployment even when the local/training signals
+look plausible.
+
+For now, the one-update sensitivity checkpoint remains the best VAE512
+`rl-rerun` lead. The next scale-up should not simply continue more updates with
+the same objective; it should either tune the sensitivity target/BC tradeoff or
+validate the one-update checkpoint on more deployment windows.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:

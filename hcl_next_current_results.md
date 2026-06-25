@@ -562,6 +562,18 @@ Across the two learned-goal windows, the mean delta is `+0.010` success and
 sign for the VAE512 `rl-rerun` learned-goal branch and is directionally better
 than the task-reward-debug checkpoint.
 
+I trained a five-update version of the same sensitivity objective. It stayed
+positive on the checked learned-goal window, but was weaker than the one-update
+checkpoint:
+
+| run | success delta | max-reward delta | action delta L2 |
+| --- | ---: | ---: | ---: |
+| one-update sensitivity, seed 4800000 | +0.018 | +0.0088 | 0.000973 |
+| five-update sensitivity, seed 4800000 | +0.004 | +0.0017 | 0.002954 |
+
+So the current lead is the one-update sensitivity checkpoint, not simply longer
+training of the same local objective.
+
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.
 On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance
