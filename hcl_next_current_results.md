@@ -580,6 +580,18 @@ damage relative to the task-reward-debug branch, but neither the one-update nor
 the five-update sensitivity checkpoint establishes reliable learned-goal
 improvement.
 
+I also tested a stronger sensitivity-weight variant, changing only
+`goal_sensitivity_weight` from `10` to `30`. It did not improve the tradeoff:
+
+| run | shared windows | mean success delta | mean max-reward delta |
+| --- | --- | ---: | ---: |
+| weight 10 | 4800000, 4900000 | +0.010 | +0.0064 |
+| weight 30 | 4800000, 4900000 | +0.006 | +0.0064 |
+
+The weight-30 run improved one window and regressed the other, with nearly
+identical action magnitude. The current sensitivity formulation appears useful
+as a harm-reduction diagnostic, but not sufficient as the main training target.
+
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.
 On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance

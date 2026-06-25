@@ -10570,6 +10570,79 @@ should be treated as neutral. The next experiment should adjust the
 sensitivity/BC tradeoff or representation/conditioning, with deployment
 validation as the primary selector.
 
+## 2026-06-26 - Stronger sensitivity-weight R3 tradeoff check
+
+I trained a one-update sensitivity variant that changes only the goal-swap
+sensitivity weight from `10` to `30`, keeping the same dataset, BC weight,
+terminal weight, learning rate, logstd, and margin:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name goal_sensitivity_w30_m005_1update_bc1_lr1e5_logstd4 \
+  --steps 40960 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --learning-rate 1e-5 \
+  --initial-logstd -4.0 \
+  --goal-sensitivity-weight 30.0 \
+  --goal-sensitivity-margin 0.05
+```
+
+The rollout-side training metrics were effectively unchanged from the
+`weight=10` run because they are measured on the collected rollout before the
+PPO update:
+
+| run | terminal distance | train action delta L2 | goal-swap action sensitivity L2 | sensitivity loss |
+| --- | ---: | ---: | ---: | ---: |
+| weight 10 | 0.6089 | 0.029265 | 0.031907 | 0.000735 |
+| weight 30 | 0.6089 | 0.029265 | 0.031910 | 0.000735 |
+
+Aligned one-batch local eval on `pusht_vector_state_demos_n4096_val_b1.h5`:
+
+| run | initial distance | final distance | reduction | action delta L2 | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| weight 10 | 0.8286 | 0.5738 | 0.2548 | 0.000845 | 0.0020 |
+| weight 30 | 0.8286 | 0.5751 | 0.2535 | 0.000834 | 0.0019 |
+
+Fresh learned-goal closed-loop transfer on the two shared 500-episode windows:
+
+| run | seed start | frozen success | tuned success | success delta | max-reward delta | action delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| weight 10 | 4800000 | 0.306 | 0.324 | +0.018 | +0.0088 | 0.000973 |
+| weight 10 | 4900000 | 0.294 | 0.296 | +0.002 | +0.0040 | 0.000940 |
+| weight 30 | 4800000 | 0.306 | 0.332 | +0.026 | +0.0168 | 0.000977 |
+| weight 30 | 4900000 | 0.294 | 0.280 | -0.014 | -0.0040 | 0.000948 |
+
+Shared two-window aggregate:
+
+| run | mean success delta | mean max-reward delta | mean action delta L2 |
+| --- | ---: | ---: | ---: |
+| weight 10 | +0.010 | +0.0064 | 0.000957 |
+| weight 30 | +0.006 | +0.0064 | 0.000962 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w30_m005_1update_bc1_lr1e5_logstd4/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w30_m005_1update_bc1_lr1e5_logstd4/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w30_m005_1update_bc1_lr1e5_logstd4/eval_local_1batch_val_b1.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w30_m005_1update_bc1_lr1e5_logstd4/closed_loop_learned_500_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/goal_sensitivity_w30_m005_1update_bc1_lr1e5_logstd4/closed_loop_learned_500_seed4900000.json`
+
+Interpretation:
+
+Increasing the sensitivity weight from `10` to `30` does not produce a clearer
+deployment improvement. It improves the first window but regresses the second,
+and the two-window mean is slightly weaker than the original `weight=10`
+checkpoint. Local eval is also essentially unchanged. The sensitivity objective
+is therefore not simply underweighted; the current formulation can move small
+goal-conditioned actions around, but it still does not create a robust
+learned-goal transfer improvement.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:
