@@ -2523,6 +2523,7 @@ def train_rl_rerun_local_r3(
     reward_mode: str = "progress",
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
+    initial_logstd: float | None = None,
     checkpoint_every_updates: int = 5,
     goal_sensitivity_weight: float = 0.0,
     goal_sensitivity_margin: float = 0.05,
@@ -2603,6 +2604,11 @@ def train_rl_rerun_local_r3(
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
     condition_dim = _local_condition_dim(frozen)
+    resolved_initial_logstd = float(
+        initial_logstd
+        if initial_logstd is not None
+        else config.get("low_level_rl.direct_initial_logstd", -4.0)
+    )
     agent = DirectLowActorCritic(
         frozen.low_model,
         frozen.action_norm.mean,
@@ -2610,7 +2616,7 @@ def train_rl_rerun_local_r3(
         condition_dim,
         width=int(config.get("low_level_rl.residual_width", 256)),
         depth=int(config.get("low_level_rl.residual_depth", 2)),
-        initial_logstd=float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
+        initial_logstd=resolved_initial_logstd,
     ).to(device)
     trainable = [parameter for parameter in agent.parameters() if parameter.requires_grad]
     resolved_learning_rate = float(
@@ -2650,7 +2656,7 @@ def train_rl_rerun_local_r3(
         "max_grad_norm": max_grad_norm,
         "actor_critic_width": int(config.get("low_level_rl.residual_width", 256)),
         "actor_critic_depth": int(config.get("low_level_rl.residual_depth", 2)),
-        "initial_logstd": float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
+        "initial_logstd": resolved_initial_logstd,
         "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
         "reward": (
             "latent_progress_minus_terminal_distance_plus_bc_regularization_in_loss"

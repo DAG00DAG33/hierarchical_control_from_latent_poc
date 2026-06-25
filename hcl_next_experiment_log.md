@@ -9782,3 +9782,69 @@ failure looks like a weak/unstable local optimization signal: action changes
 stay tiny, paired improvement remains below zero, and held-out effects are at
 the noise scale. Next objective work should try lower LR/noise or broader reset
 coverage, but this branch still does not justify closed-loop deployment.
+
+## 2026-06-25 - Cached paired lower-LR/lower-noise local-R3 check
+
+I exposed `--initial-logstd` on `rl-rerun train-local-r3`, matching the local
+R1/R2 controls. Default behavior remains unchanged: if omitted, local R3 still
+uses `low_level_rl.direct_initial_logstd` from config (`-4.0` here).
+
+I then tested the lower LR/noise hypothesis using terminal-only cached paired
+reward:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1 \
+  --steps 122880 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --dense-progress-weight 0.0 \
+  --reward-mode paired \
+  --learning-rate 0.00001 \
+  --initial-logstd -5.0 \
+  --num-minibatches 8 \
+  --checkpoint-every-updates 1 \
+  --force
+```
+
+Training signal compared with terminal-only `lr=3e-5`, `initial_logstd=-4`:
+
+| variant | step | paired improvement | fraction improved | terminal distance | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lr3e-5 logstd-4 | 40960 | -0.0098 | 0.478 | 0.6089 | 0.0293 |
+| lr3e-5 logstd-4 | 81920 | -0.0067 | 0.487 | 0.6058 | 0.0293 |
+| lr3e-5 logstd-4 | 122880 | -0.0103 | 0.482 | 0.6094 | 0.0292 |
+| lr1e-5 logstd-5 | 40960 | -0.0031 | 0.490 | 0.6022 | 0.0108 |
+| lr1e-5 logstd-5 | 81920 | -0.0042 | 0.490 | 0.6034 | 0.0108 |
+| lr1e-5 logstd-5 | 122880 | -0.0044 | 0.490 | 0.6138 | 0.0108 |
+
+Lower LR/noise made the on-policy paired metric substantially less negative and
+reduced action deltas by about 3x, but the signal remained below zero.
+
+Matched validation on
+`results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json`:
+
+| policy | initial distance | final distance | reduction | reduction fraction | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 1.0671 | 0.6020 | 0.4651 | 0.7969 | - |
+| terminal-only lr3e-5 logstd-4 | 1.0671 | 0.6086 | 0.4585 | 0.7896 | 0.0024 |
+| terminal-only lr1e-5 logstd-5 | 1.0671 | 0.6081 | 0.4590 | 0.7893 | 0.0007 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1/eval_local_n4096_val_b1_manifest.json`
+
+Interpretation:
+
+Lower LR/noise stabilizes the training objective but mostly suppresses the
+policy update; held-out local validation is still worse than frozen. This makes
+the cached paired local-R3 branch look bottlenecked by objective/data signal,
+not by the obvious PPO noise/LR setting alone. The next useful step is likely a
+broader reset bank or a different distance/task proxy rather than further
+single-manifest knob tuning.

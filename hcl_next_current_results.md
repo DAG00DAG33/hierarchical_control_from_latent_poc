@@ -421,6 +421,7 @@ One 4096-env update is mechanically successful but not yet useful:
 | cached-paired local R3 bc1 dense | 4096 | 40960 | -0.0098 | 0.478 | 0.6066 |
 | cached-paired local R3 bc1 dense | 4096 | 122880 | -0.0151 | 0.471 | 0.6000 |
 | cached-paired local R3 bc1 terminal-only | 4096 | 122880 | -0.0103 | 0.482 | 0.6086 |
+| cached-paired local R3 lr1e-5 logstd-5 | 4096 | 122880 | -0.0044 | 0.490 | 0.6081 |
 
 The matched validation manifest had identical initial distance (`1.0671`), so
 the one-update cached-paired policy was slightly worse than frozen locally. The
@@ -429,7 +430,9 @@ manifest (`final distance 0.6000` vs frozen `0.6020`), but the effect is tiny
 and the training paired-improvement signal became more negative across updates.
 Terminal-only paired training improved the training paired metric relative to
 dense progress, but failed held-out validation. This is mechanically useful
-infrastructure, not yet a convincing RL improvement.
+infrastructure, not yet a convincing RL improvement. Lowering LR/noise made the
+training paired metric less negative and reduced action deltas, but also failed
+held-out validation.
 
 ## Current Best Policies
 
@@ -475,9 +478,10 @@ The next useful directions are:
    Cached local-reset paired reward is now implemented and avoids simultaneous
    branch desync, but three 4096-env updates still showed negative training
    paired improvement and only a tiny held-out local gain. Terminal-only paired
-   reward improved the training signal but regressed validation. The next
-   objective check should change the optimization/data regime, not simply scale
-   the same formulation: lower LR/action noise, broaden the reset bank, or move
+   reward improved the training signal but regressed validation. Lower
+   LR/action noise improved the training metric but suppressed useful held-out
+   action changes. The next objective check should change the data/target
+   regime, not simply scale the same formulation: broaden the reset bank or move
    toward a more task-aligned signal than local reachability-distance
    improvement alone.
    The privileged direct hard-start check shows that large selected-local gains
