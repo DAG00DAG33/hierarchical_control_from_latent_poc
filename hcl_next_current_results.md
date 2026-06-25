@@ -323,6 +323,32 @@ slightly (`0.696` vs `0.683`), but not success. The paired objective is cleaner
 than absolute terminal distance, but by itself it still does not establish a
 robust policy improvement.
 
+### Privileged-state sanity narrows the RL bottleneck
+
+The privileged-z experiments remain the upper-bound diagnostic where
+representation should not be the main bottleneck. The best positive result there
+is still the residual A-clean n=1800 run:
+
+| policy | learned-high success | oracle-goal success | note |
+| --- | ---: | ---: | --- |
+| frozen privileged-z n=1800 | 0.470 | 0.690 | 100-episode PZ window |
+| residual alpha 0.25 | 0.580 | 0.650 | improves learned-high, hurts oracle-goal |
+
+I also checked the stronger-looking direct paired hard-start checkpoint against
+a same-seed frozen baseline on `9900000..9900199`:
+
+| policy | mode | success | return |
+| --- | --- | ---: | ---: |
+| frozen privileged-z n=1800 | learned-high | 0.560 | 44.74 |
+| direct paired hard-start | learned-high | 0.515 | 40.47 |
+| frozen privileged-z n=1800 | oracle-goal | 0.720 | 48.69 |
+| direct paired hard-start | oracle-goal | 0.700 | 47.11 |
+
+So privileged state confirms the idea is not completely dead, but the stronger
+direct paired local improvements still do not transfer. The current bottleneck
+is not only visual representation; it is the objective/deployment alignment of
+local RL updates.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -365,7 +391,10 @@ The next useful directions are:
    solve this. Paired terminal reward is cleaner and improved local raw
    reduction, but the 40k exact serial check was success-neutral. The next
    objective should either make the paired improvement larger or include a more
-   task-aligned signal than local reachability-distance improvement alone.
+   task-aligned signal than local reachability-distance improvement alone. The
+   privileged direct hard-start check shows that large selected-local gains can
+   still hurt closed-loop deployment, so checkpoint selection needs deployment
+   evidence or a better local-to-task proxy.
 
 3. Revisit horizon/representation only after the gate/objective question.
    The current effect32 interface is goal-dependent, so the main bottleneck is
@@ -422,4 +451,8 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_p
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/train_metrics.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/serial_eval_50_seed4505000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/paired_vs_frozen_serial50_seed4505000.json
+results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
+results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
+results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_hierarchy_200eps.json
+results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_oracle_200eps.json
 ```

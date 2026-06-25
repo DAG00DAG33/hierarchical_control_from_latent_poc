@@ -861,3 +861,63 @@ alpha `0.25` is useful, 47% to 58%. For B, the n=1800 base is best in learned-hi
 mode, and residuals mostly reduce success. For C, alpha `0.25` and `0.50` give a
 small learned-high gain, 25% to 28%, with alpha `0.50` also improving oracle-goal
 success from 46% to 51%.
+
+## 2026-06-25 - PZ-13: Matched direct paired checkpoint validation
+
+The direct paired privileged-z runs already had local paired evals and two
+closed-loop files for the hard-start checkpoint, but they were missing a
+same-seed frozen baseline in the log. I evaluated the n=1800 clean
+multi-offset base checkpoint on the same 200-episode seed window:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-privileged-z \
+  --checkpoint artifacts/incremental/privileged_z/clean_official_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --mode oracle_hierarchy \
+  --episodes 200 \
+  --seed-start 9900000 \
+  --num-envs 200 \
+  --output results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json \
+  --force
+```
+
+Matched closed-loop comparison:
+
+| policy | mode | success | return | action delta/residual norm |
+| --- | --- | ---: | ---: | ---: |
+| base n=1800 clean | learned-high hierarchy | 0.560 | 44.74 | 0.0000 |
+| direct paired hard-start | learned-high hierarchy | 0.515 | 40.47 | 0.0102 |
+| base n=1800 clean | oracle-goal hierarchy | 0.720 | 48.69 | 0.0000 |
+| direct paired hard-start | oracle-goal hierarchy | 0.700 | 47.11 | 0.0143 |
+
+Relevant direct checkpoint and eval artifacts:
+
+- `artifacts/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m/seed0/latest.pt`
+- `results/incremental/privileged_z_direct/hcl_next_direct_from_basecap5_delta025_imp05_hardmse005_final_layer_n4096_1m/seed0/history.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_hierarchy_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_oracle_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json`
+- `results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json`
+
+Interpretation:
+
+This direct paired privileged-z checkpoint improves selected hard local starts
+in the paired local metric, but it does not transfer to closed-loop success. On
+the matched seed window it is worse than the frozen base in both learned-high
+and oracle-goal modes. Together with PZ-12, this narrows the privileged-state
+upper-bound story: residual alpha `0.25` on A clean n=1800 remains the only
+clear learned-high privileged RL gain so far; more direct paired training on
+hard local starts is not the next useful direction unless the local objective is
+made more task-aligned.
