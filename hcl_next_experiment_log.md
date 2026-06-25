@@ -8418,3 +8418,88 @@ The practical conclusion is:
 - for a final claim, validate `0.00121` on additional fresh seed windows or
   choose the threshold by a separate held-out selector bank before final test
   reporting.
+
+## Effect32 FiLM R3 residual-L2 gate five-bank validation
+
+I evaluated the selected residual-L2 gate threshold on two additional fresh
+500-episode banks, `seed_start=3800000` and `seed_start=3900000`, using matched
+frozen and ungated R3 references.
+
+### Command template
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --episodes 500 \
+  --seed-start 3800000|3900000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --residual-l2-gate-max 0.00121 \
+  --distance-metric reachability \
+  --force
+```
+
+### Five-bank result
+
+| eval seed start | frozen | R3 ungated | R3 residual gate |
+| ---: | ---: | ---: | ---: |
+| 3500000 | 0.634 | 0.684 | 0.684 |
+| 3600000 | 0.662 | 0.638 | 0.668 |
+| 3700000 | 0.622 | 0.638 | 0.650 |
+| 3800000 | 0.684 | 0.652 | 0.654 |
+| 3900000 | 0.654 | 0.644 | 0.658 |
+
+Aggregate:
+
+| policy | mean success | mean max reward | paired improvements | paired regressions | paired net |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.651 | 0.751 | n/a | n/a | n/a |
+| R3 ungated | 0.651 | 0.751 | 534 | 534 | 0 |
+| R3 residual gate | 0.663 | 0.758 | 548 | 519 | +29 |
+
+Per-bank paired net:
+
+| eval seed start | R3 ungated | R3 residual gate |
+| ---: | ---: | ---: |
+| 3500000 | +25 | +25 |
+| 3600000 | -12 | +3 |
+| 3700000 | +8 | +14 |
+| 3800000 | -16 | -15 |
+| 3900000 | -5 | +2 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final500_seed3800000/eval_500_seed3800000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3800000/eval_500_seed3800000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final500_seed3800000/eval_500_seed3800000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final500_seed3900000/eval_500_seed3900000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3900000/eval_500_seed3900000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final500_seed3900000/eval_500_seed3900000.json`
+
+### Interpretation
+
+The five-bank result is positive but modest. The residual-gated policy has the
+best aggregate success and reward, and it improves paired net wins over ungated
+R3:
+
+```text
+frozen success mean:        0.651
+ungated R3 success mean:    0.651
+residual-gated R3 mean:     0.663
+```
+
+However, the new `seed_start=3800000` bank favors frozen over both tuned
+variants (`0.684` frozen versus `0.654` gated). The gate reduces damage relative
+to ungated R3 on most windows, but it does not eliminate regressions. This
+means the gated R3 policy is the best current real-compatible variant, but the
+claim should remain "small, somewhat stable improvement" rather than a decisive
+RL breakthrough.
+
+The next useful work should either:
+
+- validate the gate on a larger final bank after fixing the threshold, or
+- improve the gate from a scalar action-delta threshold to a state/goal-aware
+  selector trained from the per-episode diagnostics now emitted by eval.
