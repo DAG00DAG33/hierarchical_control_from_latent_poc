@@ -8980,3 +8980,85 @@ right deployment policy: when exact pairing is available, it keeps only a small
 fraction of R3's gains and underperforms ungated R3. Future selector work should
 train/evaluate on serial exact-seed or reset-bank data, not on unaligned vector
 episode arrays.
+
+## Exact-paired initial selector fit
+
+I added `low-level-rl fit-serial-selector`, which fits the same three-feature
+initial selector only from serial exact-paired JSONs:
+
+```text
+features = [
+  episode_initial_selected_distance,
+  episode_initial_raw_distance,
+  episode_initial_base_action_l2,
+]
+```
+
+It refuses unaligned serial files, fits a ridge linear classifier on discordant
+train outcomes, chooses the threshold that maximizes train mixed success, and
+optionally reports an exact-paired validation mix.
+
+I used the serial `4501000` window for fitting and a fresh serial `4502000`
+window for validation:
+
+```bash
+uv run hcl-poc low-level-rl fit-serial-selector \
+  --base-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4501000/serial_eval_50_seed4501000.json \
+  --candidate-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/serial_eval_50_seed4501000.json \
+  --validation-base-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4502000/serial_eval_50_seed4502000.json \
+  --validation-candidate-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4502000/serial_eval_50_seed4502000.json \
+  --output results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/init_selector_fit_train4501000_valid4502000.json \
+  --force
+```
+
+Fitted selector:
+
+```text
+weights:   [-0.5096282363, -0.1020845994, -0.3853654265]
+mean:      [ 0.8209013343,  1.9272705317,  1.1766604185]
+std:       [ 0.0968373716,  0.6078169942,  0.1958861202]
+threshold: -0.4030666649
+```
+
+Offline exact-paired mix:
+
+| split | frozen | R3 | selector mix | tuned rate | net vs frozen |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| train 4501000 | 0.620 | 0.700 | 0.780 | 0.700 | +8 |
+| validation 4502000 | 0.740 | 0.660 | 0.660 | 0.680 | -4 |
+
+I then ran the fitted selector directly on the validation seed window with
+full-precision parameters:
+
+| policy | success | max reward | raw local reduction | tuned rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.740 | 0.808 | 0.438 | - |
+| R3 ungated | 0.660 | 0.757 | 0.423 | - |
+| fitted selector direct | 0.640 | 0.743 | 0.443 | 0.680 |
+
+The direct selector chose exactly the same seeds as the offline mix, but one
+episode outcome differed (`4502023`), so the direct result is slightly worse
+than the offline exact-paired estimate. The conclusion is unchanged: the fitted
+initial selector overfits badly and fails validation.
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4502000/serial_eval_50_seed4502000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4502000/serial_eval_50_seed4502000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/init_selector_fit_train4501000_valid4502000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_fitselector_exact_serial50_seed4502000/serial_eval_50_seed4502000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_fitselector_exact_serial50_seed4502000/paired_vs_frozen_serial50_seed4502000.json`
+
+### Interpretation
+
+Even with exact seed identity and a fitting utility that avoids the earlier
+vector-array pairing mistake, a one-shot initial selector is not reliable. It
+can overfit a 50-seed window, but it does not generalize to a fresh 50-seed
+window and can underperform both frozen and ungated R3.
+
+This pushes the next useful selector direction away from episode-initial
+features and toward either:
+
+- a larger fixed reset-bank dataset with enough samples to train a selector; or
+- a step/segment-level selector that can observe current trajectory state rather
+  than committing at the first action.

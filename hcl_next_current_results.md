@@ -232,6 +232,19 @@ I also added `low-level-rl compare-serial`, which writes exact paired counts
 only after verifying matching `episode_seed` arrays. Vector eval JSONs are now
 marked `eval_mode: vector_auto_reset_unpaired` with `episode_seed: null`.
 
+I then added `low-level-rl fit-serial-selector` and fit a three-feature initial
+selector on exact paired serial data. It overfit:
+
+| split | frozen | R3 | selector |
+| --- | ---: | ---: | ---: |
+| train 4501000 | 0.620 | 0.700 | 0.780 |
+| validation 4502000 offline mix | 0.740 | 0.660 | 0.660 |
+| validation 4502000 direct run | 0.740 | 0.660 | 0.640 |
+
+So even after fixing the pairing methodology, a one-shot initial selector is
+not reliable. The next selector attempt should use a larger fixed reset-bank
+dataset or move to step/segment-level decisions.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -265,7 +278,8 @@ The next useful directions are:
    Initial episode features and scalar current-distance gating are both weak.
    A next gate should not be trained from unaligned vector-eval arrays. First
    add explicit episode identity or a fixed reset-bank evaluator, then train a
-   multifeature step/segment selector.
+   multifeature step/segment selector. The exact-serial initial selector already
+   failed validation, so avoid more one-shot initial-feature gates.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. A better objective should optimize
@@ -312,4 +326,8 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_serial50_seed4501000/serial_eval_50_seed4501000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/paired_vs_frozen_serial50_seed4501000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_serial50_seed4501000/paired_vs_frozen_serial50_seed4501000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4502000/serial_eval_50_seed4502000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4502000/serial_eval_50_seed4502000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/init_selector_fit_train4501000_valid4502000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_fitselector_exact_serial50_seed4502000/serial_eval_50_seed4502000.json
 ```

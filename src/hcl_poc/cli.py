@@ -105,6 +105,7 @@ from hcl_poc.low_level_rl import (
     compare_serial_low_level_eval,
     evaluate_residual_rl,
     evaluate_residual_rl_serial,
+    fit_serial_initial_selector,
     record_low_level_rl_videos,
     train_direct_low_rl,
     train_residual_rl,
@@ -225,6 +226,22 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 Path(args.base_json),
                 Path(args.candidate_json),
                 output=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.low_level_rl_command == "fit-serial-selector":
+        console.print(
+            fit_serial_initial_selector(
+                Path(args.base_json),
+                Path(args.candidate_json),
+                Path(args.output),
+                validation_base_json=Path(args.validation_base_json)
+                if args.validation_base_json
+                else None,
+                validation_candidate_json=Path(args.validation_candidate_json)
+                if args.validation_candidate_json
+                else None,
+                ridge=args.ridge,
                 force=args.force,
             )
         )
@@ -1911,6 +1928,15 @@ def build_parser() -> argparse.ArgumentParser:
     compare_serial.add_argument("--output")
     compare_serial.add_argument("--force", action="store_true")
     compare_serial.set_defaults(func=low_level_rl_cmd)
+    fit_serial_selector = low_level_rl_sub.add_parser("fit-serial-selector")
+    fit_serial_selector.add_argument("--base-json", required=True)
+    fit_serial_selector.add_argument("--candidate-json", required=True)
+    fit_serial_selector.add_argument("--validation-base-json")
+    fit_serial_selector.add_argument("--validation-candidate-json")
+    fit_serial_selector.add_argument("--output", required=True)
+    fit_serial_selector.add_argument("--ridge", type=float, default=1.0)
+    fit_serial_selector.add_argument("--force", action="store_true")
+    fit_serial_selector.set_defaults(func=low_level_rl_cmd)
     train_r1 = low_level_rl_sub.add_parser("train-r1")
     train_r1.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
     train_r1.add_argument("--candidate", default="vae512_w2048_b1e6")

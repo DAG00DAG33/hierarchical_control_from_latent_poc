@@ -393,6 +393,150 @@ def compare_serial_low_level_eval(
     return output
 
 
+def fit_serial_initial_selector(
+    base_json: Path,
+    candidate_json: Path,
+    output: Path,
+    validation_base_json: Path | None = None,
+    validation_candidate_json: Path | None = None,
+    ridge: float = 1.0,
+    force: bool = False,
+) -> Path:
+    if output.exists() and not force:
+        return output
+    if ridge < 0.0:
+        raise ValueError("ridge must be non-negative")
+    base = json.loads(base_json.read_text())
+    candidate = json.loads(candidate_json.read_text())
+    feature_names = [
+        "episode_initial_selected_distance",
+        "episode_initial_raw_distance",
+        "episode_initial_base_action_l2",
+    ]
+
+    def load_pair(
+        left: dict[str, Any],
+        right: dict[str, Any],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
+        left_seeds = left.get("episode_seed")
+        right_seeds = right.get("episode_seed")
+        if left_seeds is None or right_seeds is None:
+            raise ValueError("Both serial eval JSONs must contain episode_seed")
+        if left_seeds != right_seeds:
+            raise ValueError("Serial eval episode_seed arrays do not match")
+        features = np.stack(
+            [np.asarray(left[name], dtype=np.float32) for name in feature_names],
+            axis=1,
+        )
+        left_success = np.asarray(left["episode_success"], dtype=np.float32)
+        right_success = np.asarray(right["episode_success"], dtype=np.float32)
+        if len(features) != len(left_success) or len(features) != len(right_success):
+            raise ValueError("Serial eval feature and success arrays have different lengths")
+        return features, left_success, right_success, [int(seed) for seed in left_seeds]
+
+    train_x, train_base_success, train_candidate_success, train_seeds = load_pair(
+        base, candidate
+    )
+    mean = train_x.mean(axis=0)
+    std = train_x.std(axis=0) + 1e-6
+    train_z = (train_x - mean) / std
+    discordant = train_base_success != train_candidate_success
+    if not bool(np.any(discordant)):
+        raise ValueError("No discordant serial outcomes are available for selector fitting")
+    labels = np.where(
+        train_candidate_success[discordant] > train_base_success[discordant],
+        1.0,
+        -1.0,
+    ).astype(np.float32)
+    design = train_z[discordant]
+    weights = np.linalg.solve(
+        design.T @ design + float(ridge) * np.eye(design.shape[1], dtype=np.float32),
+        design.T @ labels,
+    ).astype(np.float32)
+
+    def evaluate_split(
+        features: np.ndarray,
+        base_success: np.ndarray,
+        candidate_success: np.ndarray,
+        seeds: list[int],
+        threshold: float,
+    ) -> dict[str, Any]:
+        scores = ((features - mean) / std) @ weights
+        use_candidate = scores >= threshold
+        mixed = np.where(use_candidate, candidate_success, base_success)
+        improvements = (base_success == 0.0) & (mixed == 1.0)
+        regressions = (base_success == 1.0) & (mixed == 0.0)
+        return {
+            "episodes": int(len(base_success)),
+            "seed_start": int(seeds[0]) if seeds else None,
+            "seed_end": int(seeds[-1]) if seeds else None,
+            "base_success": float(base_success.mean()) if len(base_success) else None,
+            "candidate_success": float(candidate_success.mean())
+            if len(candidate_success)
+            else None,
+            "selector_success": float(mixed.mean()) if len(mixed) else None,
+            "selector_use_candidate_rate": float(use_candidate.mean())
+            if len(use_candidate)
+            else None,
+            "improvements": int(improvements.sum()),
+            "regressions": int(regressions.sum()),
+            "net_improvements": int(improvements.sum() - regressions.sum()),
+        }
+
+    train_scores = train_z @ weights
+    best: tuple[float, float] | None = None
+    for threshold in np.unique(train_scores):
+        mixed = np.where(
+            train_scores >= threshold,
+            train_candidate_success,
+            train_base_success,
+        )
+        score = float(mixed.mean())
+        item = (score, float(threshold))
+        if best is None or item[0] > best[0]:
+            best = item
+    if best is None:
+        raise RuntimeError("Failed to choose selector threshold")
+    _train_best_success, threshold = best
+    payload: dict[str, Any] = {
+        "base_json": str(base_json),
+        "candidate_json": str(candidate_json),
+        "feature_names": feature_names,
+        "ridge": float(ridge),
+        "weights": weights.astype(float).tolist(),
+        "mean": mean.astype(float).tolist(),
+        "std": std.astype(float).tolist(),
+        "threshold": threshold,
+        "train": evaluate_split(
+            train_x,
+            train_base_success,
+            train_candidate_success,
+            train_seeds,
+            threshold,
+        ),
+        "validation": None,
+    }
+    if validation_base_json is not None or validation_candidate_json is not None:
+        if validation_base_json is None or validation_candidate_json is None:
+            raise ValueError("Provide both validation base and candidate JSONs")
+        validation_base = json.loads(validation_base_json.read_text())
+        validation_candidate = json.loads(validation_candidate_json.read_text())
+        val_x, val_base_success, val_candidate_success, val_seeds = load_pair(
+            validation_base, validation_candidate
+        )
+        payload["validation_base_json"] = str(validation_base_json)
+        payload["validation_candidate_json"] = str(validation_candidate_json)
+        payload["validation"] = evaluate_split(
+            val_x,
+            val_base_success,
+            val_candidate_success,
+            val_seeds,
+            threshold,
+        )
+    write_json(output, payload)
+    return output
+
+
 class HierarchyRollout:
     def __init__(
         self,
