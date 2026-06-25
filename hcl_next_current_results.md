@@ -192,6 +192,27 @@ Combined over these two 500-episode windows:
 So current-distance gating reduces harm, but like residual-L2 gating it remains
 mostly neutral and does not establish a robust improvement over frozen.
 
+### Offline paired selectors were over-optimistic
+
+I added a runnable initial linear selector that chooses frozen or R3 at the
+first step of each episode from three features: initial selected distance,
+initial raw distance, and initial base-action L2. An offline selector trained on
+the 4100000 window looked promising when mixing separate frozen/R3 JSON arrays,
+but the direct mixed-policy eval failed:
+
+| window | frozen | R3 | direct selector |
+| --- | ---: | ---: | ---: |
+| 4100000 | 0.656 | 0.618 | 0.660 |
+| 4200000 | 0.656 | 0.658 | 0.604 |
+| 4300000 | 0.622 | 0.658 | 0.602 |
+
+This exposed an important evaluation caveat: per-episode arrays from separate
+vectorized closed-loop evals are not guaranteed to be seed-aligned once policies
+terminate and reset at different times. Aggregate success metrics are still
+valid, but paired counts from separate vector eval arrays are diagnostic only.
+Selector policies must be evaluated directly in the simulator or on an explicit
+fixed reset bank with stable episode IDs.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -223,8 +244,9 @@ The next useful directions are:
    The eval path now records per-episode success, reward, residual magnitude,
    saturation, local progress, and compact pre-decision state/goal features.
    Initial episode features and scalar current-distance gating are both weak.
-   A next gate should learn from multiple step/segment features rather than use
-   another hand-tuned one-dimensional threshold.
+   A next gate should not be trained from unaligned vector-eval arrays. First
+   add explicit episode identity or a fixed reset-bank evaluator, then train a
+   multifeature step/segment selector.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. A better objective should optimize
@@ -263,4 +285,7 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_distgatecheck500_seed4200000/eval_500_seed4200000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgatecheck500_seed4200000/eval_500_seed4200000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_distgate085_check500_seed4200000/eval_500_seed4200000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_traincheck500_seed4100000/eval_500_seed4100000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_check500_seed4200000/eval_500_seed4200000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_check500_seed4300000/eval_500_seed4300000.json
 ```

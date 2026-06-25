@@ -283,6 +283,10 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 else None,
                 residual_l2_gate_max=args.residual_l2_gate_max,
                 selected_distance_gate_max=args.selected_distance_gate_max,
+                initial_selector_weights=args.initial_selector_weights,
+                initial_selector_mean=args.initial_selector_mean,
+                initial_selector_std=args.initial_selector_std,
+                initial_selector_threshold=args.initial_selector_threshold,
                 force=args.force,
             )
         )
@@ -1933,6 +1937,10 @@ def build_parser() -> argparse.ArgumentParser:
     low_eval.add_argument("--ensemble-checkpoints", nargs="+")
     low_eval.add_argument("--residual-l2-gate-max", type=float)
     low_eval.add_argument("--selected-distance-gate-max", type=float)
+    low_eval.add_argument("--initial-selector-weights", nargs=3, type=float)
+    low_eval.add_argument("--initial-selector-mean", nargs=3, type=float)
+    low_eval.add_argument("--initial-selector-std", nargs=3, type=float)
+    low_eval.add_argument("--initial-selector-threshold", type=float)
     low_eval.add_argument(
         "--distance-metric",
         choices=["raw_l2", "reachability"],

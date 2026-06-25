@@ -8785,3 +8785,117 @@ selector should either:
   progress features; or
 - move back to the RL objective and create a larger, cleaner policy difference
   before trying to gate it.
+
+## Initial linear selector and vector-eval pairing caveat
+
+I added a runnable initial linear selector to `low-level-rl eval`:
+
+```text
+--initial-selector-weights w_selected w_raw w_base_action
+--initial-selector-mean mean_selected mean_raw mean_base_action
+--initial-selector-std std_selected std_raw std_base_action
+--initial-selector-threshold threshold
+```
+
+Feature order:
+
+```text
+initial selected distance, initial raw distance, initial base-action L2
+```
+
+The selector locks each episode to either the tuned policy or the frozen base
+policy at the first step. It records:
+
+- `initial_selector_feature_order`
+- `initial_selector_weights`
+- `initial_selector_mean`
+- `initial_selector_std`
+- `initial_selector_threshold`
+- `initial_selector_tuned_rate`
+- `episode_initial_selector_use_tuned`
+
+### Offline probe
+
+As a cheap probe, I fit a ridge linear classifier on the 4100000 window using
+only discordant frozen/R3 outcomes, then chose the score threshold that
+maximized the mixed success on that same training window.
+
+Fitted selector:
+
+```text
+weights:   [-0.0167040970, -0.1439550473,  0.0884878389]
+mean:      [ 0.7980023136,  1.9726019294,  1.2325225415]
+std:       [ 0.1136807627,  0.6093525598,  0.2191675288]
+threshold: -0.0202570547
+```
+
+The offline JSON-mixing estimate looked promising:
+
+| window | offline selector | frozen | R3 | select-tuned rate |
+| --- | ---: | ---: | ---: | ---: |
+| train 4100000 | 0.702 | 0.656 | 0.618 | 0.586 |
+| valid 4200000 | 0.678 | 0.656 | 0.658 | 0.588 |
+| valid 4300000 | 0.660 | 0.622 | 0.658 | 0.590 |
+
+### Direct eval
+
+I then ran the same fixed selector as an actual mixed policy:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_check500_seed4200000 \
+  --episodes 500 \
+  --seed-start 4200000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --initial-selector-weights -0.0167040970 -0.1439550473 0.0884878389 \
+  --initial-selector-mean 0.7980023136 1.9726019294 1.2325225415 \
+  --initial-selector-std 0.1136807627 0.6093525598 0.2191675288 \
+  --initial-selector-threshold -0.0202570547 \
+  --distance-metric reachability \
+  --force
+```
+
+The direct policy result did not validate:
+
+| window | frozen | R3 | direct selector | tuned rate |
+| --- | ---: | ---: | ---: | ---: |
+| 4100000 | 0.656 | 0.618 | 0.660 | 0.590 |
+| 4200000 | 0.656 | 0.658 | 0.604 | 0.617 |
+| 4300000 | 0.622 | 0.658 | 0.602 | 0.611 |
+
+Validation-only combined:
+
+| policy | episodes | success |
+| --- | ---: | ---: |
+| frozen | 1000 | 0.639 |
+| R3 ungated | 1000 | 0.658 |
+| direct initial selector | 1000 | 0.603 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_traincheck500_seed4100000/eval_500_seed4100000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_check500_seed4200000/eval_500_seed4200000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_check500_seed4300000/eval_500_seed4300000.json`
+
+### Interpretation
+
+The direct mixed-policy eval is authoritative. The offline selector estimate was
+too optimistic because per-episode arrays from separate vectorized closed-loop
+evals are not guaranteed to be seed-aligned once policies terminate/reset at
+different times. Therefore:
+
+- aggregate success metrics remain valid;
+- paired counts from separate vectorized eval JSON arrays should be treated as
+  diagnostic only, not as exact paired rollouts;
+- any selector must be evaluated as an actual policy inside the simulator, or
+  on an explicit fixed reset bank with stable episode IDs.
+
+This is a useful correction. It invalidates the initial linear selector as a
+policy improvement and explains why offline gates looked better than direct
+validation. The next infrastructure improvement should be explicit episode
+identity or fixed reset-bank evaluation before training more learned selectors.

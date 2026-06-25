@@ -698,6 +698,10 @@ def evaluate_residual_rl(
     reachability_checkpoint_path: Path | None = None,
     residual_l2_gate_max: float | None = None,
     selected_distance_gate_max: float | None = None,
+    initial_selector_weights: list[float] | None = None,
+    initial_selector_mean: list[float] | None = None,
+    initial_selector_std: list[float] | None = None,
+    initial_selector_threshold: float | None = None,
     force: bool = False,
 ) -> Path:
     if checkpoint_path is not None and ensemble_checkpoint_paths:
@@ -706,6 +710,41 @@ def evaluate_residual_rl(
         raise ValueError("residual_l2_gate_max must be non-negative")
     if selected_distance_gate_max is not None and selected_distance_gate_max < 0.0:
         raise ValueError("selected_distance_gate_max must be non-negative")
+    selector_parts = [
+        initial_selector_weights,
+        initial_selector_mean,
+        initial_selector_std,
+        initial_selector_threshold,
+    ]
+    has_initial_selector = any(part is not None for part in selector_parts)
+    if has_initial_selector and not all(part is not None for part in selector_parts):
+        raise ValueError(
+            "initial selector requires weights, mean, std, and threshold"
+        )
+    selector_weights_np: np.ndarray | None = None
+    selector_mean_np: np.ndarray | None = None
+    selector_std_np: np.ndarray | None = None
+    if has_initial_selector:
+        if (
+            initial_selector_weights is None
+            or initial_selector_mean is None
+            or initial_selector_std is None
+            or initial_selector_threshold is None
+        ):
+            raise RuntimeError("Initial selector validation failed")
+        if (
+            len(initial_selector_weights) != 3
+            or len(initial_selector_mean) != 3
+            or len(initial_selector_std) != 3
+        ):
+            raise ValueError(
+                "initial selector weights, mean, and std must each have three values"
+            )
+        selector_weights_np = np.asarray(initial_selector_weights, dtype=np.float32)
+        selector_mean_np = np.asarray(initial_selector_mean, dtype=np.float32)
+        selector_std_np = np.asarray(initial_selector_std, dtype=np.float32)
+        if np.any(selector_std_np <= 0.0):
+            raise ValueError("initial selector std values must be positive")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     output = result / f"eval_{episodes}_seed{seed_start}.json"
     if output.exists() and not force:
@@ -807,6 +846,7 @@ def evaluate_residual_rl(
     episode_initial_base_action_l2: list[float] = []
     episode_initial_env_reward: list[float] = []
     episode_selected_distance_gate_rate: list[float] = []
+    episode_initial_selector_use_tuned: list[float] = []
     current_segment_initial: np.ndarray | None = None
     current_segment_raw_initial: np.ndarray | None = None
     current_final = np.zeros(num_envs, dtype=np.float32)
@@ -828,7 +868,10 @@ def evaluate_residual_rl(
     current_initial_base_action_l2 = np.full(num_envs, np.nan, dtype=np.float32)
     current_initial_env_reward = np.full(num_envs, np.nan, dtype=np.float32)
     current_distance_gate_sum = np.zeros(num_envs, dtype=np.float32)
+    current_initial_selector_use_tuned = np.ones(num_envs, dtype=bool)
     distance_gate_count = 0
+    initial_selector_tuned_count = 0
+    initial_selector_episode_count = 0
     while len(successes) < episodes:
         condition, base_action, distance, replan = rollout.condition()
         raw_distance = rollout.raw_distance(rollout.current_latent, rollout.held_goal)
@@ -844,6 +887,29 @@ def evaluate_residual_rl(
             current_initial_raw_distance[first_step] = raw_distance[first_step]
             current_initial_base_action_l2[first_step] = base_action_l2[first_step]
             current_initial_env_reward[first_step] = rollout.previous_env_reward[first_step]
+            if has_initial_selector:
+                if (
+                    selector_weights_np is None
+                    or selector_mean_np is None
+                    or selector_std_np is None
+                    or initial_selector_threshold is None
+                ):
+                    raise RuntimeError("Initial selector was not initialized")
+                selector_features = np.stack(
+                    [
+                        distance[first_step],
+                        raw_distance[first_step],
+                        base_action_l2[first_step],
+                    ],
+                    axis=1,
+                )
+                selector_scores = (
+                    (selector_features - selector_mean_np) / selector_std_np
+                ) @ selector_weights_np
+                selected_tuned = selector_scores >= initial_selector_threshold
+                current_initial_selector_use_tuned[first_step] = selected_tuned
+                initial_selector_tuned_count += int(selected_tuned.sum())
+                initial_selector_episode_count += int(first_step.sum())
         current_selected_distance_sum += distance
         current_raw_distance_sum += raw_distance
         current_base_action_l2_sum += base_action_l2
@@ -877,6 +943,12 @@ def evaluate_residual_rl(
             )
             residual = alpha * torch.tanh(raw_residual)
             unclipped = base_action + residual
+        if has_initial_selector:
+            use_base_np = ~current_initial_selector_use_tuned
+            if bool(np.any(use_base_np)):
+                use_base = torch.from_numpy(use_base_np).to(device)
+                unclipped = torch.where(use_base[:, None], base_action, unclipped)
+                residual = torch.where(use_base[:, None], torch.zeros_like(residual), residual)
         distance_gate_np = np.zeros(num_envs, dtype=bool)
         if residual_l2_gate_max is not None:
             residual_norm_before_gate = torch.linalg.vector_norm(residual, dim=-1)
@@ -994,6 +1066,9 @@ def evaluate_residual_rl(
                 episode_selected_distance_gate_rate.extend(
                     (current_distance_gate_sum[mask_np] / step_denominator).tolist()
                 )
+                episode_initial_selector_use_tuned.extend(
+                    current_initial_selector_use_tuned[mask_np].astype(np.float32).tolist()
+                )
                 current_max[mask_np] = -np.inf
                 current_residual_sum[mask_np] = 0.0
                 current_saturation_sum[mask_np] = 0.0
@@ -1012,6 +1087,7 @@ def evaluate_residual_rl(
                 current_initial_base_action_l2[mask_np] = np.nan
                 current_initial_env_reward[mask_np] = np.nan
                 current_distance_gate_sum[mask_np] = 0.0
+                current_initial_selector_use_tuned[mask_np] = True
         if len(successes) >= episodes:
             break
     rollout.close()
@@ -1035,6 +1111,17 @@ def evaluate_residual_rl(
         else None,
         "residual_l2_gate_max": residual_l2_gate_max,
         "selected_distance_gate_max": selected_distance_gate_max,
+        "initial_selector_feature_order": [
+            "initial_selected_distance",
+            "initial_raw_distance",
+            "initial_base_action_l2",
+        ]
+        if has_initial_selector
+        else None,
+        "initial_selector_weights": initial_selector_weights,
+        "initial_selector_mean": initial_selector_mean,
+        "initial_selector_std": initial_selector_std,
+        "initial_selector_threshold": initial_selector_threshold,
         "distance_metric": distance_metric,
         "reachability_checkpoint": str(reachability_checkpoint_path)
         if reachability_checkpoint_path is not None
@@ -1059,6 +1146,8 @@ def evaluate_residual_rl(
         "action_saturation_rate": saturation / max(action_count, 1),
         "residual_l2_mean": float(np.mean(residual_magnitudes)),
         "selected_distance_gate_rate": distance_gate_count / max(action_count, 1),
+        "initial_selector_tuned_rate": initial_selector_tuned_count
+        / max(initial_selector_episode_count, 1),
         "episode_success": successes[:count],
         "episode_final_reward": finals[:count],
         "episode_max_reward": maxima[:count],
@@ -1077,6 +1166,7 @@ def evaluate_residual_rl(
         "episode_initial_base_action_l2": episode_initial_base_action_l2[:count],
         "episode_initial_env_reward": episode_initial_env_reward[:count],
         "episode_selected_distance_gate_rate": episode_selected_distance_gate_rate[:count],
+        "episode_initial_selector_use_tuned": episode_initial_selector_use_tuned[:count],
     }
     write_json(output, payload)
     return output
