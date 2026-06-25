@@ -292,6 +292,7 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 distance_progress_weight=args.distance_progress_weight,
                 task_reward_weight=args.task_reward_weight,
                 task_progress_weight=args.task_progress_weight,
+                reward_mode=args.reward_mode,
                 distance_metric=args.distance_metric,
                 reachability_checkpoint_path=Path(args.reachability_checkpoint)
                 if args.reachability_checkpoint
@@ -1992,6 +1993,11 @@ def build_parser() -> argparse.ArgumentParser:
     train_r3.add_argument("--distance-progress-weight", type=float, default=1.0)
     train_r3.add_argument("--task-reward-weight", type=float, default=0.0)
     train_r3.add_argument("--task-progress-weight", type=float, default=0.0)
+    train_r3.add_argument(
+        "--reward-mode",
+        choices=["absolute", "paired"],
+        default="absolute",
+    )
     train_r3.add_argument(
         "--distance-metric",
         choices=["raw_l2", "reachability"],

@@ -15,7 +15,12 @@ from torch import nn
 from tqdm import trange
 
 from hcl_poc.config import Config
-from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs, _rl_backend
+from hcl_poc.incremental import (
+    _clone_mani_state_dict,
+    _phase4_dino_from_config,
+    _phase4_frame_inputs,
+    _rl_backend,
+)
 from hcl_poc.learned_interface import (
     _encode_effect_array,
     _load_hierarchy,
@@ -737,6 +742,46 @@ class HierarchyRollout:
         self.previous_env_reward = np.zeros(self.num_envs, dtype=np.float32)
 
     @torch.inference_mode()
+    def copy_branch_from(self, source: HierarchyRollout) -> None:
+        if self.num_envs != source.num_envs:
+            raise ValueError("Cannot copy rollout state between different vector sizes")
+        self.env.unwrapped.set_state_dict(
+            _clone_mani_state_dict(source.env.unwrapped.get_state_dict())
+        )
+        self.obs = self.env.unwrapped.get_obs()
+        self.frames = _phase4_frame_inputs(
+            self.obs, self.dino, int(self.config.get("dino.batch_size", 64))
+        )
+        self.normalized_frames = self.frozen.frame_norm.transform(self.frames)
+        self.anchor_frames = source.anchor_frames.copy()
+        self.current_latent = _encode_effect_progress(
+            self.frozen, self.anchor_frames, self.frames, self.device
+        )
+        self.previous_action = source.previous_action.copy()
+        self.held_goal = source.held_goal.copy()
+        self.countdown = source.countdown.copy()
+        self.previous_env_reward = source.previous_env_reward.copy()
+
+    @torch.inference_mode()
+    def current_condition(self) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
+        remaining = np.maximum(self.countdown, 1).astype(np.float32)
+        condition_np = _low_condition_array(
+            self.normalized_frames,
+            self.current_latent,
+            self.held_goal,
+            self.previous_action,
+            (remaining / self.frozen.horizon_steps)[:, None],
+            self.frozen.conditioning,
+        )
+        condition = torch.from_numpy(condition_np).to(self.device).float()
+        normalized_base = self.frozen.low_model(condition)
+        base_action = torch.from_numpy(
+            self.frozen.action_norm.inverse(normalized_base.cpu().numpy())
+        ).to(self.device)
+        distance = self.distance(self.current_latent, self.held_goal)
+        return condition, base_action, distance
+
+    @torch.inference_mode()
     def condition(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
@@ -757,21 +802,7 @@ class HierarchyRollout:
                 self.device,
             )
             self.countdown[replan] = self.frozen.update_period
-        remaining = np.maximum(self.countdown, 1).astype(np.float32)
-        condition_np = _low_condition_array(
-            self.normalized_frames,
-            self.current_latent,
-            self.held_goal,
-            self.previous_action,
-            (remaining / self.frozen.horizon_steps)[:, None],
-            self.frozen.conditioning,
-        )
-        condition = torch.from_numpy(condition_np).to(self.device).float()
-        normalized_base = self.frozen.low_model(condition)
-        base_action = torch.from_numpy(
-            self.frozen.action_norm.inverse(normalized_base.cpu().numpy())
-        ).to(self.device)
-        distance = self.distance(self.current_latent, self.held_goal)
+        condition, base_action, distance = self.current_condition()
         return condition, base_action, distance, replan
 
     @torch.inference_mode()
@@ -2475,12 +2506,15 @@ def train_direct_low_rl(
     task_progress_weight: float = 0.0,
     distance_metric: str = "raw_l2",
     reachability_checkpoint_path: Path | None = None,
+    reward_mode: str = "absolute",
     candidate: str = VAE_CANDIDATE,
     rl_seed_offset: int = 0,
     force: bool = False,
 ) -> Path:
     if rl_seed_offset < 0:
         raise ValueError("rl_seed_offset must be non-negative")
+    if reward_mode not in {"absolute", "paired"}:
+        raise ValueError("reward_mode must be one of {'absolute', 'paired'}")
     if candidate == VAE_CANDIDATE and n_demo not in {500, 1000}:
         raise ValueError("Low-level RL currently supports N_demo in {500, 1000}")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
@@ -2537,6 +2571,7 @@ def train_direct_low_rl(
         "distance_progress_weight": distance_progress_weight,
         "task_reward_weight": task_reward_weight,
         "task_progress_weight": task_progress_weight,
+        "reward_mode": reward_mode,
         "distance_metric": distance_metric,
         "reachability_checkpoint": str(reachability_checkpoint_path)
         if reachability_checkpoint_path is not None
@@ -2577,6 +2612,20 @@ def train_direct_low_rl(
         distance_metric=distance_metric,
         reachability_checkpoint_path=reachability_checkpoint_path,
     )
+    base_rollout: HierarchyRollout | None = None
+    if reward_mode == "paired":
+        base_rollout = HierarchyRollout(
+            config,
+            frozen,
+            num_envs,
+            int(config.get("low_level_rl.train_seed_start", 3_000_000))
+            + seed * 100_000
+            + rl_seed_offset * 100_000,
+            device,
+            distance_metric=distance_metric,
+            reachability_checkpoint_path=reachability_checkpoint_path,
+        )
+        base_rollout.copy_branch_from(rollout)
     condition_buf = torch.zeros((rollout_steps, num_envs, condition_dim), device=device)
     raw_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
     base_action_buf = torch.zeros((rollout_steps, num_envs, 3), device=device)
@@ -2603,10 +2652,24 @@ def train_direct_low_rl(
             agent.eval()
             distance_values: list[float] = []
             terminal_distances: list[float] = []
+            base_terminal_distances: list[float] = []
+            paired_improvements: list[float] = []
             delta_values: list[float] = []
             saturation_count = 0
             for step in range(rollout_steps):
-                condition, base_action, distance, _replan = rollout.condition()
+                condition, base_action, distance, replan = rollout.condition()
+                if base_rollout is not None:
+                    if np.any(replan):
+                        if not np.all(replan):
+                            raise RuntimeError(
+                                "paired reward mode currently requires synchronized replans"
+                            )
+                        base_rollout.copy_branch_from(rollout)
+                    base_condition, base_branch_action, base_distance = (
+                        base_rollout.current_condition()
+                    )
+                    if base_condition.shape != condition.shape:
+                        raise RuntimeError("paired branch condition shape mismatch")
                 condition_buf[step] = condition
                 base_action_buf[step] = base_action
                 done_buf[step] = next_done
@@ -2619,12 +2682,39 @@ def train_direct_low_rl(
                 reward, done, metrics = rollout.step(
                     action,
                     distance,
-                    terminal_weight,
+                    0.0 if base_rollout is not None else terminal_weight,
                     distance_progress_weight,
                     task_reward_weight,
                     task_progress_weight,
                     np.zeros(num_envs, dtype=np.float32),
                 )
+                if base_rollout is not None:
+                    _base_reward, base_done, base_metrics = base_rollout.step(
+                        base_branch_action,
+                        base_distance,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        np.zeros(num_envs, dtype=np.float32),
+                    )
+                    if not np.array_equal(metrics["segment_end"], base_metrics["segment_end"]):
+                        raise RuntimeError("paired branch segment boundaries diverged")
+                    if not np.array_equal(done.astype(bool), base_done.astype(bool)):
+                        raise RuntimeError("paired branch done flags diverged")
+                    segment_end = metrics["segment_end"].astype(bool)
+                    paired_improvement = (
+                        base_metrics["next_distance"] - metrics["next_distance"]
+                    ).astype(np.float32)
+                    reward = reward + (
+                        terminal_weight
+                        * paired_improvement
+                        * segment_end.astype(np.float32)
+                    )
+                    base_terminal_distances.extend(
+                        base_metrics["next_distance"][segment_end].tolist()
+                    )
+                    paired_improvements.extend(paired_improvement[segment_end].tolist())
                 reward_buf[step] = torch.from_numpy(reward).to(device)
                 local_done = done.astype(bool)
                 if bool(config.get("low_level_rl.segment_terminates_gae", True)):
@@ -2632,7 +2722,11 @@ def train_direct_low_rl(
                 next_done = torch.from_numpy(local_done.astype(np.float32)).to(device)
                 distance_values.extend(distance.tolist())
                 terminal_distances.extend(metrics["next_distance"][metrics["segment_end"]].tolist())
-                delta_values.extend(torch.linalg.vector_norm(raw_action - base_action, dim=-1).cpu().tolist())
+                delta_values.extend(
+                    torch.linalg.vector_norm(raw_action - base_action, dim=-1)
+                    .cpu()
+                    .tolist()
+                )
                 saturation_count += int(torch.any(raw_action != action, dim=-1).sum().cpu())
                 global_step += num_envs
                 progress.update(min(num_envs, total_steps - progress.n))
@@ -2716,6 +2810,15 @@ def train_direct_low_rl(
                 "mean_terminal_distance": float(np.mean(terminal_distances))
                 if terminal_distances
                 else None,
+                "mean_base_terminal_distance": float(np.mean(base_terminal_distances))
+                if base_terminal_distances
+                else None,
+                "mean_paired_improvement": float(np.mean(paired_improvements))
+                if paired_improvements
+                else None,
+                "fraction_paired_improved": float(np.mean(np.asarray(paired_improvements) > 0.0))
+                if paired_improvements
+                else None,
                 "mean_direct_delta_l2": float(np.mean(delta_values)),
                 "action_saturation_rate": saturation_count / batch_size,
                 "policy_loss": float(policy_loss.detach().cpu()),
@@ -2725,7 +2828,10 @@ def train_direct_low_rl(
                 "elapsed_s": timer.elapsed(),
             }
             history.append(row)
-            score = -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
+            if reward_mode == "paired":
+                score = float(row["mean_paired_improvement"] or -math.inf)
+            else:
+                score = -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
             if score > best_score:
                 best_score = score
                 _save_checkpoint(
@@ -2753,5 +2859,7 @@ def train_direct_low_rl(
                 next_checkpoint += checkpoint_every
     finally:
         progress.close()
+        if base_rollout is not None:
+            base_rollout.close()
         rollout.close()
     return latest
