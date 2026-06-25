@@ -103,6 +103,7 @@ from hcl_poc.learned_interface import (
 from hcl_poc.low_level_rl import (
     audit_low_level_rl,
     evaluate_residual_rl,
+    evaluate_residual_rl_serial,
     record_low_level_rl_videos,
     train_direct_low_rl,
     train_residual_rl,
@@ -260,6 +261,30 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 else None,
                 candidate=args.candidate,
                 rl_seed_offset=args.rl_seed_offset,
+                force=args.force,
+            )
+        )
+    elif args.low_level_rl_command == "eval-serial":
+        console.print(
+            evaluate_residual_rl_serial(
+                config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                run_name=args.run_name,
+                episodes=args.episodes,
+                seed_start=args.seed_start,
+                candidate=args.candidate,
+                checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+                distance_metric=args.distance_metric,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
+                residual_l2_gate_max=args.residual_l2_gate_max,
+                selected_distance_gate_max=args.selected_distance_gate_max,
+                initial_selector_weights=args.initial_selector_weights,
+                initial_selector_mean=args.initial_selector_mean,
+                initial_selector_std=args.initial_selector_std,
+                initial_selector_threshold=args.initial_selector_threshold,
                 force=args.force,
             )
         )
@@ -1949,6 +1974,28 @@ def build_parser() -> argparse.ArgumentParser:
     low_eval.add_argument("--reachability-checkpoint")
     low_eval.add_argument("--force", action="store_true")
     low_eval.set_defaults(func=low_level_rl_cmd)
+    low_eval_serial = low_level_rl_sub.add_parser("eval-serial")
+    low_eval_serial.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    low_eval_serial.add_argument("--candidate", default="vae512_w2048_b1e6")
+    low_eval_serial.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
+    low_eval_serial.add_argument("--run-name", required=True)
+    low_eval_serial.add_argument("--episodes", type=int, required=True)
+    low_eval_serial.add_argument("--seed-start", type=int, required=True)
+    low_eval_serial.add_argument("--checkpoint")
+    low_eval_serial.add_argument("--residual-l2-gate-max", type=float)
+    low_eval_serial.add_argument("--selected-distance-gate-max", type=float)
+    low_eval_serial.add_argument("--initial-selector-weights", nargs=3, type=float)
+    low_eval_serial.add_argument("--initial-selector-mean", nargs=3, type=float)
+    low_eval_serial.add_argument("--initial-selector-std", nargs=3, type=float)
+    low_eval_serial.add_argument("--initial-selector-threshold", type=float)
+    low_eval_serial.add_argument(
+        "--distance-metric",
+        choices=["raw_l2", "reachability"],
+        default="raw_l2",
+    )
+    low_eval_serial.add_argument("--reachability-checkpoint")
+    low_eval_serial.add_argument("--force", action="store_true")
+    low_eval_serial.set_defaults(func=low_level_rl_cmd)
     low_video = low_level_rl_sub.add_parser("video")
     low_video.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
     low_video.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)

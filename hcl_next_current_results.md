@@ -213,6 +213,20 @@ valid, but paired counts from separate vector eval arrays are diagnostic only.
 Selector policies must be evaluated directly in the simulator or on an explicit
 fixed reset bank with stable episode IDs.
 
+I added `low-level-rl eval-serial` for this purpose. It resets one environment
+per explicit seed and writes `episode_seed` to the JSON. On a compact 50-seed
+debug window (`4501000..4501049`), exact pairing worked:
+
+| policy | success | improvements | regressions | net |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.620 | - | - | - |
+| R3 ungated | 0.700 | 10 | 6 | +4 |
+| initial linear selector | 0.640 | 5 | 4 | +1 |
+
+This confirms that serial exact-seed eval is the right small-window tool for
+selector debugging. It also further weakens the initial linear selector: with
+reliable pairing, it underperforms ungated R3 on this window.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -288,4 +302,7 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_traincheck500_seed4100000/eval_500_seed4100000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_check500_seed4200000/eval_500_seed4200000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_check500_seed4300000/eval_500_seed4300000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4501000/serial_eval_50_seed4501000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/serial_eval_50_seed4501000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_serial50_seed4501000/serial_eval_50_seed4501000.json
 ```

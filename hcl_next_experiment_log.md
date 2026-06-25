@@ -8899,3 +8899,68 @@ This is a useful correction. It invalidates the initial linear selector as a
 policy improvement and explains why offline gates looked better than direct
 validation. The next infrastructure improvement should be explicit episode
 identity or fixed reset-bank evaluation before training more learned selectors.
+
+## Serial exact-seed low-level evaluator
+
+I added `low-level-rl eval-serial`, a slower evaluator that resets one
+environment explicitly for every seed and writes `episode_seed` into the JSON.
+This is intended for paired selector/debug work where episode identity matters.
+It uses the same effect-progress latent update as the vector low-level rollout,
+not the older video helper's plain frame encoder path.
+
+Example command:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000 \
+  --episodes 50 \
+  --seed-start 4501000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --distance-metric reachability \
+  --force
+```
+
+I ran a compact exact-seed diagnostic over seeds `4501000..4501049`:
+
+| policy | success | max reward | raw local reduction | selector tuned rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.620 | 0.737 | 0.861 | - |
+| R3 ungated | 0.700 | 0.785 | 0.905 | - |
+| initial linear selector | 0.640 | 0.742 | 0.852 | 0.480 |
+
+Exact paired counts against frozen:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| R3 ungated | 10 | 6 | +4 |
+| initial linear selector | 5 | 4 | +1 |
+
+All three JSON files have aligned `episode_seed` arrays:
+
+```text
+4501000, 4501001, ..., 4501049
+```
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4501000/serial_eval_50_seed4501000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial50_seed4501000/serial_eval_50_seed4501000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_initselector_serial50_seed4501000/serial_eval_50_seed4501000.json`
+
+### Interpretation
+
+The serial evaluator fixes the immediate paired-evaluation problem for small
+debug windows. It is too slow to replace vectorized final eval, but it is the
+right tool for learning or auditing selectors until a proper local reset bank is
+available.
+
+This 50-seed window also reinforces that the initial linear selector is not the
+right deployment policy: when exact pairing is available, it keeps only a small
+fraction of R3's gains and underperforms ungated R3. Future selector work should
+train/evaluate on serial exact-seed or reset-bank data, not on unaligned vector
+episode arrays.

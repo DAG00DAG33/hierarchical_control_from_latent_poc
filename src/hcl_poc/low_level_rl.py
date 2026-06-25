@@ -1172,6 +1172,466 @@ def evaluate_residual_rl(
     return output
 
 
+def _validate_initial_selector(
+    initial_selector_weights: list[float] | None,
+    initial_selector_mean: list[float] | None,
+    initial_selector_std: list[float] | None,
+    initial_selector_threshold: float | None,
+) -> tuple[bool, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    selector_parts = [
+        initial_selector_weights,
+        initial_selector_mean,
+        initial_selector_std,
+        initial_selector_threshold,
+    ]
+    has_initial_selector = any(part is not None for part in selector_parts)
+    if has_initial_selector and not all(part is not None for part in selector_parts):
+        raise ValueError("initial selector requires weights, mean, std, and threshold")
+    if not has_initial_selector:
+        return False, None, None, None
+    if (
+        initial_selector_weights is None
+        or initial_selector_mean is None
+        or initial_selector_std is None
+    ):
+        raise RuntimeError("Initial selector validation failed")
+    if (
+        len(initial_selector_weights) != 3
+        or len(initial_selector_mean) != 3
+        or len(initial_selector_std) != 3
+    ):
+        raise ValueError("initial selector weights, mean, and std must each have three values")
+    selector_weights_np = np.asarray(initial_selector_weights, dtype=np.float32)
+    selector_mean_np = np.asarray(initial_selector_mean, dtype=np.float32)
+    selector_std_np = np.asarray(initial_selector_std, dtype=np.float32)
+    if np.any(selector_std_np <= 0.0):
+        raise ValueError("initial selector std values must be positive")
+    return has_initial_selector, selector_weights_np, selector_mean_np, selector_std_np
+
+
+@torch.inference_mode()
+def evaluate_residual_rl_serial(
+    config: Config,
+    n_demo: int,
+    seed: int,
+    run_name: str,
+    episodes: int,
+    seed_start: int,
+    candidate: str = VAE_CANDIDATE,
+    checkpoint_path: Path | None = None,
+    distance_metric: str = "raw_l2",
+    reachability_checkpoint_path: Path | None = None,
+    residual_l2_gate_max: float | None = None,
+    selected_distance_gate_max: float | None = None,
+    initial_selector_weights: list[float] | None = None,
+    initial_selector_mean: list[float] | None = None,
+    initial_selector_std: list[float] | None = None,
+    initial_selector_threshold: float | None = None,
+    force: bool = False,
+) -> Path:
+    if residual_l2_gate_max is not None and residual_l2_gate_max < 0.0:
+        raise ValueError("residual_l2_gate_max must be non-negative")
+    if selected_distance_gate_max is not None and selected_distance_gate_max < 0.0:
+        raise ValueError("selected_distance_gate_max must be non-negative")
+    (
+        has_initial_selector,
+        selector_weights_np,
+        selector_mean_np,
+        selector_std_np,
+    ) = _validate_initial_selector(
+        initial_selector_weights,
+        initial_selector_mean,
+        initial_selector_std,
+        initial_selector_threshold,
+    )
+    artifact, result = _paths(config, n_demo, seed, run_name, candidate)
+    output = result / f"serial_eval_{episodes}_seed{seed_start}.json"
+    if output.exists() and not force:
+        return output
+
+    device = default_device()
+    frozen = _load_frozen(config, n_demo, seed, device, candidate)
+    residual_agent: ResidualActorCritic | None = None
+    direct_agent: DirectLowActorCritic | None = None
+    alpha = 0.0
+    global_step = 0
+    checkpoint_path = checkpoint_path or artifact / "latest.pt"
+    if checkpoint_path is not None and checkpoint_path.exists():
+        raw_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        recipe = raw_checkpoint.get("recipe", {})
+        method = str(recipe.get("method", "r1_residual_deterministic"))
+        distance_metric = str(recipe.get("distance_metric", "raw_l2"))
+        raw_reachability_checkpoint = recipe.get("reachability_checkpoint")
+        if raw_reachability_checkpoint is not None:
+            reachability_checkpoint_path = Path(str(raw_reachability_checkpoint))
+        if method == "r3_direct_last_layer":
+            direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
+        else:
+            residual_agent, checkpoint = _load_residual(checkpoint_path, device)
+            alpha = float(checkpoint["recipe"]["alpha"])
+        global_step = int(checkpoint["global_step"])
+    elif distance_metric == "reachability" and reachability_checkpoint_path is None:
+        reachability_checkpoint_path = (
+            _default_reachability_checkpoint(config, n_demo, seed)
+            if candidate == VAE_CANDIDATE
+            else _candidate_reachability_checkpoint(config, candidate, seed)
+        )
+
+    reachability_model: ReachabilityDistance | None = None
+    reachability_goal_norm: Standardizer | None = None
+    if distance_metric == "reachability":
+        if reachability_checkpoint_path is None:
+            raise ValueError("reachability distance metric requires a checkpoint")
+        reachability_model, reachability_goal_norm, _checkpoint = load_reachability_distance(
+            reachability_checkpoint_path, device
+        )
+        reachability_model.requires_grad_(False)
+    elif distance_metric != "raw_l2":
+        raise ValueError(f"Unknown low-level distance metric: {distance_metric}")
+
+    def selected_distance(current_latent: np.ndarray, goal_latent: np.ndarray) -> np.ndarray:
+        if distance_metric == "raw_l2":
+            return HierarchyRollout.raw_distance(current_latent, goal_latent)
+        if reachability_model is None or reachability_goal_norm is None:
+            raise RuntimeError("Reachability distance model was not initialized")
+        return _reachability_distance_values(
+            reachability_model,
+            reachability_goal_norm,
+            frozen,
+            current_latent,
+            goal_latent,
+            device,
+        )
+
+    env = gym.make(
+        config.get("env_id"),
+        obs_mode="rgb+state",
+        control_mode=config.get("control_mode"),
+        reward_mode="normalized_dense",
+        render_mode=None,
+        sim_backend=_rl_backend(config),
+        num_envs=1,
+        reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+    )
+    action_low_np = np.asarray(env.action_space.low, dtype=np.float32)
+    action_high_np = np.asarray(env.action_space.high, dtype=np.float32)
+    if action_low_np.ndim == 2:
+        action_low_np = action_low_np[0]
+        action_high_np = action_high_np[0]
+    action_low = torch.as_tensor(action_low_np, device=device)
+    action_high = torch.as_tensor(action_high_np, device=device)
+    dino = _phase4_dino_from_config(config, device)
+    zero_previous = frozen.action_norm.transform(np.zeros((1, 3), dtype=np.float32))
+    max_steps = int(config.get("env_max_episode_steps", 100))
+    threshold = _teacher_goal_threshold(config, n_demo, seed, candidate)["goal_threshold"]
+
+    episode_seed: list[int] = []
+    successes: list[float] = []
+    finals: list[float] = []
+    maxima: list[float] = []
+    steps_out: list[int] = []
+    episode_initial_selected_distance: list[float] = []
+    episode_initial_raw_distance: list[float] = []
+    episode_initial_base_action_l2: list[float] = []
+    episode_initial_selector_use_tuned: list[float] = []
+    episode_residual_l2_mean: list[float] = []
+    episode_action_saturation_rate: list[float] = []
+    episode_selected_distance_gate_rate: list[float] = []
+    episode_raw_segment_distance_reduction: list[float] = []
+    episode_segment_distance_reduction: list[float] = []
+    episode_segment_goal_reach_rate: list[float] = []
+    segment_initial_distances: list[float] = []
+    segment_final_distances: list[float] = []
+    raw_segment_initial_distances: list[float] = []
+    raw_segment_final_distances: list[float] = []
+    reached: list[float] = []
+    selected_metric_terminal_scores: list[float] = []
+    total_saturation = 0
+    total_actions = 0
+    total_distance_gate = 0
+    total_selector_tuned = 0
+    residual_magnitudes: list[float] = []
+
+    try:
+        for episode_index in trange(episodes, desc=f"serial low RL {run_name}"):
+            rollout_seed = seed_start + episode_index
+            obs, _info = env.reset(seed=[rollout_seed])
+            frames = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
+            normalized_frames = frozen.frame_norm.transform(frames)
+            anchor_frames = frames.copy()
+            current_latent = _encode_effect_progress(frozen, anchor_frames, frames, device)
+            previous_action = zero_previous.copy()
+            held_goal = np.zeros((1, frozen.goal_dim), dtype=np.float32)
+            countdown = 0
+            selected_tuned = True
+            selected_at_start = False
+            final_reward = 0.0
+            max_reward = -float("inf")
+            success = False
+            residual_sum = 0.0
+            saturation_sum = 0.0
+            distance_gate_sum = 0.0
+            raw_reduction_sum = 0.0
+            selected_reduction_sum = 0.0
+            reach_sum = 0.0
+            segment_count = 0
+            segment_initial = np.zeros(1, dtype=np.float32)
+            segment_raw_initial = np.zeros(1, dtype=np.float32)
+            step_count = 0
+
+            for _step in range(max_steps):
+                replan = countdown <= 0
+                if replan:
+                    high_condition = np.concatenate(
+                        [normalized_frames, previous_action], axis=-1
+                    )
+                    held_goal = (
+                        frozen.high_model(
+                            torch.from_numpy(high_condition).to(device).float()
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                    anchor_frames = frames.copy()
+                    current_latent = _encode_effect_progress(
+                        frozen, anchor_frames, frames, device
+                    )
+                    countdown = frozen.update_period
+                remaining = np.asarray(
+                    [[max(countdown, 1) / frozen.horizon_steps]], dtype=np.float32
+                )
+                condition_np = _low_condition_array(
+                    normalized_frames,
+                    current_latent,
+                    held_goal,
+                    previous_action,
+                    remaining,
+                    frozen.conditioning,
+                )
+                condition = torch.from_numpy(condition_np).to(device).float()
+                normalized_base = frozen.low_model(condition)
+                base_action = torch.from_numpy(
+                    frozen.action_norm.inverse(normalized_base.cpu().numpy())
+                ).to(device)
+                distance = selected_distance(current_latent, held_goal)
+                raw_distance = HierarchyRollout.raw_distance(current_latent, held_goal)
+                base_action_l2 = float(torch.linalg.vector_norm(base_action, dim=-1).cpu()[0])
+                if step_count == 0:
+                    episode_initial_selected_distance.append(float(distance[0]))
+                    episode_initial_raw_distance.append(float(raw_distance[0]))
+                    episode_initial_base_action_l2.append(base_action_l2)
+                    if has_initial_selector:
+                        if (
+                            selector_weights_np is None
+                            or selector_mean_np is None
+                            or selector_std_np is None
+                            or initial_selector_threshold is None
+                        ):
+                            raise RuntimeError("Initial selector was not initialized")
+                        selector_features = np.asarray(
+                            [[distance[0], raw_distance[0], base_action_l2]],
+                            dtype=np.float32,
+                        )
+                        selector_score = float(
+                            (
+                                ((selector_features - selector_mean_np) / selector_std_np)
+                                @ selector_weights_np
+                            )[0]
+                        )
+                        selected_tuned = selector_score >= initial_selector_threshold
+                    selected_at_start = selected_tuned
+                    if has_initial_selector:
+                        total_selector_tuned += int(selected_tuned)
+                if replan:
+                    segment_initial = distance.copy()
+                    segment_raw_initial = raw_distance.copy()
+
+                if direct_agent is not None:
+                    unclipped = direct_agent.get_action_and_value(
+                        condition, deterministic=True
+                    )[0]
+                    residual = unclipped - base_action
+                else:
+                    raw_residual = (
+                        residual_agent.get_action_and_value(condition, deterministic=True)[0]
+                        if residual_agent is not None
+                        else torch.zeros_like(base_action)
+                    )
+                    residual = alpha * torch.tanh(raw_residual)
+                    unclipped = base_action + residual
+                if has_initial_selector and not selected_tuned:
+                    unclipped = base_action
+                    residual = torch.zeros_like(residual)
+                if residual_l2_gate_max is not None:
+                    residual_norm_before_gate = float(
+                        torch.linalg.vector_norm(residual, dim=-1).cpu()[0]
+                    )
+                    if residual_norm_before_gate > residual_l2_gate_max:
+                        unclipped = base_action
+                        residual = torch.zeros_like(residual)
+                if selected_distance_gate_max is not None and float(distance[0]) > (
+                    selected_distance_gate_max
+                ):
+                    unclipped = base_action
+                    residual = torch.zeros_like(residual)
+                    distance_gate_sum += 1.0
+                    total_distance_gate += 1
+
+                action = torch.clamp(unclipped, action_low, action_high)
+                saturated = bool(torch.any(unclipped != action).cpu())
+                saturation_sum += float(saturated)
+                total_saturation += int(saturated)
+                total_actions += 1
+                residual_norm = float(torch.linalg.vector_norm(residual, dim=-1).cpu()[0])
+                residual_sum += residual_norm
+                residual_magnitudes.append(residual_norm)
+
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                next_frames = _phase4_frame_inputs(
+                    next_obs, dino, int(config.get("dino.batch_size", 64))
+                )
+                next_latent = _encode_effect_progress(
+                    frozen, anchor_frames, next_frames, device
+                )
+                next_distance = selected_distance(next_latent, held_goal)
+                raw_next_distance = HierarchyRollout.raw_distance(next_latent, held_goal)
+                if countdown == 1:
+                    segment_initial_distances.append(float(segment_initial[0]))
+                    segment_final_distances.append(float(next_distance[0]))
+                    raw_segment_initial_distances.append(float(segment_raw_initial[0]))
+                    raw_segment_final_distances.append(float(raw_next_distance[0]))
+                    reached_value = float(raw_next_distance[0] < threshold)
+                    reached.append(reached_value)
+                    selected_metric_terminal_scores.append(float(-next_distance[0]))
+                    raw_reduction_sum += float(segment_raw_initial[0] - raw_next_distance[0])
+                    selected_reduction_sum += float(segment_initial[0] - next_distance[0])
+                    reach_sum += reached_value
+                    segment_count += 1
+
+                previous_action = frozen.action_norm.transform(
+                    action.cpu().numpy().astype(np.float32)
+                )
+                countdown -= 1
+                obs = next_obs
+                frames = next_frames
+                normalized_frames = frozen.frame_norm.transform(frames)
+                current_latent = next_latent
+                final_reward = float(np.asarray(reward.cpu()).reshape(-1)[0])
+                max_reward = max(max_reward, final_reward)
+                if "success" in info:
+                    success = success or bool(np.asarray(info["success"].cpu()).reshape(-1)[0])
+                step_count += 1
+                if bool(
+                    np.asarray(torch.logical_or(terminated, truncated).cpu()).reshape(-1)[0]
+                ):
+                    break
+
+            episode_seed.append(rollout_seed)
+            successes.append(float(success))
+            finals.append(final_reward)
+            maxima.append(max_reward)
+            steps_out.append(step_count)
+            step_denominator = max(step_count, 1)
+            segment_denominator = max(segment_count, 1)
+            episode_residual_l2_mean.append(residual_sum / step_denominator)
+            episode_action_saturation_rate.append(saturation_sum / step_denominator)
+            episode_selected_distance_gate_rate.append(distance_gate_sum / step_denominator)
+            episode_raw_segment_distance_reduction.append(
+                raw_reduction_sum / segment_denominator
+            )
+            episode_segment_distance_reduction.append(
+                selected_reduction_sum / segment_denominator
+            )
+            episode_segment_goal_reach_rate.append(reach_sum / segment_denominator)
+            episode_initial_selector_use_tuned.append(float(selected_at_start))
+    finally:
+        env.close()
+
+    initial_np = np.asarray(segment_initial_distances, dtype=np.float32)
+    final_np = np.asarray(segment_final_distances, dtype=np.float32)
+    raw_initial_np = np.asarray(raw_segment_initial_distances, dtype=np.float32)
+    raw_final_np = np.asarray(raw_segment_final_distances, dtype=np.float32)
+    reached_np = np.asarray(reached, dtype=np.float32)
+    selected_scores_np = np.asarray(selected_metric_terminal_scores, dtype=np.float32)
+
+    def mean_or_none(values: list[float] | np.ndarray) -> float | None:
+        if len(values) == 0:
+            return None
+        return float(np.mean(values))
+
+    payload = {
+        "n_demo": n_demo,
+        "candidate": candidate,
+        "seed": seed,
+        "run_name": run_name,
+        "checkpoint": str(checkpoint_path)
+        if (residual_agent is not None or direct_agent is not None)
+        else None,
+        "residual_l2_gate_max": residual_l2_gate_max,
+        "selected_distance_gate_max": selected_distance_gate_max,
+        "initial_selector_feature_order": [
+            "initial_selected_distance",
+            "initial_raw_distance",
+            "initial_base_action_l2",
+        ]
+        if has_initial_selector
+        else None,
+        "initial_selector_weights": initial_selector_weights,
+        "initial_selector_mean": initial_selector_mean,
+        "initial_selector_std": initial_selector_std,
+        "initial_selector_threshold": initial_selector_threshold,
+        "distance_metric": distance_metric,
+        "reachability_checkpoint": str(reachability_checkpoint_path)
+        if reachability_checkpoint_path is not None
+        else None,
+        "rl_steps": global_step,
+        "episodes": episodes,
+        "seed_start": seed_start,
+        "eval_mode": "serial_explicit_seed",
+        "success": float(np.mean(successes)),
+        "final_reward": float(np.mean(finals)),
+        "max_reward": float(np.mean(maxima)),
+        "segment_initial_distance": mean_or_none(initial_np),
+        "segment_final_distance": mean_or_none(final_np),
+        "segment_distance_reduction": mean_or_none(initial_np - final_np),
+        "raw_segment_initial_distance": mean_or_none(raw_initial_np),
+        "raw_segment_final_distance": mean_or_none(raw_final_np),
+        "raw_segment_distance_reduction": mean_or_none(raw_initial_np - raw_final_np),
+        "segment_goal_reach_rate": mean_or_none(reached),
+        "selected_metric_terminal_reach_auc": _binary_auc(
+            selected_scores_np, reached_np
+        )
+        if len(reached_np) > 0
+        else None,
+        "goal_threshold": threshold,
+        "action_saturation_rate": total_saturation / max(total_actions, 1),
+        "residual_l2_mean": float(np.mean(residual_magnitudes))
+        if residual_magnitudes
+        else 0.0,
+        "selected_distance_gate_rate": total_distance_gate / max(total_actions, 1),
+        "initial_selector_tuned_rate": total_selector_tuned / max(episodes, 1)
+        if has_initial_selector
+        else None,
+        "episode_seed": episode_seed,
+        "episode_success": successes,
+        "episode_final_reward": finals,
+        "episode_max_reward": maxima,
+        "episode_steps": steps_out,
+        "episode_initial_selected_distance": episode_initial_selected_distance,
+        "episode_initial_raw_distance": episode_initial_raw_distance,
+        "episode_initial_base_action_l2": episode_initial_base_action_l2,
+        "episode_initial_selector_use_tuned": episode_initial_selector_use_tuned,
+        "episode_residual_l2_mean": episode_residual_l2_mean,
+        "episode_action_saturation_rate": episode_action_saturation_rate,
+        "episode_selected_distance_gate_rate": episode_selected_distance_gate_rate,
+        "episode_raw_segment_distance_reduction": episode_raw_segment_distance_reduction,
+        "episode_segment_distance_reduction": episode_segment_distance_reduction,
+        "episode_segment_goal_reach_rate": episode_segment_goal_reach_rate,
+    }
+    write_json(output, payload)
+    return output
+
+
 @torch.inference_mode()
 def record_low_level_rl_videos(
     config: Config,
