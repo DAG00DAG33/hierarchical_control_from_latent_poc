@@ -9317,5 +9317,70 @@ tiny, but this is the first objective change in this sequence that directly
 optimizes improvement over the frozen segment policy and shows a matching
 positive small-window task signal.
 
-Next step: run a full 40k paired R3 train and validate on at least a 50-seed
-exact serial window before spending compute on broad vector eval.
+### Follow-up: 40k paired train
+
+I then ran a larger paired train:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_paired_40k_bc10 \
+  --steps 40960 \
+  --num-envs 2048 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 3e-5 \
+  --initial-logstd -4.0 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --reward-mode paired \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+The first strict implementation failed on longer runs because tuned and frozen
+branches can terminate/reset differently. I changed paired mode to mask
+desynchronized comparisons, count resyncs, and clone the base branch back from
+the tuned rollout instead of aborting.
+
+Training history:
+
+| global step | mean paired improvement | improved segments | resync events | desynced envs | tuned terminal | base terminal |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20480 | 0.01493 | 0.514 | 0 | 0 | 0.5666 | 0.5816 |
+| 40960 | n/a | n/a | 1 | 2048 | 0.6069 | n/a |
+
+The best checkpoint was selected from the positive 20480-step row.
+
+Exact serial validation on `4505000..4505049`:
+
+| policy | success | max reward | raw local reduction | selected reduction | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.560 | 0.683 | 0.443 | 0.094 | 0.000000 |
+| paired R3 40k best | 0.560 | 0.696 | 0.485 | 0.086 | 0.000797 |
+
+Exact paired counts:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| paired R3 40k best | 7 | 7 | 0 |
+
+Additional artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4505000/serial_eval_50_seed4505000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/serial_eval_50_seed4505000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/paired_vs_frozen_serial50_seed4505000.json`
+
+Interpretation: paired terminal reward is a cleaner objective than absolute
+terminal distance, and it improves local raw reduction on this 50-seed window,
+but the scaled run is neutral on task success. It is not yet a robust
+improvement over frozen.

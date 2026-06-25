@@ -277,7 +277,7 @@ BC1 increased mean raw local reduction but did not create a larger action shift
 or better task success. This points away from "just reduce BC weight" and toward
 changing the reward target/objective itself.
 
-### Paired terminal reward is the next objective candidate
+### Paired terminal reward is cleaner but not enough yet
 
 I added an R3 `--reward-mode paired` option that clones a frozen low-level
 branch at each synchronized segment start and rewards:
@@ -301,11 +301,27 @@ On an exact 20-seed serial smoke window (`4504000..4504019`):
 | frozen | 0.500 | - | - | - |
 | paired R3 10k | 0.600 | 3 | 1 | +2 |
 
-This is not enough evidence to update the main best-policy claim, but it is the
-first reward-target change in this sequence with both a positive paired
-train-time signal and a matching small exact-serial task signal. The next
-compute should scale this paired objective to the 40k setting and validate on a
-larger exact serial window before broad vector eval.
+This was not enough evidence to update the main best-policy claim, so I scaled
+the paired objective to a 40k diagnostic. The best checkpoint came from the
+positive 20480-step row:
+
+| global step | mean paired improvement | improved segments | resync events |
+| ---: | ---: | ---: | ---: |
+| 20480 | 0.01493 | 0.514 | 0 |
+| 40960 | n/a | n/a | 1 |
+
+On a fresh exact 50-seed serial window (`4505000..4505049`), the 40k paired
+checkpoint was neutral on task success:
+
+| policy | success | improvements | regressions | net |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.560 | - | - | - |
+| paired R3 40k best | 0.560 | 7 | 7 | 0 |
+
+It did improve raw local reduction (`0.485` vs `0.443`) and max reward
+slightly (`0.696` vs `0.683`), but not success. The paired objective is cleaner
+than absolute terminal distance, but by itself it still does not establish a
+robust policy improvement.
 
 ## Current Best Policies
 
@@ -346,9 +362,10 @@ The next useful directions are:
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not
-   solve this. The new paired terminal reward is the current best candidate:
-   scale it from the 10240-step diagnostic to the 40k setting and validate on
-   at least a 50-seed exact serial window.
+   solve this. Paired terminal reward is cleaner and improved local raw
+   reduction, but the 40k exact serial check was success-neutral. The next
+   objective should either make the paired improvement larger or include a more
+   task-aligned signal than local reachability-distance improvement alone.
 
 3. Revisit horizon/representation only after the gate/objective question.
    The current effect32 interface is goal-dependent, so the main bottleneck is
@@ -402,4 +419,7 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/train_metrics.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/serial_eval_20_seed4504000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_10240_bc10/paired_vs_frozen_serial20_seed4504000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/train_metrics.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/serial_eval_50_seed4505000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_40k_bc10/paired_vs_frozen_serial50_seed4505000.json
 ```
