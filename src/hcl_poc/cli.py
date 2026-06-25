@@ -281,6 +281,7 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 reachability_checkpoint_path=Path(args.reachability_checkpoint)
                 if args.reachability_checkpoint
                 else None,
+                residual_l2_gate_max=args.residual_l2_gate_max,
                 force=args.force,
             )
         )
@@ -1929,6 +1930,7 @@ def build_parser() -> argparse.ArgumentParser:
     low_eval.add_argument("--seed-start", type=int, required=True)
     low_eval.add_argument("--checkpoint")
     low_eval.add_argument("--ensemble-checkpoints", nargs="+")
+    low_eval.add_argument("--residual-l2-gate-max", type=float)
     low_eval.add_argument(
         "--distance-metric",
         choices=["raw_l2", "reachability"],

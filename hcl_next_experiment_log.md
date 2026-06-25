@@ -8101,3 +8101,148 @@ that can be fixed by averaging actions.
 This strengthens the previous conclusion: robust improvement needs a state/goal
 conditioned gate or selector, not an unconditional ensemble. The ensemble eval
 path remains useful as a cheap baseline for future multi-checkpoint variants.
+
+## Effect32 FiLM R3 residual-L2 gate diagnostic
+
+The action-ensemble result showed that unconditional averaging is not enough.
+I then added more per-episode detail to `low-level-rl eval` so simple gating
+signals can be audited:
+
+- `episode_residual_l2_mean`
+- `episode_action_saturation_rate`
+- `episode_raw_segment_distance_reduction`
+- `episode_segment_distance_reduction`
+- `episode_segment_goal_reach_rate`
+
+A 20-episode schema smoke passed:
+
+| field | length | mean |
+| --- | ---: | ---: |
+| episode_success | 20 | 0.600 |
+| episode_max_reward | 20 | 0.712 |
+| episode_residual_l2_mean | 20 | 0.00106 |
+| episode_action_saturation_rate | 20 | 0.032 |
+| episode_raw_segment_distance_reduction | 20 | 0.351 |
+| episode_segment_distance_reduction | 20 | 0.069 |
+| episode_segment_goal_reach_rate | 20 | 0.685 |
+
+Artifact:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_detail_smoke_20_seed3710000/eval_20_seed3710000.json`
+
+### One-bank diagnostic
+
+I re-evaluated frozen and the best R3 seed on the first 500-episode bank using
+new detail run names:
+
+- `hcl_next_effect32_dphi_frozen_detail500_seed3500000`
+- `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_detail500_seed3500000`
+
+The paired transition counts were close to the previous bank:
+
+| base success | tuned success | improvements | regressions | same success | same fail |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.632 | 0.684 | 122 | 96 | 220 | 62 |
+
+Feature means by transition class:
+
+| feature | improve | regress | same success | same fail |
+| --- | ---: | ---: | ---: | ---: |
+| residual L2 | 0.00101 | 0.00104 | 0.00098 | 0.00108 |
+| saturation | 0.0309 | 0.0240 | 0.0334 | 0.0268 |
+| raw local reduction | 0.441 | 0.214 | 0.500 | 0.224 |
+| D_phi reduction | 0.091 | 0.050 | 0.092 | 0.032 |
+| reach rate | 0.795 | 0.547 | 0.795 | 0.494 |
+| max reward, post-hoc | 1.000 | 0.277 | 0.997 | 0.281 |
+
+Among discordant episodes, high raw local reduction and high reach rate predict
+tuned improvements reasonably well (`AUC=0.758` and `0.736`), but those signals
+are only known after trying the tuned rollout. Residual L2 alone is weak
+(`AUC=0.448`), but a conservative residual threshold is at least deployable as
+an online action gate.
+
+### Residual-L2 gate
+
+I added an eval-only option:
+
+```bash
+--residual-l2-gate-max 0.00121
+```
+
+At each control step, if the tuned action differs from the frozen base action
+by more than the threshold, the evaluator executes the frozen base action for
+that environment step. The threshold came from a one-bank post-hoc scan, so the
+`seed_start=3500000` result should be treated as selection data and
+`seed_start=3600000` as the first held-out check.
+
+Commands:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final500_seed3500000 \
+  --episodes 500 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --residual-l2-gate-max 0.00121 \
+  --distance-metric reachability \
+  --force
+```
+
+The same command was run with `seed_start=3600000`.
+
+### Gate result
+
+| eval seed start | policy | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | frozen | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.0000 |
+| 3500000 | R3 ungated | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | 0.0010 |
+| 3500000 | R3 residual gate | 0.684 | 0.773 | 0.398 | 0.733 | 0.806 | 0.0004 |
+| 3600000 | frozen | 0.662 | 0.760 | 0.389 | 0.725 | 0.805 | 0.0000 |
+| 3600000 | R3 ungated | 0.638 | 0.743 | 0.389 | 0.720 | 0.800 | 0.0010 |
+| 3600000 | R3 residual gate | 0.668 | 0.765 | 0.393 | 0.738 | 0.814 | 0.0004 |
+
+Two-bank aggregate:
+
+| policy | success values | mean success | mean max reward |
+| --- | --- | ---: | ---: |
+| frozen | 0.634, 0.662 | 0.648 | 0.749 |
+| R3 ungated | 0.684, 0.638 | 0.661 | 0.758 |
+| R3 residual gate | 0.684, 0.668 | 0.676 | 0.769 |
+
+Paired against frozen:
+
+| eval seed start | improvements | regressions | net |
+| ---: | ---: | ---: | ---: |
+| 3500000 | 114 | 89 | +25 |
+| 3600000 | 106 | 103 | +3 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_detail500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_detail500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final500_seed3600000/eval_500_seed3600000.json`
+
+### Interpretation
+
+This is the first simple deployable gate that improves the two-bank aggregate.
+It preserves the original positive bank and turns the previously negative
+second bank positive:
+
+```text
+frozen two-bank mean:        0.648
+ungated R3 seed0 mean:      0.661
+residual-gated R3 mean:     0.676
+```
+
+The result should not be overclaimed because the threshold was selected on the
+first bank and validated on only one additional bank. Still, it is a useful
+direction: a tiny action-delta gate reduces disruptive R3 updates while keeping
+much of the upside. The next validation should test nearby thresholds and more
+evaluation windows before promoting gated R3 as the best real-compatible
+policy.
