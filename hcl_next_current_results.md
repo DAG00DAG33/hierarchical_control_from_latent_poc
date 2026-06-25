@@ -387,6 +387,24 @@ The online selector still slightly improved local raw reduction over frozen
 7 improved episodes, 9 regressed). The offline segment selector is therefore a
 useful diagnostic, not a deployable fix for this checkpoint.
 
+### Lower BC paired reward did not fix the objective
+
+I retried paired R3 with a lower BC anchor (`bc_weight=1`, 2048 envs because the
+4096-env paired branch exceeded GPU camera allocation). The best step again had
+mean paired improvement `0.0149` and fraction improved `0.514`, but with much
+higher training saturation (`0.260`).
+
+Fresh exact serial validation on `4507000..4507049`:
+
+| policy | success | max reward | raw local reduction | segment goal reach |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.560 | 0.673 | 0.425 | 0.684 |
+| paired R3 2048 40k bc1 | 0.560 | 0.673 | 0.383 | 0.656 |
+
+Episode success tied frozen, but local raw reduction regressed by `-0.0417` over
+500 aligned segments. This argues against "BC regularization is just too
+strong" as the main explanation for the weak paired-reward result.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -425,13 +443,15 @@ The next useful directions are:
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not
-   solve this. Paired terminal reward is cleaner and improved local raw
-   reduction, but the 40k exact serial check was success-neutral. The next
-   objective should either make the paired improvement larger or include a more
-   task-aligned signal than local reachability-distance improvement alone. The
-   privileged direct hard-start check shows that large selected-local gains can
-   still hurt closed-loop deployment, so checkpoint selection needs deployment
-   evidence or a better local-to-task proxy.
+   solve this, and paired `bc=1` made fresh-window local raw reduction worse.
+   Paired terminal reward is cleaner and improved local raw reduction in the
+   `bc=10` training window, but the 40k exact serial check was success-neutral.
+   The next objective should include a more task-aligned signal than local
+   reachability-distance improvement alone, or measure paired improvement from a
+   cached local reset bank rather than a simultaneous branch that can desync.
+   The privileged direct hard-start check shows that large selected-local gains
+   can still hurt closed-loop deployment, so checkpoint selection needs
+   deployment evidence or a better local-to-task proxy.
 
 3. Revisit horizon/representation only after the gate/objective question.
    The current effect32 interface is goal-dependent, so the main bottleneck is

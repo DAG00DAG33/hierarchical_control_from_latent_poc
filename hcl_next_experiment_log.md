@@ -9505,3 +9505,75 @@ success. This closes the current segment-selector branch as a deployment fix
 for this checkpoint. The next useful work should focus on an objective that
 creates a larger, task-aligned local effect, or a selector trained directly on
 closed-loop episode outcomes rather than offline segment deltas.
+
+## 2026-06-25 - Paired R3 with lower BC anchor
+
+Hypothesis: the previous paired terminal reward had the right sign but the
+direct R3 final-layer update was still too tightly anchored to BC. I retried the
+paired objective with `bc_weight=1` instead of `10`.
+
+The first attempt at 4096 envs failed during ManiSkill GPU camera allocation in
+paired mode. Paired mode keeps both the tuned branch and frozen base branch in
+memory, so I reran the same objective with 2048 envs and recorded that in the
+run name.
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_paired_2048_40k_bc1 \
+  --steps 40960 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 1.0 \
+  --reward-mode paired \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --num-envs 2048 \
+  --rollout-steps 10 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --force
+```
+
+Training metrics:
+
+| step | mean paired improvement | fraction improved | direct delta L2 | saturation | BC loss |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 20480 | 0.0149 | 0.514 | 0.0294 | 0.260 | 0.00000078 |
+| 40960 | n/a | n/a | 0.0293 | 0.095 | 0.00000146 |
+
+The best checkpoint was selected at step 20480, where paired improvement matched
+the earlier `bc=10` run but saturation was much higher.
+
+Fresh exact serial validation on `4507000..4507049`:
+
+| policy | success | max reward | raw local reduction | segment goal reach | action saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.560 | 0.673 | 0.425 | 0.684 | 0.030 |
+| paired R3 2048 40k bc1 | 0.560 | 0.673 | 0.383 | 0.656 | 0.027 |
+
+Paired episode counts were neutral: 6 improvements, 6 regressions, success delta
+`0.000`. Segment comparison was negative: 500 aligned segments, raw-reduction
+delta `-0.0417`, 242 helpful and 258 harmful segments.
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_2048_40k_bc1/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial50_seed4507000/serial_eval_50_seed4507000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_2048_40k_bc1_serial50_seed4507000/serial_eval_50_seed4507000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_2048_40k_bc1_serial50_seed4507000/paired_vs_frozen_serial50_seed4507000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_paired_2048_40k_bc1_serial50_seed4507000/segment_compare_vs_frozen_serial50_seed4507000.json`
+
+Interpretation:
+
+Lowering the BC anchor increased action changes but mostly bought saturation
+and worse local rollout behavior. The paired reward branch is not simply
+underpowered by BC regularization. The next objective-side test should change
+the training/evaluation target itself: use an explicit closed-loop deployment
+proxy, a stronger task-aligned reachability metric, or a local reset formulation
+where the paired reward is measured against cached exact base outcomes rather
+than a simultaneous branch that can desynchronize.
