@@ -3472,6 +3472,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     disturbed: bool = False,
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
+    action_delta_gate_min: float | None = None,
     output_path: Path | None = None,
 ) -> Path:
     from hcl_poc.incremental import _clone_mani_state_dict
@@ -3489,6 +3490,8 @@ def evaluate_rl_rerun_closed_loop_r1(
         raise ValueError("goal_source must be 'learned' or 'oracle'")
     if oracle_copy_mode not in {"replay", "state_dict"}:
         raise ValueError("oracle_copy_mode must be 'replay' or 'state_dict'")
+    if action_delta_gate_min is not None and action_delta_gate_min < 0.0:
+        raise ValueError("action_delta_gate_min must be non-negative")
 
     device = default_device()
     rerun_config = _rerun_base_config(config)
@@ -3564,6 +3567,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         episode_action_delta_l2_mean: list[float] = []
         episode_action_delta_l2_max: list[float] = []
         episode_policy_saturation_rate: list[float] = []
+        episode_action_delta_gate_rate: list[float] = []
         episode_goal_l2_initial: list[float] = []
         episode_goal_l2_mean: list[float] = []
         episode_high_level_decisions: list[float] = []
@@ -3574,6 +3578,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         branch_latencies: list[float] = []
         saturated_actions = 0
         active_actions = 0
+        gated_actions = 0
         high_decisions = 0
 
         for batch_start in range(0, episodes, num_envs):
@@ -3643,6 +3648,7 @@ def evaluate_rl_rerun_closed_loop_r1(
             current_action_delta_sum = np.zeros(batch_envs, dtype=np.float32)
             current_action_delta_max = np.zeros(batch_envs, dtype=np.float32)
             current_policy_saturation_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_action_delta_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_action_count = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_initial = np.full(batch_envs, np.nan, dtype=np.float32)
             current_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
@@ -3855,6 +3861,19 @@ def evaluate_rl_rerun_closed_loop_r1(
                         .numpy()
                         .astype(np.float32)
                     )
+                    if use_residual and action_delta_gate_min is not None:
+                        gate_to_base_np = active & (
+                            action_delta_np < action_delta_gate_min
+                        )
+                        if bool(np.any(gate_to_base_np)):
+                            gate_to_base = torch.from_numpy(gate_to_base_np).to(device)
+                            unclipped = torch.where(
+                                gate_to_base[:, None],
+                                base_action,
+                                unclipped,
+                            )
+                            gated_actions += int(gate_to_base_np.sum())
+                            current_action_delta_gate_sum[gate_to_base_np] += 1.0
                     current_action_delta_sum[active] += action_delta_np[active]
                     current_action_delta_max[active] = np.maximum(
                         current_action_delta_max[active],
@@ -3960,6 +3979,11 @@ def evaluate_rl_rerun_closed_loop_r1(
                 .astype(float)
                 .tolist()
             )
+            episode_action_delta_gate_rate.extend(
+                (current_action_delta_gate_sum / action_denominator)
+                .astype(float)
+                .tolist()
+            )
             episode_goal_l2_initial.extend(
                 current_goal_l2_initial.astype(float).tolist()
             )
@@ -3978,6 +4002,10 @@ def evaluate_rl_rerun_closed_loop_r1(
             "final_reward": float(np.mean(final_rewards)),
             "max_reward": float(np.mean(max_rewards)),
             "action_saturation_rate": saturated_actions / max(active_actions, 1),
+            "action_delta_gate_min": action_delta_gate_min if use_residual else None,
+            "action_delta_gate_rate": gated_actions / max(active_actions, 1)
+            if use_residual and action_delta_gate_min is not None
+            else 0.0,
             "mean_residual_norm": (
                 float(np.mean(residual_norms)) if residual_norms else 0.0
             ),
@@ -3988,6 +4016,7 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_action_delta_l2_mean": episode_action_delta_l2_mean,
             "episode_action_delta_l2_max": episode_action_delta_l2_max,
             "episode_policy_saturation_rate": episode_policy_saturation_rate,
+            "episode_action_delta_gate_rate": episode_action_delta_gate_rate,
             "episode_goal_l2_initial": episode_goal_l2_initial,
             "episode_goal_l2_mean": episode_goal_l2_mean,
             "episode_high_level_decisions": episode_high_level_decisions,
@@ -4038,6 +4067,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         "disturbance_family": PRE_RL_PHASE_D_PERTURBATIONS if disturbed else None,
         "goal_source": goal_source,
         "oracle_copy_mode": oracle_copy_mode if goal_source == "oracle" else None,
+        "action_delta_gate_min": action_delta_gate_min,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
         "base_policy": base_policy,
@@ -4081,6 +4111,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     disturbed: bool = False,
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
+    action_delta_gate_min: float | None = None,
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -4094,6 +4125,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         disturbed=disturbed,
         goal_source=goal_source,
         oracle_copy_mode=oracle_copy_mode,
+        action_delta_gate_min=action_delta_gate_min,
         output_path=output_path,
     )
 
@@ -4110,6 +4142,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     disturbed: bool = False,
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
+    action_delta_gate_min: float | None = None,
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -4123,6 +4156,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         disturbed=disturbed,
         goal_source=goal_source,
         oracle_copy_mode=oracle_copy_mode,
+        action_delta_gate_min=action_delta_gate_min,
         output_path=output_path,
     )
 

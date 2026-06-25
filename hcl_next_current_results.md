@@ -490,6 +490,22 @@ rate `0.749`, and mean goal distance `0.702`. This reinforces that a one-shot
 initial gate is the wrong tool; a candidate gate must be online and evaluated
 directly in closed loop.
 
+I tested the simplest online version, `--action-delta-gate-min`, which executes
+the frozen action unless the current tuned/base action delta exceeds a threshold.
+It reduced harm but did not beat frozen:
+
+| policy | threshold | success | max reward | gate rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen n500 | - | 0.334 | 0.5061 | 0.000 |
+| task-reward debug ungated | - | 0.306 | 0.4867 | 0.000 |
+| action-delta gate | 0.0006 | 0.314 | 0.4916 | 0.732 |
+| action-delta gate | 0.0008 | 0.298 | 0.4791 | 0.858 |
+| action-delta gate | 0.0010 | 0.294 | 0.4776 | 0.928 |
+
+Since this gate cannot beat frozen even on the threshold-selection window, the
+next useful step is not another scalar gate. The tuned interventions themselves
+need to become larger and more robustly deployment-aligned.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:

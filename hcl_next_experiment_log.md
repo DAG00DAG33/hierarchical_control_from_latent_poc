@@ -10168,3 +10168,69 @@ not an offline local-reset selector.
 Artifact:
 
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_diag_500_seed4600000.json`
+
+## 2026-06-25 - Online action-delta gate for rl-rerun closed-loop eval
+
+The diagnostic bank above showed that high mean action delta separated tuned
+wins from regressions better than initial state features. I added an eval-only
+online gate:
+
+```text
+--action-delta-gate-min THRESHOLD
+```
+
+At each step, the evaluator computes `||a_tuned - a_base||_2`. If the value is
+below the threshold, it executes the frozen base action. The gate is recorded in
+the JSON via:
+
+- `action_delta_gate_min`
+- `action_delta_gate_rate`
+- `episode_action_delta_gate_rate`
+
+Smoke check:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 8 \
+  --eval-seed-start 4611000 \
+  --num-envs 8 \
+  --action-delta-gate-min 0.0006 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_action_delta_gate_smoke_8_seed4611000.json
+```
+
+The smoke output had a tuned-branch gate rate of `0.659`, with all new
+per-episode gate arrays present.
+
+I then swept three thresholds on the same 500-episode diagnostic window:
+
+| policy | threshold | success | success delta | max reward | max-reward delta | gate rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | - | 0.334 | - | 0.5061 | - | 0.000 |
+| task-reward debug ungated | - | 0.306 | -0.028 | 0.4867 | -0.0194 | 0.000 |
+| action-delta gate | 0.0006 | 0.314 | -0.020 | 0.4916 | -0.0146 | 0.732 |
+| action-delta gate | 0.0008 | 0.298 | -0.036 | 0.4791 | -0.0271 | 0.858 |
+| action-delta gate | 0.0010 | 0.294 | -0.040 | 0.4776 | -0.0285 | 0.928 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_action_delta_gate_smoke_8_seed4611000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_action_delta_gate0006_500_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_action_delta_gate0008_500_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_action_delta_gate0010_500_seed4600000.json`
+
+Interpretation:
+
+The online action-delta gate is a real deployed gate, not an offline selector,
+but it still fails to beat frozen even on the window used to choose thresholds.
+The best threshold (`0.0006`) only reduces the task-reward-debug loss from
+`-0.028` to `-0.020` success. Stricter thresholds make the policy worse instead
+of smoothly recovering frozen behavior, because step-level gating changes the
+closed-loop trajectory distribution. This closes the simple action-delta gate
+branch for `rl-rerun`: the remaining issue is not just identifying tiny tuned
+actions, but learning an update whose useful interventions are robust enough to
+survive closed-loop dynamics.
