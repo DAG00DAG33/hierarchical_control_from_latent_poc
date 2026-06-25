@@ -1,0 +1,202 @@
+# HCL Next Current Results
+
+This is the current short-form result summary for the experiments in
+`hcl_next_experiment_log.md`. It records the latest conclusion after the
+effect32/reachability RL validation, not just the best intermediate run.
+
+## Main Answer
+
+The real-compatible effect32 + learned reachability path produced small
+positive-looking runs, but final-style validation shows it is not yet a robust
+RL improvement over the frozen hierarchy.
+
+The best single observed checkpoint remains:
+
+```text
+artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt
+```
+
+However, after more evaluation windows, the honest conclusion is:
+
+```text
+frozen hierarchy:        0.656 success over 3500 matched episodes
+ungated R3 D_phi update: 0.646 success over 3500 matched episodes
+residual-gated R3:       0.657 success over 3500 matched episodes
+```
+
+So the residual gate makes the R3 update mostly neutral instead of harmful, but
+it does not establish a strong deployment improvement.
+
+## What Worked
+
+### Effect32 FiLM has real goal dependence
+
+Matched supervised evaluations on `seed_start=3500000`:
+
+| goal source | episodes | success | max reward |
+| --- | ---: | ---: | ---: |
+| learned | 200 | 0.645 | 0.742 |
+| oracle | 200 | 0.645 | 0.746 |
+| shuffled | 200 | 0.280 | 0.460 |
+
+The shuffled collapse shows this interface is not simply ignoring goals in
+closed loop.
+
+### Short R3 D_phi update can find positive windows
+
+The original 500-episode fresh check looked promising:
+
+| policy | seed start | episodes | success | max reward |
+| --- | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 3500000 | 500 | 0.634 | 0.738 |
+| R3 terminal-only 40k bc10 | 3500000 | 500 | 0.684 | 0.773 |
+
+This is still the best observed real-compatible RL checkpoint, but it did not
+remain stable under broader validation.
+
+### Residual-L2 gate reduces some damage
+
+A simple eval-time gate executes the frozen base action whenever the tuned
+action differs from the base action by more than `0.00121` L2. It improved the
+five-bank aggregate:
+
+| policy | five 500-episode windows | mean success | mean max reward |
+| --- | --- | ---: | ---: |
+| frozen | 3500000, 3600000, 3700000, 3800000, 3900000 | 0.651 | 0.751 |
+| ungated R3 | same | 0.651 | 0.751 |
+| residual-gated R3 | same | 0.663 | 0.758 |
+
+But the final-style 1000-episode window was negative:
+
+| policy | seed start | episodes | success | max reward |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 4000000 | 1000 | 0.667 | 0.761 |
+| ungated R3 | 4000000 | 1000 | 0.632 | 0.733 |
+| residual-gated R3 | 4000000 | 1000 | 0.643 | 0.744 |
+
+## What Failed
+
+### Longer R3 training over-optimizes the local proxy
+
+The 200k R3 continuation improved train terminal `D_phi` distance but hurt task
+success compared with the 40k checkpoint:
+
+| policy | success | max reward | raw local reduction |
+| --- | ---: | ---: | ---: |
+| frozen | 0.634 | 0.738 | 0.397 |
+| R3 40k bc10 | 0.684 | 0.773 | 0.410 |
+| R3 200k bc10 | 0.656 | 0.753 | 0.418 |
+
+This means training terminal `D_phi` distance is not a reliable checkpoint
+selector for full-task success.
+
+### Dense D_phi progress did not help
+
+Adding dense `D_phi` progress to the terminal-only R3 recipe weakened the
+500-episode result:
+
+| policy | success | max reward |
+| --- | ---: | ---: |
+| R3 terminal-only 40k bc10 | 0.684 | 0.773 |
+| R3 terminal+progress 40k bc10 | 0.662 | 0.754 |
+
+Dense learned-metric progress appears to reward local metric artifacts that are
+not consistently task-useful.
+
+### PPO seed variation is high
+
+Three PPO seeds for the same 40k R3 recipe gave:
+
+| PPO seed offset | success on seed_start=3500000 |
+| ---: | ---: |
+| 0 | 0.684 |
+| 1 | 0.662 |
+| 2 | 0.610 |
+
+Action averaging across these checkpoints also failed:
+
+```text
+R3 action ensemble two-bank mean: 0.634
+frozen two-bank mean:             0.648
+```
+
+The issue is not simple high-frequency action noise.
+
+## Current Interpretation
+
+The proof of concept has now shown something useful but narrower than the
+original hope:
+
+1. A real-compatible effect latent plus learned reachability distance can
+   produce local RL updates that sometimes improve task success.
+2. The improvements are small and unstable across PPO seeds and evaluation
+   windows.
+3. The current local proxy (`D_phi` terminal distance) is not aligned enough
+   with full-task success for long training or reliable checkpoint selection.
+4. Simple scalar gating can reduce harm, but not enough to establish a robust
+   improvement over frozen imitation.
+
+## Current Best Policies
+
+Best observed real-compatible checkpoint:
+
+```text
+artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt
+```
+
+Best current real-compatible deployment variant:
+
+```text
+same checkpoint, evaluated with --residual-l2-gate-max 0.00121
+```
+
+But the recommended report wording is:
+
+```text
+Residual-gated R3 is approximately tied with frozen after final-style
+validation. It is diagnostically useful, but not a robust policy improvement.
+```
+
+## Recommended Next Work
+
+Stop spending compute on scalar threshold tuning for this checkpoint.
+
+The next useful directions are:
+
+1. Add a state/goal-aware gate.
+   The eval path now records per-episode success, reward, residual magnitude,
+   saturation, and local progress. The missing piece is compact pre-decision
+   state/goal features so a deployable gate can learn when tuned actions help.
+
+2. Improve the objective so the tuned policy creates a larger effect.
+   The current R3 updates are tiny. A better objective should optimize
+   task-relevant local improvement rather than absolute terminal `D_phi`
+   distance.
+
+3. Revisit horizon/representation only after the gate/objective question.
+   The current effect32 interface is goal-dependent, so the main bottleneck is
+   not simply "low level ignores the goal"; it is reliable improvement without
+   damaging already-good frozen behavior.
+
+## Key Artifacts
+
+Experiment log:
+
+```text
+hcl_next_experiment_log.md
+```
+
+Evaluator/CLI support:
+
+```text
+src/hcl_poc/low_level_rl.py
+src/hcl_poc/cli.py
+```
+
+Recent useful eval outputs:
+
+```text
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final1000_seed4000000/eval_1000_seed4000000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final1000_seed4000000/eval_1000_seed4000000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final1000_seed4000000/eval_1000_seed4000000.json
+```
