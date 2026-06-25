@@ -9848,3 +9848,57 @@ the cached paired local-R3 branch look bottlenecked by objective/data signal,
 not by the obvious PPO noise/LR setting alone. The next useful step is likely a
 broader reset bank or a different distance/task proxy rather than further
 single-manifest knob tuning.
+
+## 2026-06-25 - Broader local validation for cached paired R3
+
+The previous local validation used one 4096-env validation entry at one
+timestep. To check whether that was too narrow, I created a broader held-out
+manifest on the 512-env validation dataset with 8 timesteps and 4096 total local
+episodes:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  create-local-eval-manifest \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5 \
+  --output results/rl_rerun/local_eval_manifest_n512_val_b1_seed20260625_e8.json \
+  --episodes 8 \
+  --seed 20260625 \
+  --horizon 10
+```
+
+Sampled timesteps: `32, 18, 27, 36, 23, 24, 6, 29`.
+
+Matched validation:
+
+| policy | final distance | reduction | reduction fraction | action delta |
+| --- | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.7092 | 0.7023 | 0.8704 | - |
+| dense-progress cached paired 3 updates | 0.7086 | 0.7028 | 0.8687 | 0.0023 |
+| terminal-only lr1e-5 logstd-5 | 0.7080 | 0.7034 | 0.8708 | 0.0008 |
+
+The broader validation deltas vs frozen were:
+
+| policy | final-distance delta | reduction delta | reduction-fraction delta |
+| --- | ---: | ---: | ---: |
+| dense-progress cached paired 3 updates | +0.0005 | +0.0005 | -0.0017 |
+| terminal-only lr1e-5 logstd-5 | +0.0012 | +0.0012 | +0.0005 |
+
+Here positive delta means the tuned policy was better than frozen.
+
+Artifacts:
+
+- `results/rl_rerun/local_eval_manifest_n512_val_b1_seed20260625_e8.json`
+- `results/rl_rerun/local_mode_a_audit_n512_val_b1_n500_seed0_manifest_e8.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_3updates_bc1/eval_local_n512_val_b1_manifest_e8.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1/eval_local_n512_val_b1_manifest_e8.json`
+
+Interpretation:
+
+Broader held-out local validation is less negative than the single 4096-env
+manifest: both cached-paired variants are slightly better than frozen on mean
+distance reduction. However, the absolute gains are only `0.0005` to `0.0012`
+distance units over 4096 local episodes. This is still noise-scale compared
+with the size of the local distances and does not justify closed-loop
+deployment. It does suggest that a broader reset bank is important for judging
+these tiny effects, because single-entry conclusions can change sign.

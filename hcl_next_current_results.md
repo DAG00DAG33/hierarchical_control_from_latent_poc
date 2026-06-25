@@ -434,6 +434,19 @@ infrastructure, not yet a convincing RL improvement. Lowering LR/noise made the
 training paired metric less negative and reduced action deltas, but also failed
 held-out validation.
 
+Broader local validation on 8 held-out timesteps from
+`pusht_vector_state_demos_n512_val_b1.h5` changes the sign but not the scale:
+
+| policy | final distance | delta vs frozen | reduction fraction |
+| --- | ---: | ---: | ---: |
+| frozen n500 | 0.7092 | - | 0.8704 |
+| dense-progress cached paired 3 updates | 0.7086 | +0.0005 | 0.8687 |
+| terminal-only lr1e-5 logstd-5 | 0.7080 | +0.0012 | 0.8708 |
+
+The cached paired variants are slightly better than frozen on this broader
+mean-distance metric, but the effect is still noise-scale and too small to
+justify closed-loop deployment.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -480,10 +493,10 @@ The next useful directions are:
    paired improvement and only a tiny held-out local gain. Terminal-only paired
    reward improved the training signal but regressed validation. Lower
    LR/action noise improved the training metric but suppressed useful held-out
-   action changes. The next objective check should change the data/target
-   regime, not simply scale the same formulation: broaden the reset bank or move
-   toward a more task-aligned signal than local reachability-distance
-   improvement alone.
+   action changes. A broader reset-bank validation changed the sign of the local
+   mean effect but kept it near zero. The next objective check should change the
+   target regime, not simply scale the same formulation: move toward a more
+   task-aligned signal than local reachability-distance improvement alone.
    The privileged direct hard-start check shows that large selected-local gains
    can still hurt closed-loop deployment, so checkpoint selection needs
    deployment evidence or a better local-to-task proxy.
