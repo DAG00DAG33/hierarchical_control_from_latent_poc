@@ -9577,3 +9577,72 @@ the training/evaluation target itself: use an explicit closed-loop deployment
 proxy, a stronger task-aligned reachability metric, or a local reset formulation
 where the paired reward is measured against cached exact base outcomes rather
 than a simultaneous branch that can desynchronize.
+
+## 2026-06-25 - Cached local-reset paired reward for rl-rerun R3
+
+I added a paired reward mode to `rl-rerun train-local-r3`. Unlike the older
+full-hierarchy paired branch, this mode does not keep a simultaneous frozen
+branch in memory. For each sampled local reset it:
+
+1. resets/replays to the demo local start;
+2. rolls out the frozen low level to cache the exact terminal distance;
+3. resets/replays back to the same local start;
+4. trains the direct R3 policy with dense local progress plus terminal
+   `base_terminal_distance - tuned_terminal_distance`.
+
+CLI:
+
+```bash
+uv run hcl-poc rl-rerun train-local-r3 ... --reward-mode paired
+```
+
+Compatibility detail: default `--reward-mode progress` keeps the existing local
+R3 recipe unchanged so old progress-mode checkpoints can still resume.
+
+Smoke check on `data/rl_rerun/pusht_vector_state_demos_n512_b1.h5`:
+
+| envs | steps | mean base terminal | mean tuned terminal | paired improvement | fraction improved | saturation |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 5120 | 0.5793 | 0.5789 | +0.00045 | 0.516 | 0.0008 |
+
+The smoke checkpoint also reloaded through `eval-local-r3` on
+`pusht_vector_state_demos_n512_val_b1.h5`.
+
+One 4096-env update on `data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5`:
+
+| envs | steps | mean base terminal | mean tuned terminal | paired improvement | fraction improved | saturation | update time |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 | 40960 | 0.5991 | 0.6089 | -0.0098 | 0.478 | 0.0079 | 288s |
+
+Matched local validation on the existing 4096-env validation manifest
+`results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json`:
+
+| policy | initial distance | final distance | reduction | reduction fraction | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 1.0671 | 0.6020 | 0.4651 | 0.7969 | 0.0078 |
+| cached-paired R3 1 update | 1.0671 | 0.6066 | 0.4605 | 0.7966 | 0.0078 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_smoke_1update/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_smoke_1update/eval_local_val512_b1_e1.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_1update_bc1/history.json`
+- `results/rl_rerun/local_mode_a_audit_n4096_val_b1_n500_seed0_manifest.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_1update_bc1/eval_local_n4096_val_b1_manifest.json`
+
+Checks:
+
+- `uv run python -m compileall -q src/hcl_poc/rl_rerun.py src/hcl_poc/cli.py`
+- `uv run ruff check src/hcl_poc/rl_rerun.py --select F821`
+- `uv run pytest -q` (`32 passed`)
+
+Interpretation:
+
+This implements the plan's cached-base paired local-reset direction and removes
+the simultaneous-branch desync/memory issue. The first 4096-env update did not
+improve local validation; it was slightly worse than frozen on the matched
+manifest. That is only a one-update signal, but it confirms that the next
+question is learning dynamics/objective quality rather than branch mechanics.
+The next run should scale this cached paired local-R3 mode for several updates,
+track whether paired improvement becomes positive, and only then evaluate
+closed-loop deployment.

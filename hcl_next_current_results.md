@@ -405,6 +405,26 @@ Episode success tied frozen, but local raw reduction regressed by `-0.0417` over
 500 aligned segments. This argues against "BC regularization is just too
 strong" as the main explanation for the weak paired-reward result.
 
+### Cached local-reset paired reward is implemented
+
+I added `--reward-mode paired` to `rl-rerun train-local-r3`. It measures the
+frozen base terminal distance by replaying the exact same local reset before the
+tuned rollout, then uses terminal `base - tuned` improvement without keeping a
+simultaneous frozen branch in memory. This directly addresses the previous
+paired-branch desync and GPU camera allocation issue.
+
+One 4096-env update is mechanically successful but not yet useful:
+
+| run | envs | steps | train paired improvement | train fraction improved | validation final distance |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen local n500 | 4096 | - | - | - | 0.6020 |
+| cached-paired local R3 bc1 | 4096 | 40960 | -0.0098 | 0.478 | 0.6066 |
+
+The matched validation manifest had identical initial distance (`1.0671`), so
+the one-update cached-paired policy is slightly worse than frozen locally. The
+implementation is now ready for a longer learning-dynamics check, but the first
+signal is negative.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -446,9 +466,12 @@ The next useful directions are:
    solve this, and paired `bc=1` made fresh-window local raw reduction worse.
    Paired terminal reward is cleaner and improved local raw reduction in the
    `bc=10` training window, but the 40k exact serial check was success-neutral.
-   The next objective should include a more task-aligned signal than local
-   reachability-distance improvement alone, or measure paired improvement from a
-   cached local reset bank rather than a simultaneous branch that can desync.
+   Cached local-reset paired reward is now implemented and avoids simultaneous
+   branch desync, but the first 4096-env update was slightly worse than frozen.
+   The next objective check should scale this cached mode for several updates
+   and stop early if paired improvement remains negative; otherwise move toward
+   a more task-aligned signal than local reachability-distance improvement
+   alone.
    The privileged direct hard-start check shows that large selected-local gains
    can still hurt closed-loop deployment, so checkpoint selection needs
    deployment evidence or a better local-to-task proxy.

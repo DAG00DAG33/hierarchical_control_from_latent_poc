@@ -588,6 +588,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 total_steps=args.steps,
                 bc_weight=args.bc_weight,
                 terminal_weight=args.terminal_weight,
+                reward_mode=args.reward_mode,
                 learning_rate=args.learning_rate,
                 num_minibatches=args.num_minibatches,
                 checkpoint_every_updates=args.checkpoint_every_updates,
@@ -2273,6 +2274,11 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r3.add_argument("--steps", type=int, default=32768)
     train_local_r3.add_argument("--bc-weight", type=float, default=1.0)
     train_local_r3.add_argument("--terminal-weight", type=float, default=1.0)
+    train_local_r3.add_argument(
+        "--reward-mode",
+        choices=["progress", "paired"],
+        default="progress",
+    )
     train_local_r3.add_argument("--learning-rate", type=float)
     train_local_r3.add_argument("--num-minibatches", type=int)
     train_local_r3.add_argument("--checkpoint-every-updates", type=int, default=5)

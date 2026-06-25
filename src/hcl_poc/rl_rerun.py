@@ -2519,6 +2519,7 @@ def train_rl_rerun_local_r3(
     total_steps: int = 32_768,
     bc_weight: float = 1.0,
     terminal_weight: float = 1.0,
+    reward_mode: str = "progress",
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
     checkpoint_every_updates: int = 5,
@@ -2542,6 +2543,8 @@ def train_rl_rerun_local_r3(
         raise ValueError("goal_sensitivity_weight must be non-negative")
     if goal_sensitivity_margin <= 0:
         raise ValueError("goal_sensitivity_margin must be positive")
+    if reward_mode not in {"progress", "paired"}:
+        raise ValueError("reward_mode must be one of {'progress', 'paired'}")
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
@@ -2646,7 +2649,14 @@ def train_rl_rerun_local_r3(
         "actor_critic_depth": int(config.get("low_level_rl.residual_depth", 2)),
         "initial_logstd": float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
         "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
-        "reward": "latent_progress_minus_terminal_distance_plus_bc_regularization_in_loss",
+        "reward": (
+            "latent_progress_minus_terminal_distance_plus_bc_regularization_in_loss"
+            if reward_mode == "progress"
+            else (
+                "latent_progress_plus_cached_base_terminal_improvement"
+                "_plus_bc_regularization_in_loss"
+            )
+        ),
         "disallowed_training_signals": [
             "mani_skill_reward",
             "task_success",
@@ -2660,6 +2670,8 @@ def train_rl_rerun_local_r3(
         recipe["goal_sensitivity_loss"] = (
             "in-batch valid-goal swap hinge on deterministic mean action"
         )
+    if reward_mode == "paired":
+        recipe["reward_mode"] = reward_mode
     global_step = 0
     history: list[dict[str, Any]] = []
     if latest.exists() and not force:
@@ -2679,13 +2691,13 @@ def train_rl_rerun_local_r3(
     current_z: np.ndarray
     goal_z: np.ndarray
     previous_action: np.ndarray
+    base_terminal_distance: np.ndarray
+    base_terminal_distance = np.full(1, np.nan, dtype=np.float32)
     local_step = 0
 
     @torch.inference_mode()
-    def reset_local_episode() -> None:
+    def load_local_start(group: h5py.Group, current_t: int) -> None:
         nonlocal current_obs, current_frames, current_z, goal_z, previous_action, local_step
-        group = h5[str(rng.choice(batch_keys))]
-        current_t = int(rng.integers(0, max_steps - horizon + 1))
         current_obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
         for replay_step in range(current_t):
             replay_action = torch.from_numpy(
@@ -2708,6 +2720,56 @@ def train_rl_rerun_local_r3(
             np.asarray(group["previous_executed_actions"][current_t], dtype=np.float32)
         )
         local_step = 0
+
+    @torch.inference_mode()
+    def frozen_base_terminal_distance() -> np.ndarray:
+        base_obs = current_obs
+        base_frames = current_frames
+        base_z = current_z
+        base_previous = previous_action.copy()
+        for base_step in range(horizon):
+            remaining = np.full(
+                (num_envs, 1),
+                (horizon - base_step) / horizon,
+                dtype=np.float32,
+            )
+            condition_np = _low_condition_array(
+                frozen.frame_norm.transform(base_frames),
+                base_z,
+                goal_z,
+                base_previous,
+                remaining,
+                frozen.conditioning,
+            )
+            condition = torch.from_numpy(condition_np).to(device).float()
+            normalized_base = frozen.low_model(condition)
+            unclipped = torch.from_numpy(
+                frozen.action_norm.inverse(
+                    normalized_base.cpu().numpy().astype(np.float32)
+                )
+            ).to(device)
+            action = torch.clamp(unclipped, action_low, action_high)
+            base_obs, _reward, _terminated, _truncated, _info = env.step(action)
+            base_frames = _phase4_frame_inputs(
+                base_obs,
+                dino,
+                int(config.get("dino.batch_size", 64)),
+            )
+            base_z = _encode_rerun_frames(frozen, base_frames, device)
+            base_previous = frozen.action_norm.transform(action.cpu().numpy())
+        return np.mean(np.square(base_z - goal_z), axis=-1).astype(np.float32)
+
+    @torch.inference_mode()
+    def reset_local_episode() -> None:
+        nonlocal base_terminal_distance
+        group = h5[str(rng.choice(batch_keys))]
+        current_t = int(rng.integers(0, max_steps - horizon + 1))
+        load_local_start(group, current_t)
+        if reward_mode == "paired":
+            base_terminal_distance = frozen_base_terminal_distance()
+            load_local_start(group, current_t)
+        else:
+            base_terminal_distance = np.full(num_envs, np.nan, dtype=np.float32)
 
     @torch.inference_mode()
     def condition_and_bc() -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
@@ -2742,7 +2804,10 @@ def train_rl_rerun_local_r3(
         segment_end = local_step == horizon - 1
         reward = previous_distance - next_distance
         if segment_end:
-            reward -= terminal_weight * next_distance
+            if reward_mode == "paired":
+                reward += terminal_weight * (base_terminal_distance - next_distance)
+            else:
+                reward -= terminal_weight * next_distance
         current_obs = next_obs
         current_frames = next_frames
         current_z = next_z
@@ -2751,6 +2816,9 @@ def train_rl_rerun_local_r3(
         done = np.full(num_envs, segment_end, dtype=np.bool_)
         metrics = {
             "next_distance": next_distance,
+            "base_terminal_distance": base_terminal_distance.copy()
+            if segment_end and reward_mode == "paired"
+            else None,
             "segment_end": segment_end,
             "success": _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_)))
             .reshape(-1)
@@ -2778,6 +2846,8 @@ def train_rl_rerun_local_r3(
                 update_start_time = time.perf_counter()
                 distance_values: list[float] = []
                 terminal_distances: list[float] = []
+                base_terminal_distances: list[float] = []
+                paired_improvements: list[float] = []
                 action_delta_values: list[float] = []
                 reward_values: list[float] = []
                 saturation_count = 0
@@ -2805,6 +2875,15 @@ def train_rl_rerun_local_r3(
                     success_count += int(metrics["success"].sum())
                     if metrics["segment_end"]:
                         terminal_distances.extend(metrics["next_distance"].tolist())
+                        if reward_mode == "paired":
+                            cached_base = metrics["base_terminal_distance"]
+                            if cached_base is None:
+                                raise RuntimeError(
+                                    "Paired reward did not report base distance"
+                                )
+                            improvement = cached_base - metrics["next_distance"]
+                            base_terminal_distances.extend(cached_base.tolist())
+                            paired_improvements.extend(improvement.tolist())
                     saturation_count += int(torch.any(raw_action != action, dim=-1).sum().cpu())
                     global_step += num_envs
                     progress.update(min(num_envs, total_steps - progress.n))
@@ -2943,6 +3022,17 @@ def train_rl_rerun_local_r3(
                     "mean_distance": float(np.mean(distance_values)),
                     "mean_terminal_distance": float(np.mean(terminal_distances))
                     if terminal_distances
+                    else None,
+                    "mean_base_terminal_distance": float(np.mean(base_terminal_distances))
+                    if base_terminal_distances
+                    else None,
+                    "mean_paired_improvement": float(np.mean(paired_improvements))
+                    if paired_improvements
+                    else None,
+                    "fraction_paired_improved": float(
+                        np.mean(np.asarray(paired_improvements) > 0.0)
+                    )
+                    if paired_improvements
                     else None,
                     "mean_action_delta_l2": float(np.mean(action_delta_values)),
                     "action_saturation_rate": float(saturation_count / batch_size),
