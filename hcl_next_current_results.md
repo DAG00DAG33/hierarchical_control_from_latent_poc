@@ -529,6 +529,22 @@ current-oracle goal distance `0.865`. So the issue is not just off-manifold
 learned goals; useful low-level interventions appear concentrated in difficult
 online regimes.
 
+I tried turning those online features into a direct multifeature gate using
+`--action-delta-gate-min 0.0006` plus `--goal-l2-gate-min`. On the same
+100-episode learned-goal window, both tested thresholds were worse than
+ungated:
+
+| policy | goal L2 threshold | success | success delta |
+| --- | ---: | ---: | ---: |
+| frozen n500 | - | 0.350 | - |
+| task-reward debug ungated | - | 0.300 | -0.050 |
+| multifeature gate | 24 | 0.260 | -0.090 |
+| multifeature gate | 27 | 0.270 | -0.080 |
+
+This closes the hand-coded gate branch for this checkpoint. The next useful work
+should alter the training target or train a selector/policy directly in the
+closed-loop distribution.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:

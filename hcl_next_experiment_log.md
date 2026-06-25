@@ -10356,3 +10356,68 @@ delta/high-saturation regime. This means the learned-high failure is not simply
 low-level intervention is useful only in some difficult closed-loop regimes.
 The next serious selector/objective should use online closed-loop state, not
 static high-level goal error alone.
+
+## 2026-06-25 - Online multifeature gate for rl-rerun
+
+I added an eval-only `--goal-l2-gate-min` option to `rl-rerun`
+`eval-closed-loop-r{1,2,3}`. It gates the tuned policy by the current segment's
+learned-goal distance. When combined with `--action-delta-gate-min`, the tuned
+action is used only when both conditions pass:
+
+```text
+||a_tuned - a_base||_2 >= action_delta_gate_min
+current-to-learned-goal L2 >= goal_l2_gate_min
+```
+
+The evaluator records:
+
+- `goal_l2_gate_min`
+- `goal_l2_gate_rate`
+- `episode_goal_l2_gate_rate`
+
+Smoke command:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 8 \
+  --eval-seed-start 4621000 \
+  --num-envs 8 \
+  --goal-source learned \
+  --action-delta-gate-min 0.0006 \
+  --goal-l2-gate-min 27 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_multigate_smoke_8_seed4621000.json
+```
+
+The smoke output had the expected action and goal gate-rate arrays.
+
+I then tested the multifeature gate on the same 100-episode learned-goal window
+used for the oracle-goal diagnostics:
+
+| policy | action threshold | goal L2 threshold | success | success delta | max-reward delta | action gate rate | goal gate rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | - | - | 0.350 | - | - | 0.000 | 0.000 |
+| task-reward debug ungated | - | - | 0.300 | -0.050 | -0.0386 | 0.000 | - |
+| multifeature gate | 0.0006 | 24 | 0.260 | -0.090 | -0.0586 | 0.739 | 0.233 |
+| multifeature gate | 0.0006 | 27 | 0.270 | -0.080 | -0.0496 | 0.729 | 0.323 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_multigate_smoke_8_seed4621000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_multigate_a0006_g24_100_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_multigate_a0006_g27_100_seed4600000.json`
+
+Interpretation:
+
+The online multifeature gate is worse than ungated on the selection window, so I
+did not spend a 500-episode validation run on it. This repeats the lesson from
+the earlier selector work: per-episode or trajectory-level correlations are not
+automatically useful when converted into a deployed step-level fallback policy,
+because the fallback changes future states, goals, and intervention
+opportunities. The next meaningful work should stop adding hand-coded gates and
+instead change the training target or train a policy/selector directly in the
+closed-loop distribution.

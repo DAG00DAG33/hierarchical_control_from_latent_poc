@@ -3473,6 +3473,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
+    goal_l2_gate_min: float | None = None,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -3493,6 +3494,8 @@ def evaluate_rl_rerun_closed_loop_r1(
         raise ValueError("oracle_copy_mode must be 'replay' or 'state_dict'")
     if action_delta_gate_min is not None and action_delta_gate_min < 0.0:
         raise ValueError("action_delta_gate_min must be non-negative")
+    if goal_l2_gate_min is not None and goal_l2_gate_min < 0.0:
+        raise ValueError("goal_l2_gate_min must be non-negative")
     need_oracle_branch = goal_source == "oracle" or diagnose_oracle_goals
 
     device = default_device()
@@ -3570,6 +3573,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         episode_action_delta_l2_max: list[float] = []
         episode_policy_saturation_rate: list[float] = []
         episode_action_delta_gate_rate: list[float] = []
+        episode_goal_l2_gate_rate: list[float] = []
         episode_goal_l2_initial: list[float] = []
         episode_goal_l2_mean: list[float] = []
         episode_predicted_oracle_goal_l2_initial: list[float] = []
@@ -3586,6 +3590,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         saturated_actions = 0
         active_actions = 0
         gated_actions = 0
+        goal_l2_gated_actions = 0
         high_decisions = 0
 
         for batch_start in range(0, episodes, num_envs):
@@ -3656,10 +3661,12 @@ def evaluate_rl_rerun_closed_loop_r1(
             current_action_delta_max = np.zeros(batch_envs, dtype=np.float32)
             current_policy_saturation_sum = np.zeros(batch_envs, dtype=np.float32)
             current_action_delta_gate_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_goal_l2_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_action_count = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_initial = np.full(batch_envs, np.nan, dtype=np.float32)
             current_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_count = np.zeros(batch_envs, dtype=np.float32)
+            current_segment_goal_l2 = np.full(batch_envs, np.nan, dtype=np.float32)
             current_predicted_oracle_goal_l2_initial = np.full(
                 batch_envs, np.nan, dtype=np.float32
             )
@@ -3800,6 +3807,7 @@ def evaluate_rl_rerun_closed_loop_r1(
                             current_goal_for_distance[replan] - held_goal[replan],
                             axis=-1,
                         ).astype(np.float32)
+                        current_segment_goal_l2[replan_indices] = goal_l2
                         current_goal_l2_sum[replan_indices] += goal_l2
                         current_goal_l2_count[replan_indices] += 1.0
                         missing_initial = np.isnan(
@@ -3915,6 +3923,21 @@ def evaluate_rl_rerun_closed_loop_r1(
                             )
                             gated_actions += int(gate_to_base_np.sum())
                             current_action_delta_gate_sum[gate_to_base_np] += 1.0
+                    if use_residual and goal_l2_gate_min is not None:
+                        goal_l2_gate_to_base_np = active & (
+                            current_segment_goal_l2 < goal_l2_gate_min
+                        )
+                        if bool(np.any(goal_l2_gate_to_base_np)):
+                            goal_l2_gate_to_base = torch.from_numpy(
+                                goal_l2_gate_to_base_np
+                            ).to(device)
+                            unclipped = torch.where(
+                                goal_l2_gate_to_base[:, None],
+                                base_action,
+                                unclipped,
+                            )
+                            goal_l2_gated_actions += int(goal_l2_gate_to_base_np.sum())
+                            current_goal_l2_gate_sum[goal_l2_gate_to_base_np] += 1.0
                     current_action_delta_sum[active] += action_delta_np[active]
                     current_action_delta_max[active] = np.maximum(
                         current_action_delta_max[active],
@@ -4029,6 +4052,9 @@ def evaluate_rl_rerun_closed_loop_r1(
                 .astype(float)
                 .tolist()
             )
+            episode_goal_l2_gate_rate.extend(
+                (current_goal_l2_gate_sum / action_denominator).astype(float).tolist()
+            )
             episode_goal_l2_initial.extend(
                 current_goal_l2_initial.astype(float).tolist()
             )
@@ -4067,6 +4093,10 @@ def evaluate_rl_rerun_closed_loop_r1(
             "action_delta_gate_rate": gated_actions / max(active_actions, 1)
             if use_residual and action_delta_gate_min is not None
             else 0.0,
+            "goal_l2_gate_min": goal_l2_gate_min if use_residual else None,
+            "goal_l2_gate_rate": goal_l2_gated_actions / max(active_actions, 1)
+            if use_residual and goal_l2_gate_min is not None
+            else 0.0,
             "mean_residual_norm": (
                 float(np.mean(residual_norms)) if residual_norms else 0.0
             ),
@@ -4078,6 +4108,7 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_action_delta_l2_max": episode_action_delta_l2_max,
             "episode_policy_saturation_rate": episode_policy_saturation_rate,
             "episode_action_delta_gate_rate": episode_action_delta_gate_rate,
+            "episode_goal_l2_gate_rate": episode_goal_l2_gate_rate,
             "episode_goal_l2_initial": episode_goal_l2_initial,
             "episode_goal_l2_mean": episode_goal_l2_mean,
             "episode_predicted_oracle_goal_l2_initial": (
@@ -4144,6 +4175,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         "goal_source": goal_source,
         "oracle_copy_mode": oracle_copy_mode if goal_source == "oracle" else None,
         "action_delta_gate_min": action_delta_gate_min,
+        "goal_l2_gate_min": goal_l2_gate_min,
         "diagnose_oracle_goals": diagnose_oracle_goals,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
@@ -4189,6 +4221,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
+    goal_l2_gate_min: float | None = None,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -4204,6 +4237,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         goal_source=goal_source,
         oracle_copy_mode=oracle_copy_mode,
         action_delta_gate_min=action_delta_gate_min,
+        goal_l2_gate_min=goal_l2_gate_min,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )
@@ -4222,6 +4256,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
+    goal_l2_gate_min: float | None = None,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -4237,6 +4272,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         goal_source=goal_source,
         oracle_copy_mode=oracle_copy_mode,
         action_delta_gate_min=action_delta_gate_min,
+        goal_l2_gate_min=goal_l2_gate_min,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )
