@@ -213,9 +213,10 @@ valid, but paired counts from separate vector eval arrays are diagnostic only.
 Selector policies must be evaluated directly in the simulator or on an explicit
 fixed reset bank with stable episode IDs.
 
-I added `low-level-rl eval-serial` for this purpose. It resets one environment
-per explicit seed and writes `episode_seed` to the JSON. On a compact 50-seed
-debug window (`4501000..4501049`), exact pairing worked:
+I added `low-level-rl eval-serial` for this purpose. It uses the same
+`ManiSkillVectorEnv` wrapper as the vector evaluator, resets one environment per
+explicit seed, and writes `episode_seed` to the JSON. On a compact 50-seed debug
+window (`4501000..4501049`), exact pairing worked:
 
 | policy | success | improvements | regressions | net |
 | --- | ---: | ---: | ---: | ---: |

@@ -1358,21 +1358,9 @@ def evaluate_residual_rl_serial(
             device,
         )
 
-    env = gym.make(
-        config.get("env_id"),
-        obs_mode="rgb+state",
-        control_mode=config.get("control_mode"),
-        reward_mode="normalized_dense",
-        render_mode=None,
-        sim_backend=_rl_backend(config),
-        num_envs=1,
-        reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
-    )
-    action_low_np = np.asarray(env.action_space.low, dtype=np.float32)
-    action_high_np = np.asarray(env.action_space.high, dtype=np.float32)
-    if action_low_np.ndim == 2:
-        action_low_np = action_low_np[0]
-        action_high_np = action_high_np[0]
+    env = _visual_env(config, 1)
+    action_low_np = np.asarray(env.single_action_space.low, dtype=np.float32)
+    action_high_np = np.asarray(env.single_action_space.high, dtype=np.float32)
     action_low = torch.as_tensor(action_low_np, device=device)
     action_high = torch.as_tensor(action_high_np, device=device)
     dino = _phase4_dino_from_config(config, device)
@@ -1575,8 +1563,17 @@ def evaluate_residual_rl_serial(
                 max_reward = max(max_reward, final_reward)
                 if "success" in info:
                     success = success or bool(np.asarray(info["success"].cpu()).reshape(-1)[0])
+                final_info_done = False
+                if "final_info" in info:
+                    final_mask = info["_final_info"]
+                    final_info_done = bool(final_mask.any())
+                    if final_info_done:
+                        episode = info["final_info"]["episode"]
+                        success = success or bool(
+                            episode["success_once"][final_mask].float().cpu().numpy()[0]
+                        )
                 step_count += 1
-                if bool(
+                if final_info_done or bool(
                     np.asarray(torch.logical_or(terminated, truncated).cpu()).reshape(-1)[0]
                 ):
                     break

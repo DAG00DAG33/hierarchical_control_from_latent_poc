@@ -8906,7 +8906,10 @@ I added `low-level-rl eval-serial`, a slower evaluator that resets one
 environment explicitly for every seed and writes `episode_seed` into the JSON.
 This is intended for paired selector/debug work where episode identity matters.
 It uses the same effect-progress latent update as the vector low-level rollout,
-not the older video helper's plain frame encoder path.
+not the older video helper's plain frame encoder path. I initially used a plain
+`gym.make(..., num_envs=1)` env, but that produced local-distance metrics on a
+different scale. I corrected it to use the same `ManiSkillVectorEnv` wrapper as
+the main vector evaluator, with one explicit seed at a time.
 
 Example command:
 
@@ -8929,9 +8932,9 @@ I ran a compact exact-seed diagnostic over seeds `4501000..4501049`:
 
 | policy | success | max reward | raw local reduction | selector tuned rate |
 | --- | ---: | ---: | ---: | ---: |
-| frozen | 0.620 | 0.737 | 0.861 | - |
-| R3 ungated | 0.700 | 0.785 | 0.905 | - |
-| initial linear selector | 0.640 | 0.742 | 0.852 | 0.480 |
+| frozen | 0.620 | 0.737 | 0.437 | - |
+| R3 ungated | 0.700 | 0.785 | 0.428 | - |
+| initial linear selector | 0.640 | 0.742 | 0.427 | 0.480 |
 
 Exact paired counts against frozen:
 
