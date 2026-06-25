@@ -1748,6 +1748,43 @@ def _validate_initial_selector(
     return has_initial_selector, selector_weights_np, selector_mean_np, selector_std_np
 
 
+def _validate_segment_selector(
+    segment_selector_weights: list[float] | None,
+    segment_selector_mean: list[float] | None,
+    segment_selector_std: list[float] | None,
+    segment_selector_threshold: float | None,
+) -> tuple[bool, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    selector_parts = [
+        segment_selector_weights,
+        segment_selector_mean,
+        segment_selector_std,
+        segment_selector_threshold,
+    ]
+    has_segment_selector = any(part is not None for part in selector_parts)
+    if has_segment_selector and not all(part is not None for part in selector_parts):
+        raise ValueError("segment selector requires weights, mean, std, and threshold")
+    if not has_segment_selector:
+        return False, None, None, None
+    if (
+        segment_selector_weights is None
+        or segment_selector_mean is None
+        or segment_selector_std is None
+    ):
+        raise RuntimeError("Segment selector validation failed")
+    if (
+        len(segment_selector_weights) != 5
+        or len(segment_selector_mean) != 5
+        or len(segment_selector_std) != 5
+    ):
+        raise ValueError("segment selector weights, mean, and std must each have five values")
+    selector_weights_np = np.asarray(segment_selector_weights, dtype=np.float32)
+    selector_mean_np = np.asarray(segment_selector_mean, dtype=np.float32)
+    selector_std_np = np.asarray(segment_selector_std, dtype=np.float32)
+    if np.any(selector_std_np <= 0.0):
+        raise ValueError("segment selector std values must be positive")
+    return has_segment_selector, selector_weights_np, selector_mean_np, selector_std_np
+
+
 @torch.inference_mode()
 def evaluate_residual_rl_serial(
     config: Config,
@@ -1766,6 +1803,10 @@ def evaluate_residual_rl_serial(
     initial_selector_mean: list[float] | None = None,
     initial_selector_std: list[float] | None = None,
     initial_selector_threshold: float | None = None,
+    segment_selector_weights: list[float] | None = None,
+    segment_selector_mean: list[float] | None = None,
+    segment_selector_std: list[float] | None = None,
+    segment_selector_threshold: float | None = None,
     force: bool = False,
 ) -> Path:
     if residual_l2_gate_max is not None and residual_l2_gate_max < 0.0:
@@ -1783,6 +1824,19 @@ def evaluate_residual_rl_serial(
         initial_selector_std,
         initial_selector_threshold,
     )
+    (
+        has_segment_selector,
+        segment_selector_weights_np,
+        segment_selector_mean_np,
+        segment_selector_std_np,
+    ) = _validate_segment_selector(
+        segment_selector_weights,
+        segment_selector_mean,
+        segment_selector_std,
+        segment_selector_threshold,
+    )
+    if has_initial_selector and has_segment_selector:
+        raise ValueError("initial selector and segment selector cannot both be enabled")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     output = result / f"serial_eval_{episodes}_seed{seed_start}.json"
     if output.exists() and not force:
@@ -1861,6 +1915,7 @@ def evaluate_residual_rl_serial(
     episode_initial_raw_distance: list[float] = []
     episode_initial_base_action_l2: list[float] = []
     episode_initial_selector_use_tuned: list[float] = []
+    episode_segment_selector_tuned_rate: list[float] = []
     episode_residual_l2_mean: list[float] = []
     episode_action_saturation_rate: list[float] = []
     episode_selected_distance_gate_rate: list[float] = []
@@ -1886,12 +1941,15 @@ def evaluate_residual_rl_serial(
     serial_segment_residual_l2_mean: list[float] = []
     serial_segment_action_saturation_rate: list[float] = []
     serial_segment_distance_gate_rate: list[float] = []
+    serial_segment_selector_use_tuned: list[float] = []
     reached: list[float] = []
     selected_metric_terminal_scores: list[float] = []
     total_saturation = 0
     total_actions = 0
     total_distance_gate = 0
     total_selector_tuned = 0
+    total_segment_selector_tuned = 0
+    total_segment_selector_segments = 0
     residual_magnitudes: list[float] = []
 
     try:
@@ -1907,6 +1965,7 @@ def evaluate_residual_rl_serial(
             countdown = 0
             selected_tuned = True
             selected_at_start = False
+            segment_selector_use_tuned = True
             final_reward = 0.0
             max_reward = -float("inf")
             success = False
@@ -1926,6 +1985,8 @@ def evaluate_residual_rl_serial(
             segment_saturation_sum = 0.0
             segment_distance_gate_sum = 0.0
             segment_step_count = 0
+            segment_selector_tuned_sum = 0.0
+            segment_selector_segment_count = 0
             step_count = 0
 
             for _step in range(max_steps):
@@ -1999,6 +2060,37 @@ def evaluate_residual_rl_serial(
                     segment_start_previous_action_norm_l2 = float(
                         np.linalg.norm(previous_action, axis=-1)[0]
                     )
+                    if has_segment_selector:
+                        if (
+                            segment_selector_weights_np is None
+                            or segment_selector_mean_np is None
+                            or segment_selector_std_np is None
+                            or segment_selector_threshold is None
+                        ):
+                            raise RuntimeError("Segment selector was not initialized")
+                        selector_features = np.asarray(
+                            [
+                                [
+                                    distance[0],
+                                    raw_distance[0],
+                                    base_action_l2,
+                                    segment_start_previous_action_norm_l2,
+                                    float(segment_start_step),
+                                ]
+                            ],
+                            dtype=np.float32,
+                        )
+                        selector_score = float(
+                            (
+                                (
+                                    (selector_features - segment_selector_mean_np)
+                                    / segment_selector_std_np
+                                )
+                                @ segment_selector_weights_np
+                            )[0]
+                        )
+                        selected_tuned = selector_score >= segment_selector_threshold
+                        segment_selector_use_tuned = selected_tuned
                     segment_residual_sum = 0.0
                     segment_saturation_sum = 0.0
                     segment_distance_gate_sum = 0.0
@@ -2017,7 +2109,7 @@ def evaluate_residual_rl_serial(
                     )
                     residual = alpha * torch.tanh(raw_residual)
                     unclipped = base_action + residual
-                if has_initial_selector and not selected_tuned:
+                if (has_initial_selector or has_segment_selector) and not selected_tuned:
                     unclipped = base_action
                     residual = torch.zeros_like(residual)
                 if residual_l2_gate_max is not None:
@@ -2097,6 +2189,14 @@ def evaluate_residual_rl_serial(
                     serial_segment_distance_gate_rate.append(
                         segment_distance_gate_sum / segment_denominator
                     )
+                    if has_segment_selector:
+                        serial_segment_selector_use_tuned.append(
+                            float(segment_selector_use_tuned)
+                        )
+                        segment_selector_tuned_sum += float(segment_selector_use_tuned)
+                        segment_selector_segment_count += 1
+                        total_segment_selector_tuned += int(segment_selector_use_tuned)
+                        total_segment_selector_segments += 1
 
                 previous_action = frozen.action_norm.transform(
                     action.cpu().numpy().astype(np.float32)
@@ -2143,6 +2243,10 @@ def evaluate_residual_rl_serial(
             )
             episode_segment_goal_reach_rate.append(reach_sum / segment_denominator)
             episode_initial_selector_use_tuned.append(float(selected_at_start))
+            if has_segment_selector:
+                episode_segment_selector_tuned_rate.append(
+                    segment_selector_tuned_sum / max(segment_selector_segment_count, 1)
+                )
     finally:
         env.close()
 
@@ -2187,6 +2291,19 @@ def evaluate_residual_rl_serial(
         "episodes": episodes,
         "seed_start": seed_start,
         "eval_mode": "serial_explicit_seed",
+        "segment_selector_feature_order": [
+            "initial_selected_distance",
+            "initial_raw_distance",
+            "initial_base_action_l2",
+            "initial_previous_action_norm_l2",
+            "segment_start_step",
+        ]
+        if has_segment_selector
+        else None,
+        "segment_selector_weights": segment_selector_weights,
+        "segment_selector_mean": segment_selector_mean,
+        "segment_selector_std": segment_selector_std,
+        "segment_selector_threshold": segment_selector_threshold,
         "success": float(np.mean(successes)),
         "final_reward": float(np.mean(finals)),
         "max_reward": float(np.mean(maxima)),
@@ -2211,6 +2328,10 @@ def evaluate_residual_rl_serial(
         "initial_selector_tuned_rate": total_selector_tuned / max(episodes, 1)
         if has_initial_selector
         else None,
+        "segment_selector_tuned_rate": total_segment_selector_tuned
+        / max(total_segment_selector_segments, 1)
+        if has_segment_selector
+        else None,
         "episode_seed": episode_seed,
         "episode_success": successes,
         "episode_final_reward": finals,
@@ -2220,6 +2341,9 @@ def evaluate_residual_rl_serial(
         "episode_initial_raw_distance": episode_initial_raw_distance,
         "episode_initial_base_action_l2": episode_initial_base_action_l2,
         "episode_initial_selector_use_tuned": episode_initial_selector_use_tuned,
+        "episode_segment_selector_tuned_rate": episode_segment_selector_tuned_rate
+        if has_segment_selector
+        else None,
         "episode_residual_l2_mean": episode_residual_l2_mean,
         "episode_action_saturation_rate": episode_action_saturation_rate,
         "episode_selected_distance_gate_rate": episode_selected_distance_gate_rate,
@@ -2245,6 +2369,9 @@ def evaluate_residual_rl_serial(
         "serial_segment_residual_l2_mean": serial_segment_residual_l2_mean,
         "serial_segment_action_saturation_rate": serial_segment_action_saturation_rate,
         "serial_segment_distance_gate_rate": serial_segment_distance_gate_rate,
+        "serial_segment_selector_use_tuned": serial_segment_selector_use_tuned
+        if has_segment_selector
+        else None,
     }
     write_json(output, payload)
     return output

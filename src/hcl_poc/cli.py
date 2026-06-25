@@ -340,6 +340,10 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 initial_selector_mean=args.initial_selector_mean,
                 initial_selector_std=args.initial_selector_std,
                 initial_selector_threshold=args.initial_selector_threshold,
+                segment_selector_weights=args.segment_selector_weights,
+                segment_selector_mean=args.segment_selector_mean,
+                segment_selector_std=args.segment_selector_std,
+                segment_selector_threshold=args.segment_selector_threshold,
                 force=args.force,
             )
         )
@@ -2080,6 +2084,10 @@ def build_parser() -> argparse.ArgumentParser:
     low_eval_serial.add_argument("--initial-selector-mean", nargs=3, type=float)
     low_eval_serial.add_argument("--initial-selector-std", nargs=3, type=float)
     low_eval_serial.add_argument("--initial-selector-threshold", type=float)
+    low_eval_serial.add_argument("--segment-selector-weights", nargs=5, type=float)
+    low_eval_serial.add_argument("--segment-selector-mean", nargs=5, type=float)
+    low_eval_serial.add_argument("--segment-selector-std", nargs=5, type=float)
+    low_eval_serial.add_argument("--segment-selector-threshold", type=float)
     low_eval_serial.add_argument(
         "--distance-metric",
         choices=["raw_l2", "reachability"],

@@ -9458,3 +9458,50 @@ and this selector has only been evaluated offline at the segment level. The next
 step is to add a direct serial evaluator that applies a segment-start selector
 online, then test whether the local raw-reduction gain transfers to episode
 success.
+
+## 2026-06-25 - Online multifeature serial segment selector validation
+
+I added online `eval-serial` support for the fitted 5-feature segment selector:
+at each high-level replan, the evaluator scores the segment-start features and
+chooses either the tuned R3 action or the frozen low-level action for that held
+goal. Initial episode selectors and segment selectors are mutually exclusive in
+the evaluator to keep the policy semantics clear.
+
+Validation used the same held-out exact serial window `4506000..4506049` and
+the selector fitted above.
+
+| policy | success | max reward | raw local reduction | segment goal reach | R3 segment use |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.720 | 0.802 | 0.451 | 0.698 | - |
+| ungated R3 bc10 | 0.700 | 0.783 | 0.461 | 0.652 | 1.000 |
+| online segment selector | 0.680 | 0.771 | 0.460 | 0.668 | 0.760 |
+
+Paired episode counts for online selector vs frozen:
+
+| improvements | regressions | net success delta |
+| ---: | ---: | ---: |
+| 7 | 9 | -0.040 |
+
+Segment-level paired comparison for online selector vs frozen:
+
+| common segments | base raw reduction | selector raw reduction | delta | helpful | harmful |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 0.451 | 0.460 | +0.008 | 240 | 252 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segselector_online_serial50_seed4506000/serial_eval_50_seed4506000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segselector_online_serial50_seed4506000/compare_vs_frozen_serial50_seed4506000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segselector_online_serial50_seed4506000/segment_compare_vs_frozen_serial50_seed4506000.json`
+
+Interpretation:
+
+The offline selector result was optimistic because it selected between already
+completed frozen/R3 segment outcomes. Online, changing early segments changes
+later high-level goals, states, and segment distributions. The deployed selector
+kept some local raw-reduction gain over frozen, but not enough to improve the
+closed-loop task; it underperformed both frozen and ungated R3 on episode
+success. This closes the current segment-selector branch as a deployment fix
+for this checkpoint. The next useful work should focus on an objective that
+creates a larger, task-aligned local effect, or a selector trained directly on
+closed-loop episode outcomes rather than offline segment deltas.

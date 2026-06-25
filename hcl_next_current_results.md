@@ -371,7 +371,21 @@ Validation AUC for segment helpfulness was only `0.584`, but the aggregate local
 raw-reduction gain held out. On the same validation window, ungated R3 was still
 negative for episode success (`0.700` vs frozen `0.720`), so this is not yet a
 deployment win. It is evidence that multifeature segment-start gating is more
-promising than the earlier scalar gates and should be evaluated online next.
+promising than the earlier scalar gates.
+
+Online deployment of the same selector on `4506000..4506049` did not transfer to
+task success:
+
+| policy | success | max reward | raw local reduction | segment goal reach | R3 segment use |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.720 | 0.802 | 0.451 | 0.698 | - |
+| ungated R3 bc10 | 0.700 | 0.783 | 0.461 | 0.652 | 1.000 |
+| online segment selector | 0.680 | 0.771 | 0.460 | 0.668 | 0.760 |
+
+The online selector still slightly improved local raw reduction over frozen
+(`+0.008` over 500 aligned segments), but regressed episode success (`-0.040`,
+7 improved episodes, 9 regressed). The offline segment selector is therefore a
+useful diagnostic, not a deployable fix for this checkpoint.
 
 ## Current Best Policies
 
@@ -404,10 +418,10 @@ The next useful directions are:
    The eval path now records per-episode success, reward, residual magnitude,
    saturation, local progress, and compact pre-decision state/goal features.
    Initial episode features and scalar current-distance gating are both weak,
-   but the new exact-serial multifeature segment selector improves held-out
-   local raw reduction offline. The next gate step should be an online serial
-   evaluator that applies this segment-start selector during rollout and reports
-   exact episode success.
+   and the exact-serial multifeature segment selector improved held-out local
+   raw reduction offline but failed online. Further gate work should train
+   directly against closed-loop episode outcomes or use a richer policy/context
+   model; offline local segment deltas are not enough.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not
