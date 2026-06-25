@@ -9144,3 +9144,87 @@ best single signal, and its oriented AUC is only `0.567`.
 The practical implication is that a deployable segment selector probably needs
 more context than scalar distance/action norms, a larger fixed-bank dataset, or
 an objective that creates larger candidate-policy differences before gating.
+
+## Lower-BC R3 objective check
+
+After the gate/selector diagnostics failed to produce a robust improvement, I
+tested whether relaxing the R3 behavior-cloning anchor would create a larger,
+cleaner policy difference. This keeps the same effect32 + reachability terminal
+reward setup as the current best R3 checkpoint, but changes `bc_weight` from
+`10.0` to `1.0`.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1 \
+  --steps 40960 \
+  --num-envs 4096 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 3e-5 \
+  --initial-logstd -4.0 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Training summary was almost unchanged relative to `bc10`:
+
+| run | bc weight | global step | bc loss | action saturation | clip fraction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| R3 bc10 | 10.0 | 40960 | 8.35e-7 | 0.259 | 0.035 |
+| R3 bc1 | 1.0 | 40960 | 8.39e-7 | 0.259 | 0.035 |
+
+I evaluated on the existing exact serial window `4503000..4503049`, using the
+same frozen baseline and BC10 comparison from the segment diagnostic:
+
+| policy | success | max reward | raw local reduction | residual L2 | action saturation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.620 | 0.715 | 0.414 | 0.000000 | 0.034 |
+| R3 bc10 | 0.680 | 0.762 | 0.417 | 0.001031 | 0.035 |
+| R3 bc1 | 0.660 | 0.758 | 0.444 | 0.001064 | 0.033 |
+
+Exact paired counts against frozen:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| R3 bc10 | 7 | 4 | +3 |
+| R3 bc1 | 6 | 4 | +2 |
+
+Paired segment raw-reduction diagnostics:
+
+| policy | mean raw-reduction delta | helpful segments | harmful segments |
+| --- | ---: | ---: | ---: |
+| R3 bc10 | 0.0030 | 244 | 256 |
+| R3 bc1 | 0.0296 | 241 | 259 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1_serial50_seed4503000/serial_eval_50_seed4503000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1_serial50_seed4503000/paired_vs_frozen_serial50_seed4503000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1_serial50_seed4503000/paired_segments_vs_frozen_serial50_seed4503000.json`
+
+### Interpretation
+
+Lowering the BC anchor from `10` to `1` is not the missing objective fix. It
+does increase mean raw local reduction on this small exact serial window
+(`0.444` vs `0.417`), but it does not create a larger residual/action shift, and
+task success is worse than the current `bc10` checkpoint (`0.660` vs `0.680`).
+The segment-level picture is also not cleaner: BC1 has slightly larger average
+local improvement but still more harmful than helpful paired segments.
+
+This suggests the current R3 formulation is not BC-weight limited at this scale.
+The next objective experiment should change the reward target itself, not just
+the BC coefficient.

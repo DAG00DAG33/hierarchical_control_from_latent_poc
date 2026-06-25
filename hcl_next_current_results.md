@@ -262,6 +262,21 @@ The best simple segment-start feature was initial raw distance, with only
 `0.567` oriented AUC for helpful-vs-harmful R3 segments. This makes simple
 segment-level scalar gating look weak too.
 
+### Lowering the R3 BC weight did not fix the objective
+
+I trained a matching R3 40k run with `bc_weight=1.0` instead of the current best
+`bc_weight=10.0`. On the exact serial `4503000..4503049` window:
+
+| policy | success | raw local reduction | residual L2 | net vs frozen |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.620 | 0.414 | 0.000000 | - |
+| R3 bc10 | 0.680 | 0.417 | 0.001031 | +3 |
+| R3 bc1 | 0.660 | 0.444 | 0.001064 | +2 |
+
+BC1 increased mean raw local reduction but did not create a larger action shift
+or better task success. This points away from "just reduce BC weight" and toward
+changing the reward target/objective itself.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -300,9 +315,9 @@ The next useful directions are:
    one-dimensional gates.
 
 2. Improve the objective so the tuned policy creates a larger effect.
-   The current R3 updates are tiny. A better objective should optimize
-   task-relevant local improvement rather than absolute terminal `D_phi`
-   distance.
+   The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not
+   solve this. A better objective should optimize task-relevant local
+   improvement rather than absolute terminal `D_phi` distance.
 
 3. Revisit horizon/representation only after the gate/objective question.
    The current effect32 interface is goal-dependent, so the main bottleneck is
@@ -351,4 +366,6 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentdetail_serial50_seed4503000/serial_eval_50_seed4503000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/serial_eval_50_seed4503000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/paired_segments_vs_frozen_serial50_seed4503000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1/train_metrics.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc1_serial50_seed4503000/serial_eval_50_seed4503000.json
 ```
