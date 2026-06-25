@@ -437,15 +437,18 @@ held-out validation.
 Broader local validation on 8 held-out timesteps from
 `pusht_vector_state_demos_n512_val_b1.h5` changes the sign but not the scale:
 
-| policy | final distance | delta vs frozen | reduction fraction |
-| --- | ---: | ---: | ---: |
-| frozen n500 | 0.7092 | - | 0.8704 |
-| dense-progress cached paired 3 updates | 0.7086 | +0.0005 | 0.8687 |
-| terminal-only lr1e-5 logstd-5 | 0.7080 | +0.0012 | 0.8708 |
+| policy | final distance | final reward | max reward | success-once |
+| --- | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.7092 | 0.3979 | 0.4649 | 0.2456 |
+| dense-progress cached paired 3 updates | 0.7086 | 0.4005 | 0.4636 | 0.2439 |
+| terminal-only lr1e-5 logstd-5 | 0.7080 | 0.4005 | 0.4672 | 0.2493 |
 
 The cached paired variants are slightly better than frozen on this broader
-mean-distance metric, but the effect is still noise-scale and too small to
-justify closed-loop deployment.
+mean-distance metric. After adding task-reward diagnostics, the lower-noise
+terminal-only checkpoint is weakly positive across final distance, final/max
+environment reward, mean environment reward, and success-once. The gain is still
+tiny (`+0.0037` success-once and about `+0.002` reward), so it is useful as a
+selection diagnostic but too small to justify closed-loop deployment.
 
 ## Current Best Policies
 
@@ -494,9 +497,10 @@ The next useful directions are:
    reward improved the training signal but regressed validation. Lower
    LR/action noise improved the training metric but suppressed useful held-out
    action changes. A broader reset-bank validation changed the sign of the local
-   mean effect but kept it near zero. The next objective check should change the
-   target regime, not simply scale the same formulation: move toward a more
-   task-aligned signal than local reachability-distance improvement alone.
+   mean effect but kept it near zero; task-reward diagnostics are also only
+   weakly positive. The next objective check should change the target regime,
+   not simply scale the same formulation: move toward a stronger task-aligned
+   signal than local reachability-distance improvement alone.
    The privileged direct hard-start check shows that large selected-local gains
    can still hurt closed-loop deployment, so checkpoint selection needs
    deployment evidence or a better local-to-task proxy.

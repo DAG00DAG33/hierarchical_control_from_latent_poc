@@ -9902,3 +9902,53 @@ distance units over 4096 local episodes. This is still noise-scale compared
 with the size of the local distances and does not justify closed-loop
 deployment. It does suggest that a broader reset bank is important for judging
 these tiny effects, because single-entry conclusions can change sign.
+
+## 2026-06-25 - Local task diagnostics for cached paired R3
+
+I added task-reward diagnostics to both frozen local Mode-A audit and tuned
+local R1/R2/R3 eval outputs. The local evaluators now record:
+
+- `final_env_reward_mean`
+- `max_env_reward_mean`
+- `mean_env_reward_mean`
+- `task_success_once_fraction`
+
+This keeps the existing latent-distance checks but adds a closer proxy to the
+PushT task reward/success signal returned by the environment.
+
+I reran the broader 8-timestep validation manifest with diagnostics:
+
+| policy | final distance | final env reward | max env reward | mean env reward | success-once | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.7092 | 0.3979 | 0.4649 | 0.3855 | 0.2456 | - |
+| dense-progress cached paired 3 updates | 0.7086 | 0.4005 | 0.4636 | 0.3873 | 0.2439 | 0.0023 |
+| terminal-only lr1e-5 logstd-5 | 0.7080 | 0.4005 | 0.4672 | 0.3874 | 0.2493 | 0.0008 |
+
+The deltas vs frozen were:
+
+| policy | final-distance delta | final reward delta | max reward delta | mean reward delta | success-once delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense-progress cached paired 3 updates | +0.0005 | +0.0027 | -0.0013 | +0.0018 | -0.0017 |
+| terminal-only lr1e-5 logstd-5 | +0.0012 | +0.0026 | +0.0023 | +0.0019 | +0.0037 |
+
+Here positive final-distance delta means the tuned policy had lower final
+latent distance than frozen.
+
+Artifacts:
+
+- `results/rl_rerun/local_mode_a_audit_n512_val_b1_n500_seed0_manifest_e8_taskdiag.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_3updates_bc1/eval_local_n512_val_b1_manifest_e8_taskdiag.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_terminalonly_n4096_3updates_lr1e5_logstd5_bc1/eval_local_n512_val_b1_manifest_e8_taskdiag.json`
+
+Interpretation:
+
+The lower-noise terminal-only cached-paired checkpoint is the only one that is
+weakly positive across final distance, final/max/mean task reward, and
+success-once on this broad local manifest. The effect is still very small:
+`+0.0037` success-once over 4096 local episodes is about 15 extra local
+successes, and the reward gains are around `0.002`. This supports using
+task-aligned local diagnostics for checkpoint selection, but it does not change
+the deployment conclusion. The current cached-paired R3 objective produces a
+measurable but tiny local effect; the next experiment should increase objective
+signal strength or move to a better task proxy rather than continue small
+learning-rate/noise sweeps.
