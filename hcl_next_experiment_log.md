@@ -7880,3 +7880,76 @@ Decision:
 - next improvement should target variance reduction or stronger selection, for
   example evaluating multiple short PPO seeds and promoting by a sufficiently
   large held-out bank, or adding a better local/task-aligned selection signal.
+
+## Effect32 FiLM R3 two-bank robustness check
+
+The first PPO-seed repeat used one fresh 500-episode evaluation bank
+(`seed_start=3500000`). To separate PPO-seed instability from evaluation-window
+noise, I evaluated the frozen policy and all three 40k R3 PPO seeds on a second
+fresh 500-episode bank:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --episodes 500 \
+  --seed-start 3600000 \
+  --distance-metric reachability \
+  --force
+```
+
+For tuned policies, the same command was run with each `best_train_latent.pt`
+checkpoint and matching output run names:
+
+- `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10`
+- `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed1`
+- `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed2`
+
+### Per-bank results
+
+| eval seed start | policy | success | max reward | raw local reduction | reach rate | terminal AUC | action delta |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | frozen | 0.634 | 0.738 | 0.397 | 0.718 | 0.806 | 0.0000 |
+| 3500000 | R3 seed 0 | 0.684 | 0.773 | 0.410 | 0.731 | 0.805 | 0.0010 |
+| 3500000 | R3 seed 1 | 0.662 | 0.753 | 0.394 | 0.706 | 0.794 | 0.0011 |
+| 3500000 | R3 seed 2 | 0.610 | 0.719 | 0.402 | 0.711 | 0.806 | 0.0008 |
+| 3600000 | frozen | 0.662 | 0.760 | 0.389 | 0.725 | 0.805 | 0.0000 |
+| 3600000 | R3 seed 0 | 0.638 | 0.743 | 0.389 | 0.720 | 0.800 | 0.0010 |
+| 3600000 | R3 seed 1 | 0.646 | 0.745 | 0.399 | 0.723 | 0.802 | 0.0011 |
+| 3600000 | R3 seed 2 | 0.640 | 0.740 | 0.405 | 0.712 | 0.805 | 0.0008 |
+
+### Two-bank aggregate
+
+| policy | success values | mean success | mean max reward |
+| --- | --- | ---: | ---: |
+| frozen | 0.634, 0.662 | 0.648 | 0.749 |
+| R3 seed 0 | 0.684, 0.638 | 0.661 | 0.758 |
+| R3 seed 1 | 0.662, 0.646 | 0.654 | 0.749 |
+| R3 seed 2 | 0.610, 0.640 | 0.625 | 0.730 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final500_seed3600000/eval_500_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3600000/eval_500_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed1_final500_seed3600000/eval_500_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_rlseed2_final500_seed3600000/eval_500_seed3600000.json`
+
+### Interpretation
+
+The second bank is a negative robustness result: frozen reaches `0.662`, while
+all three tuned R3 seeds are lower (`0.638`, `0.646`, `0.640`). Over two
+500-episode banks, the best R3 seed still has a small positive mean over frozen
+(`0.661` versus `0.648`), but the margin is only `+0.013` and is not stable
+across evaluation windows.
+
+This revises the effect32 R3 conclusion:
+
+- the original `0.684` checkpoint remains the best observed real-compatible RL
+  checkpoint;
+- the recipe does not yet provide a robust expected improvement over frozen;
+- future work should prioritize either better selection signals or a formulation
+  that yields a larger effect size before spending more compute on long PPO
+  training.
