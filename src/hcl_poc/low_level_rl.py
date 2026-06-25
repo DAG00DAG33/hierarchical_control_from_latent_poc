@@ -794,6 +794,15 @@ def evaluate_residual_rl(
     episode_raw_distance_reduction_mean: list[float] = []
     episode_selected_distance_reduction_mean: list[float] = []
     episode_goal_reach_rate: list[float] = []
+    episode_selected_distance_mean: list[float] = []
+    episode_raw_distance_mean: list[float] = []
+    episode_base_action_l2_mean: list[float] = []
+    episode_previous_action_norm_l2_mean: list[float] = []
+    episode_replan_rate: list[float] = []
+    episode_initial_selected_distance: list[float] = []
+    episode_initial_raw_distance: list[float] = []
+    episode_initial_base_action_l2: list[float] = []
+    episode_initial_env_reward: list[float] = []
     current_segment_initial: np.ndarray | None = None
     current_segment_raw_initial: np.ndarray | None = None
     current_final = np.zeros(num_envs, dtype=np.float32)
@@ -805,9 +814,35 @@ def evaluate_residual_rl(
     current_selected_reduction_sum = np.zeros(num_envs, dtype=np.float32)
     current_reach_sum = np.zeros(num_envs, dtype=np.float32)
     current_segment_count = np.zeros(num_envs, dtype=np.float32)
+    current_selected_distance_sum = np.zeros(num_envs, dtype=np.float32)
+    current_raw_distance_sum = np.zeros(num_envs, dtype=np.float32)
+    current_base_action_l2_sum = np.zeros(num_envs, dtype=np.float32)
+    current_previous_action_norm_l2_sum = np.zeros(num_envs, dtype=np.float32)
+    current_replan_sum = np.zeros(num_envs, dtype=np.float32)
+    current_initial_selected_distance = np.full(num_envs, np.nan, dtype=np.float32)
+    current_initial_raw_distance = np.full(num_envs, np.nan, dtype=np.float32)
+    current_initial_base_action_l2 = np.full(num_envs, np.nan, dtype=np.float32)
+    current_initial_env_reward = np.full(num_envs, np.nan, dtype=np.float32)
     while len(successes) < episodes:
         condition, base_action, distance, replan = rollout.condition()
         raw_distance = rollout.raw_distance(rollout.current_latent, rollout.held_goal)
+        base_action_l2 = (
+            torch.linalg.vector_norm(base_action, dim=-1).cpu().numpy().astype(np.float32)
+        )
+        previous_action_norm_l2 = np.linalg.norm(rollout.previous_action, axis=-1).astype(
+            np.float32
+        )
+        first_step = current_step_count == 0.0
+        if np.any(first_step):
+            current_initial_selected_distance[first_step] = distance[first_step]
+            current_initial_raw_distance[first_step] = raw_distance[first_step]
+            current_initial_base_action_l2[first_step] = base_action_l2[first_step]
+            current_initial_env_reward[first_step] = rollout.previous_env_reward[first_step]
+        current_selected_distance_sum += distance
+        current_raw_distance_sum += raw_distance
+        current_base_action_l2_sum += base_action_l2
+        current_previous_action_norm_l2_sum += previous_action_norm_l2
+        current_replan_sum += replan.astype(np.float32)
         if current_segment_initial is None:
             current_segment_initial = distance.copy()
             current_segment_raw_initial = raw_distance.copy()
@@ -914,6 +949,33 @@ def evaluate_residual_rl(
                 episode_goal_reach_rate.extend(
                     (current_reach_sum[mask_np] / segment_denominator).tolist()
                 )
+                episode_selected_distance_mean.extend(
+                    (current_selected_distance_sum[mask_np] / step_denominator).tolist()
+                )
+                episode_raw_distance_mean.extend(
+                    (current_raw_distance_sum[mask_np] / step_denominator).tolist()
+                )
+                episode_base_action_l2_mean.extend(
+                    (current_base_action_l2_sum[mask_np] / step_denominator).tolist()
+                )
+                episode_previous_action_norm_l2_mean.extend(
+                    (
+                        current_previous_action_norm_l2_sum[mask_np] / step_denominator
+                    ).tolist()
+                )
+                episode_replan_rate.extend(
+                    (current_replan_sum[mask_np] / step_denominator).tolist()
+                )
+                episode_initial_selected_distance.extend(
+                    current_initial_selected_distance[mask_np].tolist()
+                )
+                episode_initial_raw_distance.extend(
+                    current_initial_raw_distance[mask_np].tolist()
+                )
+                episode_initial_base_action_l2.extend(
+                    current_initial_base_action_l2[mask_np].tolist()
+                )
+                episode_initial_env_reward.extend(current_initial_env_reward[mask_np].tolist())
                 current_max[mask_np] = -np.inf
                 current_residual_sum[mask_np] = 0.0
                 current_saturation_sum[mask_np] = 0.0
@@ -922,6 +984,15 @@ def evaluate_residual_rl(
                 current_selected_reduction_sum[mask_np] = 0.0
                 current_reach_sum[mask_np] = 0.0
                 current_segment_count[mask_np] = 0.0
+                current_selected_distance_sum[mask_np] = 0.0
+                current_raw_distance_sum[mask_np] = 0.0
+                current_base_action_l2_sum[mask_np] = 0.0
+                current_previous_action_norm_l2_sum[mask_np] = 0.0
+                current_replan_sum[mask_np] = 0.0
+                current_initial_selected_distance[mask_np] = np.nan
+                current_initial_raw_distance[mask_np] = np.nan
+                current_initial_base_action_l2[mask_np] = np.nan
+                current_initial_env_reward[mask_np] = np.nan
         if len(successes) >= episodes:
             break
     rollout.close()
@@ -975,6 +1046,15 @@ def evaluate_residual_rl(
         "episode_raw_segment_distance_reduction": episode_raw_distance_reduction_mean[:count],
         "episode_segment_distance_reduction": episode_selected_distance_reduction_mean[:count],
         "episode_segment_goal_reach_rate": episode_goal_reach_rate[:count],
+        "episode_selected_distance_mean": episode_selected_distance_mean[:count],
+        "episode_raw_distance_mean": episode_raw_distance_mean[:count],
+        "episode_base_action_l2_mean": episode_base_action_l2_mean[:count],
+        "episode_previous_action_norm_l2_mean": episode_previous_action_norm_l2_mean[:count],
+        "episode_replan_rate": episode_replan_rate[:count],
+        "episode_initial_selected_distance": episode_initial_selected_distance[:count],
+        "episode_initial_raw_distance": episode_initial_raw_distance[:count],
+        "episode_initial_base_action_l2": episode_initial_base_action_l2[:count],
+        "episode_initial_env_reward": episode_initial_env_reward[:count],
     }
     write_json(output, payload)
     return output

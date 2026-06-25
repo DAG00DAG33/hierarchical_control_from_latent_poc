@@ -8581,3 +8581,108 @@ This revises the previous promotion:
 - the next meaningful step is a state/goal-aware selector or a different
   objective that creates larger action improvements, not more scalar threshold
   tuning.
+
+## Low-level pre-decision selector diagnostics
+
+I extended `low-level-rl eval` with compact per-episode features that are
+available before or during action selection, rather than only after the episode
+outcome:
+
+- `episode_selected_distance_mean`
+- `episode_raw_distance_mean`
+- `episode_base_action_l2_mean`
+- `episode_previous_action_norm_l2_mean`
+- `episode_replan_rate`
+- `episode_initial_selected_distance`
+- `episode_initial_raw_distance`
+- `episode_initial_base_action_l2`
+- `episode_initial_env_reward`
+
+The `initial_*` fields are clean episode-level selector inputs because frozen
+and tuned policies share the same state before the first action. The trajectory
+means are still useful for diagnosis and future step-level selectors, but they
+can depend on the policy after the first action.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_predetail500_seed4100000 \
+  --episodes 500 \
+  --seed-start 4100000 \
+  --distance-metric reachability \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_predetail500_seed4100000 \
+  --episodes 500 \
+  --seed-start 4100000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --distance-metric reachability \
+  --force
+```
+
+### Result
+
+On this fresh 500-episode window, R3 is again worse than frozen:
+
+| policy | success |
+| --- | ---: |
+| frozen | 0.656 |
+| R3 ungated | 0.618 |
+
+Paired outcome counts:
+
+| paired outcome | episodes |
+| --- | ---: |
+| both success | 210 |
+| both fail | 73 |
+| R3 wins | 99 |
+| R3 regressions | 118 |
+
+Feature separation among the 217 discordant episodes:
+
+| feature | AUC for R3 win | oriented AUC | R3-win mean | regression mean | best in-window gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| initial selected distance | 0.474 | 0.526 | 0.795 | 0.807 | 0.670 |
+| initial raw distance | 0.399 | 0.601 | 1.869 | 2.038 | 0.692 |
+| initial base action L2 | 0.544 | 0.544 | 1.243 | 1.222 | 0.680 |
+| initial env reward | 0.500 | 0.500 | 0.000 | 0.000 | 0.618 |
+| selected distance mean | 0.273 | 0.727 | 0.568 | 0.649 | 0.728 |
+| raw distance mean | 0.479 | 0.521 | 0.730 | 0.773 | 0.670 |
+| base action L2 mean | 0.401 | 0.599 | 0.390 | 0.434 | 0.698 |
+| previous action norm L2 mean | 0.443 | 0.557 | 1.055 | 1.090 | 0.674 |
+| replan rate | 0.500 | 0.500 | 0.100 | 0.100 | 0.618 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_predetail500_seed4100000/eval_500_seed4100000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_predetail500_seed4100000/eval_500_seed4100000.json`
+
+### Interpretation
+
+The clean first-step episode features are weak. Initial raw distance is the
+best of them, but its oriented discordance AUC is only `0.601`, and the
+in-window gate is an optimistic upper bound rather than a validated policy.
+
+The strongest separator is mean selected distance along the R3 trajectory
+(`0.727` oriented AUC, best in-window gate `0.728` success), but this is not a
+clean episode-level deployable signal because it is partly produced by already
+running the tuned policy. It is still useful evidence that R3 harms episodes
+where the learned reachability distance stays high during execution.
+
+Next selector work should therefore use step-level or segment-level gating that
+observes current state/goal distance during rollout, not a one-shot episode
+gate from only initial state features. Scalar residual magnitude alone has
+already saturated; the better selector signal appears to be "current
+reachability-distance trouble" combined with conservative fallback to frozen.

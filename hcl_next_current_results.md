@@ -136,6 +136,32 @@ original hope:
 4. Simple scalar gating can reduce harm, but not enough to establish a robust
    improvement over frozen imitation.
 
+### Initial state features are too weak for a one-shot gate
+
+I added pre-decision eval fields for state/goal distance, base action norm,
+previous action norm, replan rate, and first-step versions of those signals.
+A fresh matched 500-episode diagnostic at `seed_start=4100000` was negative for
+R3:
+
+| policy | success |
+| --- | ---: |
+| frozen | 0.656 |
+| R3 terminal-only 40k bc10 | 0.618 |
+
+Among discordant episodes, the clean initial features only weakly separated
+R3 wins from regressions:
+
+| feature | oriented AUC |
+| --- | ---: |
+| initial raw distance | 0.601 |
+| initial base action L2 | 0.544 |
+| initial selected distance | 0.526 |
+
+The stronger diagnostic was mean selected distance along the R3 trajectory
+(`0.727` oriented AUC), which suggests the next selector should be step-level or
+segment-level and observe current reachability-distance trouble during rollout.
+A one-shot episode gate from initial state alone is probably too weak.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -165,8 +191,10 @@ The next useful directions are:
 
 1. Add a state/goal-aware gate.
    The eval path now records per-episode success, reward, residual magnitude,
-   saturation, and local progress. The missing piece is compact pre-decision
-   state/goal features so a deployable gate can learn when tuned actions help.
+   saturation, local progress, and compact pre-decision state/goal features.
+   Initial episode features are weak, so the next gate should be step-level or
+   segment-level and use current reachability-distance trouble as the fallback
+   signal.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. A better objective should optimize
@@ -199,4 +227,6 @@ Recent useful eval outputs:
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_final1000_seed4000000/eval_1000_seed4000000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_final1000_seed4000000/eval_1000_seed4000000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_gate00121_final1000_seed4000000/eval_1000_seed4000000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_predetail500_seed4100000/eval_500_seed4100000.json
+results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_predetail500_seed4100000/eval_500_seed4100000.json
 ```
