@@ -519,6 +519,16 @@ teacher continuation, but it hurts under the learned high-level goal
 distribution. For this branch, the next useful target is high-level goal
 validity or robustness to learned-goal errors, not another scalar action gate.
 
+I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
+rollouts can record oracle branch goals without changing the deployed policy.
+On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance
+was only a weak separator of tuned wins/regressions (`0.558` oriented AUC). The
+stronger signals were online rollout features: mean current-learned goal
+distance `0.923`, action delta `0.933`, policy saturation `0.885`, and mean
+current-oracle goal distance `0.865`. So the issue is not just off-manifold
+learned goals; useful low-level interventions appear concentrated in difficult
+online regimes.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:

@@ -10278,3 +10278,81 @@ oracle continuation, but it interacts badly with the learned high-level goal
 distribution. The next useful direction is therefore high-level/goal validity
 or oracle-to-learned goal robustness, not further scalar gates around the same
 learned-goal deployment.
+
+## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
+
+I added a default-off closed-loop diagnostic flag:
+
+```text
+--diagnose-oracle-goals
+```
+
+When enabled, `eval-closed-loop-r{1,2,3}` generates privileged teacher branch
+goals in parallel and records learned-vs-oracle goal distances without changing
+the deployed policy if `--goal-source learned` is used. New fields include:
+
+- `predicted_oracle_goal_l2_mean`
+- `episode_predicted_oracle_goal_l2_initial`
+- `episode_predicted_oracle_goal_l2_mean`
+- `episode_current_oracle_goal_l2_initial`
+- `episode_current_oracle_goal_l2_mean`
+
+Smoke check:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 8 \
+  --eval-seed-start 4620000 \
+  --num-envs 8 \
+  --goal-source learned \
+  --oracle-copy-mode state_dict \
+  --diagnose-oracle-goals \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_learned_oraclediag_smoke_8_seed4620000.json
+```
+
+The smoke JSON kept `goal_source=learned`, reported `diagnose_oracle_goals=true`,
+and had oracle-diagnostic arrays with one entry per episode. The state-copy
+error remained `1.19e-07`.
+
+Then I ran the 100-episode learned-goal diagnostic bank on `seed_start=4600000`:
+
+| policy | success | max reward | predicted-oracle goal L2 | current-oracle goal L2 |
+| --- | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.350 | 0.5097 | 27.70 | 29.77 |
+| task-reward debug | 0.300 | 0.4711 | 28.21 | 29.39 |
+
+Paired outcomes: 8 tuned wins, 13 tuned regressions, and 79 ties.
+
+Feature separation over the 21 discordant episodes:
+
+| tuned-branch feature | AUC for tuned win | oriented AUC | direction |
+| --- | ---: | ---: | --- |
+| initial predicted-oracle goal L2 | 0.452 | 0.548 | low = win |
+| mean predicted-oracle goal L2 | 0.442 | 0.558 | low = win |
+| initial current-oracle goal L2 | 0.529 | 0.529 | high = win |
+| mean current-oracle goal L2 | 0.865 | 0.865 | high = win |
+| initial current-learned goal L2 | 0.635 | 0.635 | high = win |
+| mean current-learned goal L2 | 0.923 | 0.923 | high = win |
+| action delta mean | 0.933 | 0.933 | high = win |
+| policy saturation rate | 0.885 | 0.885 | high = win |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_learned_oraclediag_smoke_8_seed4620000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_learned_oraclediag_100_seed4600000.json`
+
+Interpretation:
+
+On this small diagnostic bank, learned-vs-oracle goal distance by itself is not
+a strong separator of tuned wins and regressions. The stronger separators are
+online trajectory features: whether the rollout is in a high-distance/high-action
+delta/high-saturation regime. This means the learned-high failure is not simply
+"predicted goal far from oracle"; it is more specifically that the tuned
+low-level intervention is useful only in some difficult closed-loop regimes.
+The next serious selector/objective should use online closed-loop state, not
+static high-level goal error alone.

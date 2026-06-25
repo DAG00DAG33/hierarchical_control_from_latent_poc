@@ -513,6 +513,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 goal_source=args.goal_source,
                 oracle_copy_mode=args.oracle_copy_mode,
                 action_delta_gate_min=args.action_delta_gate_min,
+                diagnose_oracle_goals=args.diagnose_oracle_goals,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -576,6 +577,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 goal_source=args.goal_source,
                 oracle_copy_mode=args.oracle_copy_mode,
                 action_delta_gate_min=args.action_delta_gate_min,
+                diagnose_oracle_goals=args.diagnose_oracle_goals,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -629,6 +631,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 goal_source=args.goal_source,
                 oracle_copy_mode=args.oracle_copy_mode,
                 action_delta_gate_min=args.action_delta_gate_min,
+                diagnose_oracle_goals=args.diagnose_oracle_goals,
                 output_path=Path(args.output) if args.output else None,
             )
         )
@@ -2215,6 +2218,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--oracle-copy-mode", choices=["replay", "state_dict"], default="replay"
     )
     eval_closed_loop_r1.add_argument("--action-delta-gate-min", type=float)
+    eval_closed_loop_r1.add_argument("--diagnose-oracle-goals", action="store_true")
     eval_closed_loop_r1.add_argument("--output")
     eval_closed_loop_r1.set_defaults(func=rl_rerun_cmd)
     low_flow_base = rl_rerun_sub.add_parser("train-low-flow-base")
@@ -2272,6 +2276,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--oracle-copy-mode", choices=["replay", "state_dict"], default="replay"
     )
     eval_closed_loop_r2.add_argument("--action-delta-gate-min", type=float)
+    eval_closed_loop_r2.add_argument("--diagnose-oracle-goals", action="store_true")
     eval_closed_loop_r2.add_argument("--output")
     eval_closed_loop_r2.set_defaults(func=rl_rerun_cmd)
     train_local_r3 = rl_rerun_sub.add_parser("train-local-r3")
@@ -2321,6 +2326,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--oracle-copy-mode", choices=["replay", "state_dict"], default="replay"
     )
     eval_closed_loop_r3.add_argument("--action-delta-gate-min", type=float)
+    eval_closed_loop_r3.add_argument("--diagnose-oracle-goals", action="store_true")
     eval_closed_loop_r3.add_argument("--output")
     eval_closed_loop_r3.set_defaults(func=rl_rerun_cmd)
     record_rerun_videos = rl_rerun_sub.add_parser("record-videos")

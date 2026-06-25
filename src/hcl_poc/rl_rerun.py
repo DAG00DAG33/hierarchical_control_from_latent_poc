@@ -3473,6 +3473,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
+    diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
     from hcl_poc.incremental import _clone_mani_state_dict
@@ -3492,6 +3493,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         raise ValueError("oracle_copy_mode must be 'replay' or 'state_dict'")
     if action_delta_gate_min is not None and action_delta_gate_min < 0.0:
         raise ValueError("action_delta_gate_min must be non-negative")
+    need_oracle_branch = goal_source == "oracle" or diagnose_oracle_goals
 
     device = default_device()
     rerun_config = _rerun_base_config(config)
@@ -3534,7 +3536,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     agent.load_state_dict(checkpoint["agent"])
     agent.eval()
     dino = _phase4_dino_from_config(config, device)
-    teacher = load_ppo_agent(_rl_paths(config).best, device) if goal_source == "oracle" else None
+    teacher = load_ppo_agent(_rl_paths(config).best, device) if need_oracle_branch else None
     alpha = float(recipe.get("alpha", 0.0))
     residual_condition_mode = str(recipe.get("residual_condition_mode", "full"))
     if residual_condition_mode not in {"full", "goal_delta"}:
@@ -3570,11 +3572,16 @@ def evaluate_rl_rerun_closed_loop_r1(
         episode_action_delta_gate_rate: list[float] = []
         episode_goal_l2_initial: list[float] = []
         episode_goal_l2_mean: list[float] = []
+        episode_predicted_oracle_goal_l2_initial: list[float] = []
+        episode_predicted_oracle_goal_l2_mean: list[float] = []
+        episode_current_oracle_goal_l2_initial: list[float] = []
+        episode_current_oracle_goal_l2_mean: list[float] = []
         episode_high_level_decisions: list[float] = []
         recovered: list[float] = []
         recovery_times: list[int] = []
         replay_errors: list[float] = []
         branch_goal_distances: list[float] = []
+        predicted_oracle_goal_distances: list[float] = []
         branch_latencies: list[float] = []
         saturated_actions = 0
         active_actions = 0
@@ -3608,7 +3615,7 @@ def evaluate_rl_rerun_closed_loop_r1(
                     num_envs=batch_envs,
                     reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
                 )
-                if goal_source == "oracle"
+                if need_oracle_branch
                 else None
             )
             action_low = torch.as_tensor(
@@ -3653,6 +3660,14 @@ def evaluate_rl_rerun_closed_loop_r1(
             current_goal_l2_initial = np.full(batch_envs, np.nan, dtype=np.float32)
             current_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_count = np.zeros(batch_envs, dtype=np.float32)
+            current_predicted_oracle_goal_l2_initial = np.full(
+                batch_envs, np.nan, dtype=np.float32
+            )
+            current_predicted_oracle_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_predicted_oracle_goal_l2_count = np.zeros(batch_envs, dtype=np.float32)
+            current_oracle_goal_l2_initial = np.full(batch_envs, np.nan, dtype=np.float32)
+            current_oracle_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_oracle_goal_l2_count = np.zeros(batch_envs, dtype=np.float32)
             current_high_decisions = np.zeros(batch_envs, dtype=np.float32)
             policy_action_history: list[np.ndarray] = []
             previous_executed = np.zeros((batch_envs, 3), dtype=np.float32)
@@ -3731,18 +3746,44 @@ def evaluate_rl_rerun_closed_loop_r1(
                                 int(config.get("dino.batch_size", 64)),
                             )
                             oracle_goal = _encode_rerun_frames(frozen, branch_frames, device)
-                            held_goal[replan] = oracle_goal[replan]
                             current_goal_for_distance = _encode_rerun_frames(
                                 frozen,
                                 frames,
                                 device,
                             )
-                            branch_goal_distances.extend(
-                                np.linalg.norm(
-                                    current_goal_for_distance[replan] - oracle_goal[replan],
-                                    axis=-1,
-                                ).tolist()
+                            current_oracle_l2 = np.linalg.norm(
+                                current_goal_for_distance[replan] - oracle_goal[replan],
+                                axis=-1,
+                            ).astype(np.float32)
+                            predicted_oracle_l2 = np.linalg.norm(
+                                predicted_goal[replan] - oracle_goal[replan],
+                                axis=-1,
+                            ).astype(np.float32)
+                            branch_goal_distances.extend(current_oracle_l2.tolist())
+                            predicted_oracle_goal_distances.extend(
+                                predicted_oracle_l2.tolist()
                             )
+                            branch_indices = np.flatnonzero(replan)
+                            current_oracle_goal_l2_sum[branch_indices] += current_oracle_l2
+                            current_oracle_goal_l2_count[branch_indices] += 1.0
+                            missing_oracle_initial = np.isnan(
+                                current_oracle_goal_l2_initial[branch_indices]
+                            )
+                            current_oracle_goal_l2_initial[
+                                branch_indices[missing_oracle_initial]
+                            ] = current_oracle_l2[missing_oracle_initial]
+                            current_predicted_oracle_goal_l2_sum[
+                                branch_indices
+                            ] += predicted_oracle_l2
+                            current_predicted_oracle_goal_l2_count[branch_indices] += 1.0
+                            missing_predicted_oracle_initial = np.isnan(
+                                current_predicted_oracle_goal_l2_initial[branch_indices]
+                            )
+                            current_predicted_oracle_goal_l2_initial[
+                                branch_indices[missing_predicted_oracle_initial]
+                            ] = predicted_oracle_l2[missing_predicted_oracle_initial]
+                            if goal_source == "oracle":
+                                held_goal[replan] = oracle_goal[replan]
                             branch_latencies.append(
                                 branch_timer.elapsed() / int(np.sum(replan))
                             )
@@ -3968,6 +4009,10 @@ def evaluate_rl_rerun_closed_loop_r1(
             max_rewards.extend(batch_max.astype(float).tolist())
             action_denominator = np.maximum(current_action_count, 1.0)
             goal_denominator = np.maximum(current_goal_l2_count, 1.0)
+            predicted_oracle_denominator = np.maximum(
+                current_predicted_oracle_goal_l2_count, 1.0
+            )
+            oracle_goal_denominator = np.maximum(current_oracle_goal_l2_count, 1.0)
             episode_action_delta_l2_mean.extend(
                 (current_action_delta_sum / action_denominator).astype(float).tolist()
             )
@@ -3989,6 +4034,22 @@ def evaluate_rl_rerun_closed_loop_r1(
             )
             episode_goal_l2_mean.extend(
                 (current_goal_l2_sum / goal_denominator).astype(float).tolist()
+            )
+            episode_predicted_oracle_goal_l2_initial.extend(
+                current_predicted_oracle_goal_l2_initial.astype(float).tolist()
+            )
+            episode_predicted_oracle_goal_l2_mean.extend(
+                (current_predicted_oracle_goal_l2_sum / predicted_oracle_denominator)
+                .astype(float)
+                .tolist()
+            )
+            episode_current_oracle_goal_l2_initial.extend(
+                current_oracle_goal_l2_initial.astype(float).tolist()
+            )
+            episode_current_oracle_goal_l2_mean.extend(
+                (current_oracle_goal_l2_sum / oracle_goal_denominator)
+                .astype(float)
+                .tolist()
             )
             episode_high_level_decisions.extend(
                 current_high_decisions.astype(float).tolist()
@@ -4019,9 +4080,19 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_action_delta_gate_rate": episode_action_delta_gate_rate,
             "episode_goal_l2_initial": episode_goal_l2_initial,
             "episode_goal_l2_mean": episode_goal_l2_mean,
+            "episode_predicted_oracle_goal_l2_initial": (
+                episode_predicted_oracle_goal_l2_initial
+            ),
+            "episode_predicted_oracle_goal_l2_mean": (
+                episode_predicted_oracle_goal_l2_mean
+            ),
+            "episode_current_oracle_goal_l2_initial": (
+                episode_current_oracle_goal_l2_initial
+            ),
+            "episode_current_oracle_goal_l2_mean": episode_current_oracle_goal_l2_mean,
             "episode_high_level_decisions": episode_high_level_decisions,
         }
-        if goal_source == "oracle":
+        if need_oracle_branch:
             result.update(
                 {
                     "replay_current_state_error_mean": (
@@ -4033,6 +4104,11 @@ def evaluate_rl_rerun_closed_loop_r1(
                     "branch_goal_l2_mean": (
                         float(np.mean(branch_goal_distances))
                         if branch_goal_distances
+                        else None
+                    ),
+                    "predicted_oracle_goal_l2_mean": (
+                        float(np.mean(predicted_oracle_goal_distances))
+                        if predicted_oracle_goal_distances
                         else None
                     ),
                     "branch_generation_latency_per_replan_s": (
@@ -4068,6 +4144,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         "goal_source": goal_source,
         "oracle_copy_mode": oracle_copy_mode if goal_source == "oracle" else None,
         "action_delta_gate_min": action_delta_gate_min,
+        "diagnose_oracle_goals": diagnose_oracle_goals,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
         "base_policy": base_policy,
@@ -4112,6 +4189,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
+    diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -4126,6 +4204,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         goal_source=goal_source,
         oracle_copy_mode=oracle_copy_mode,
         action_delta_gate_min=action_delta_gate_min,
+        diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )
 
@@ -4143,6 +4222,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     goal_source: str = "learned",
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
+    diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_closed_loop_r1(
@@ -4157,6 +4237,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         goal_source=goal_source,
         oracle_copy_mode=oracle_copy_mode,
         action_delta_gate_min=action_delta_gate_min,
+        diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )
 
