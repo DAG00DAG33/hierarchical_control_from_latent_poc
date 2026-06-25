@@ -462,6 +462,20 @@ The tuned checkpoint loses `-0.040` success and about `-0.030` reward despite
 the weakly positive local diagnostics. Treat cached-paired local R3 as
 diagnostically useful infrastructure, not as a candidate deployment policy.
 
+I also added a default-off task-reward debug knob to `rl-rerun train-local-r3`
+and ran a one-update dense-task-reward upper-bound check. It showed the same
+pattern:
+
+| policy | local success-once | closed-loop success | closed-loop max reward |
+| --- | ---: | ---: | ---: |
+| frozen n500 | 0.2456 | 0.334 | 0.5061 |
+| task-reward debug 1 update | 0.2493 | 0.306 | 0.4867 |
+
+So even using the environment reward directly as a diagnostic did not make the
+current local R3 update transfer. The problem is not only raw latent distance;
+the current one-segment local update/selection loop is not deployment-aligned
+enough.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -511,9 +525,10 @@ The next useful directions are:
    action changes. A broader reset-bank validation changed the sign of the local
    mean effect but kept it near zero; task-reward diagnostics are also only
    weakly positive and the best local candidate failed a 500-episode closed-loop
-   transfer check. The next objective check should change the target regime,
-   not simply scale the same formulation: move toward a stronger task-aligned
-   signal than local reachability-distance improvement alone.
+   transfer check. A direct task-reward debug upper bound also failed transfer.
+   The next objective check should change the target regime, not simply scale
+   the same formulation: move toward a stronger deployment-aligned signal than
+   one-segment local reachability or local task reward alone.
    The privileged direct hard-start check shows that large selected-local gains
    can still hurt closed-loop deployment, so checkpoint selection needs
    deployment evidence or a better local-to-task proxy.

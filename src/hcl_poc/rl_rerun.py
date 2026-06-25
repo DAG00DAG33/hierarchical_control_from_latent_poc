@@ -2540,6 +2540,7 @@ def train_rl_rerun_local_r3(
     bc_weight: float = 1.0,
     terminal_weight: float = 1.0,
     dense_progress_weight: float = 1.0,
+    task_reward_weight: float = 0.0,
     reward_mode: str = "progress",
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
@@ -2567,6 +2568,8 @@ def train_rl_rerun_local_r3(
         raise ValueError("goal_sensitivity_margin must be positive")
     if dense_progress_weight < 0.0:
         raise ValueError("dense_progress_weight must be non-negative")
+    if task_reward_weight < 0.0:
+        raise ValueError("task_reward_weight must be non-negative")
     if reward_mode not in {"progress", "paired"}:
         raise ValueError("reward_mode must be one of {'progress', 'paired'}")
 
@@ -2687,12 +2690,17 @@ def train_rl_rerun_local_r3(
             )
         ),
         "disallowed_training_signals": [
-            "mani_skill_reward",
             "task_success",
             "object_pose",
             "task_progress",
         ],
     }
+    if task_reward_weight > 0.0:
+        recipe["task_reward_weight"] = task_reward_weight
+        recipe["reward"] = f"{recipe['reward']}_plus_mani_skill_dense_reward"
+        recipe["debug_training_signals"] = ["mani_skill_reward"]
+    else:
+        recipe["disallowed_training_signals"].insert(0, "mani_skill_reward")
     if goal_sensitivity_weight > 0:
         recipe["goal_sensitivity_weight"] = goal_sensitivity_weight
         recipe["goal_sensitivity_margin"] = goal_sensitivity_margin
@@ -2828,12 +2836,15 @@ def train_rl_rerun_local_r3(
     @torch.inference_mode()
     def local_step_env(action: torch.Tensor, previous_distance: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         nonlocal current_obs, current_frames, current_z, previous_action, local_step
-        next_obs, _env_reward, _terminated, _truncated, info = env.step(action)
+        next_obs, env_reward, _terminated, _truncated, info = env.step(action)
         next_frames = _phase4_frame_inputs(next_obs, dino, int(config.get("dino.batch_size", 64)))
         next_z = _encode_rerun_frames(frozen, next_frames, device)
         next_distance = np.mean(np.square(next_z - goal_z), axis=-1).astype(np.float32)
         segment_end = local_step == horizon - 1
+        env_reward_np = _to_numpy(env_reward).reshape(-1).astype(np.float32)
         reward = dense_progress_weight * (previous_distance - next_distance)
+        if task_reward_weight > 0.0:
+            reward += task_reward_weight * env_reward_np
         if segment_end:
             if reward_mode == "paired":
                 reward += terminal_weight * (base_terminal_distance - next_distance)
@@ -2854,6 +2865,7 @@ def train_rl_rerun_local_r3(
             "success": _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_)))
             .reshape(-1)
             .astype(np.bool_),
+            "env_reward": env_reward_np,
         }
         if segment_end:
             reset_local_episode()
@@ -2881,6 +2893,7 @@ def train_rl_rerun_local_r3(
                 paired_improvements: list[float] = []
                 action_delta_values: list[float] = []
                 reward_values: list[float] = []
+                env_reward_values: list[float] = []
                 saturation_count = 0
                 success_count = 0
                 agent.eval()
@@ -2900,6 +2913,7 @@ def train_rl_rerun_local_r3(
                     next_done = torch.from_numpy(done.astype(np.float32)).to(device)
                     distance_values.extend(distance.tolist())
                     reward_values.extend(reward.tolist())
+                    env_reward_values.extend(metrics["env_reward"].tolist())
                     action_delta_values.extend(
                         torch.linalg.vector_norm(action - base_action, dim=-1).cpu().tolist()
                     )
@@ -3050,6 +3064,7 @@ def train_rl_rerun_local_r3(
                     "global_step": int(global_step),
                     "mean_return": float(torch.mean(returns).detach().cpu()),
                     "mean_reward": float(np.mean(reward_values)),
+                    "mean_env_reward": float(np.mean(env_reward_values)),
                     "mean_distance": float(np.mean(distance_values)),
                     "mean_terminal_distance": float(np.mean(terminal_distances))
                     if terminal_distances

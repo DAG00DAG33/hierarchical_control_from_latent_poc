@@ -10000,3 +10000,77 @@ reachability or local task-reward proxies being insufficient for reliable
 checkpoint promotion. Do not continue with small cached-paired local-R3 sweeps
 unless the objective changes enough to create a much larger local effect and is
 validated directly in closed loop.
+
+## 2026-06-25 - Task-reward upper-bound debug for local R3
+
+I added a default-off `--task-reward-weight` knob to `rl-rerun train-local-r3`
+as an explicitly marked debug upper bound. It records
+`debug_training_signals=["mani_skill_reward"]` when enabled and leaves the
+existing reachability/paired recipes unchanged by default.
+
+One-update debug run:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name task_reward_debug_n4096_1update_bc1_lr1e5_logstd5 \
+  --steps 40960 \
+  --bc-weight 1 \
+  --terminal-weight 0 \
+  --dense-progress-weight 0 \
+  --task-reward-weight 1 \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --force
+```
+
+Training update summary:
+
+| global step | mean PPO reward | mean env reward | local terminal distance | task success diag | action delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 40960 | 0.4573 | 0.4573 | 0.6022 | 0.2131 | 0.0108 |
+
+Broad held-out local validation on the same 8-timestep manifest:
+
+| policy | final distance | final env reward | max env reward | mean env reward | success-once | action delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.7092 | 0.3979 | 0.4649 | 0.3855 | 0.2456 | - |
+| task-reward debug 1 update | 0.7085 | 0.4004 | 0.4673 | 0.3870 | 0.2493 | 0.0005 |
+
+Closed-loop transfer on the same 500-episode learned-goal window as the
+lower-noise cached-paired check:
+
+| policy | success | final reward | max reward | action saturation | residual/action delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 0.334 | 0.4776 | 0.5061 | 0.0462 | - |
+| task-reward debug 1 update | 0.306 | 0.4601 | 0.4867 | 0.0468 | 0.0005 |
+
+Deltas vs frozen:
+
+| metric | delta |
+| --- | ---: |
+| success | -0.028 |
+| final reward | -0.0176 |
+| max reward | -0.0194 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/eval_local_n512_val_b1_manifest_e8_taskdiag.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_500_seed4600000.json`
+
+Interpretation:
+
+Even direct dense task reward, used only as a diagnostic upper bound, produced
+the same pattern: weakly positive broad-local metrics and negative closed-loop
+transfer. This suggests the current one-segment local R3 update is not merely
+limited by the reachability metric. The update is too small/misaligned at the
+closed-loop decision distribution, so further local objective sweeps should be
+deprioritized in favor of a structurally different training target, stronger
+deployment-aligned selection, or a representation/objective that produces much
+larger closed-loop-consistent action changes.

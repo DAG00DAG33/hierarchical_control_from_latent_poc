@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 from rich.console import Console
 
-from hcl_poc.config import load_config
+from hcl_poc.config import Config, load_config
 from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps, record_videos
 from hcl_poc.goal_diagnostics import learned_interface_goal_diagnostics
@@ -589,6 +589,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 bc_weight=args.bc_weight,
                 terminal_weight=args.terminal_weight,
                 dense_progress_weight=args.dense_progress_weight,
+                task_reward_weight=args.task_reward_weight,
                 reward_mode=args.reward_mode,
                 learning_rate=args.learning_rate,
                 num_minibatches=args.num_minibatches,
@@ -2277,6 +2278,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r3.add_argument("--bc-weight", type=float, default=1.0)
     train_local_r3.add_argument("--terminal-weight", type=float, default=1.0)
     train_local_r3.add_argument("--dense-progress-weight", type=float, default=1.0)
+    train_local_r3.add_argument("--task-reward-weight", type=float, default=0.0)
     train_local_r3.add_argument(
         "--reward-mode",
         choices=["progress", "paired"],
