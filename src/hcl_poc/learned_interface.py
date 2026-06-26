@@ -2210,6 +2210,23 @@ def train_learned_interface_hierarchy(
     )
     if low_frame_dropout_keep_tail_dim < 0:
         raise ValueError("low_frame_dropout_keep_tail_dim must be non-negative")
+    low_frame_dropout_aux_prob = float(
+        spec.get("low_frame_dropout_aux_prob", 0.0)
+    )
+    if low_frame_dropout_aux_prob < 0.0 or low_frame_dropout_aux_prob > 1.0:
+        raise ValueError("low_frame_dropout_aux_prob must be in [0, 1]")
+    low_frame_dropout_aux_keep_tail_dim = int(
+        spec.get("low_frame_dropout_aux_keep_tail_dim", 0)
+    )
+    if low_frame_dropout_aux_keep_tail_dim < 0:
+        raise ValueError(
+            "low_frame_dropout_aux_keep_tail_dim must be non-negative"
+        )
+    low_frame_dropout_aux_weight = float(
+        spec.get("low_frame_dropout_aux_weight", 0.0)
+    )
+    if low_frame_dropout_aux_weight < 0.0:
+        raise ValueError("low_frame_dropout_aux_weight must be non-negative")
     low_model = _GoalConditionedLowPolicy(
         frame_dim,
         goal_dim,
@@ -2227,6 +2244,29 @@ def train_learned_interface_hierarchy(
     if goal_sensitivity_margin < 0.0:
         raise ValueError("goal_sensitivity_margin must be non-negative")
     goal_slice = _low_goal_feature_slice(frame_dim, goal_dim, conditioning)
+
+    def frame_dropout_aux_input(x: torch.Tensor) -> torch.Tensor:
+        if low_frame_dropout_aux_prob <= 0.0:
+            return x
+        if low_frame_dropout_aux_keep_tail_dim >= frame_dim:
+            raise ValueError(
+                "low_frame_dropout_aux_keep_tail_dim must be smaller than frame_dim"
+            )
+        dropped = x.clone()
+        mask = (
+            torch.rand(len(dropped), device=dropped.device)
+            < low_frame_dropout_aux_prob
+        )
+        if bool(mask.any()):
+            if low_frame_dropout_aux_keep_tail_dim == 0:
+                dropped[mask, :frame_dim] = 0.0
+            else:
+                dropped[
+                    mask,
+                    : frame_dim - low_frame_dropout_aux_keep_tail_dim,
+                ] = 0.0
+        return dropped
+
     high_optimizer = (
         None
         if reused_high_level
@@ -2251,6 +2291,7 @@ def train_learned_interface_hierarchy(
         high_sum = 0.0
         low_sum = 0.0
         sensitivity_sum = 0.0
+        frame_dropout_aux_sum = 0.0
         for (high_x, high_y), (low_x, low_y) in zip(
             high_loader, low_loader, strict=True
         ):
@@ -2268,7 +2309,19 @@ def train_learned_interface_hierarchy(
             low_prediction = low_model(low_x)
             low_bc_loss = torch.mean((low_prediction - low_y) ** 2)
             sensitivity_loss = low_bc_loss.new_tensor(0.0)
+            frame_dropout_aux_loss = low_bc_loss.new_tensor(0.0)
             low_loss = low_bc_loss
+            if (
+                low_frame_dropout_aux_weight > 0.0
+                and low_frame_dropout_aux_prob > 0.0
+            ):
+                aux_x = frame_dropout_aux_input(low_x)
+                frame_dropout_aux_loss = torch.mean(
+                    (low_model(aux_x) - low_y) ** 2
+                )
+                low_loss = low_loss + (
+                    low_frame_dropout_aux_weight * frame_dropout_aux_loss
+                )
             if goal_sensitivity_weight > 0.0 and len(low_x) > 1:
                 shuffled_x = low_x.clone()
                 order = torch.randperm(len(shuffled_x), device=shuffled_x.device)
@@ -2287,6 +2340,7 @@ def train_learned_interface_hierarchy(
             low_optimizer.step()
             low_sum += float(low_bc_loss.detach().cpu())
             sensitivity_sum += float(sensitivity_loss.detach().cpu())
+            frame_dropout_aux_sum += float(frame_dropout_aux_loss.detach().cpu())
         high_model.eval()
         low_model.eval()
         metrics = _hierarchy_validation_metrics(
@@ -2307,6 +2361,8 @@ def train_learned_interface_hierarchy(
                 "high_train_mse": high_sum / batches_per_epoch,
                 "low_train_mse": low_sum / batches_per_epoch,
                 "low_goal_sensitivity_loss": sensitivity_sum / batches_per_epoch,
+                "low_frame_dropout_aux_loss": frame_dropout_aux_sum
+                / batches_per_epoch,
                 **metrics,
             }
         )
@@ -2333,6 +2389,9 @@ def train_learned_interface_hierarchy(
         "goal_residual_scale": goal_residual_scale,
         "low_frame_dropout_prob": low_frame_dropout_prob,
         "low_frame_dropout_keep_tail_dim": low_frame_dropout_keep_tail_dim,
+        "low_frame_dropout_aux_prob": low_frame_dropout_aux_prob,
+        "low_frame_dropout_aux_keep_tail_dim": low_frame_dropout_aux_keep_tail_dim,
+        "low_frame_dropout_aux_weight": low_frame_dropout_aux_weight,
         "goal_sensitivity_weight": goal_sensitivity_weight,
         "goal_sensitivity_margin": goal_sensitivity_margin,
         "high_model": best_state["high_model"],

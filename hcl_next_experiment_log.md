@@ -15911,3 +15911,130 @@ requirement: learned-goal deployment remains far below baseline effect32 FiLM
 generic dropout is not enough. The next attempt should use counterfactual
 same-state goals or closed-loop/intervention data so the policy learns a useful
 goal-conditioned correction rather than a weaker imitation policy.
+
+## 2026-06-26 - Effect32 FiLM auxiliary scene-dropout check
+
+### Hypothesis
+
+The primary scene-dropout objective weakened deployment because the low policy
+was trained on corrupted inputs as its main BC distribution. A cleaner
+preservation test is to keep normal clean-input BC as the primary loss and add
+scene-dropout BC only as an auxiliary loss. This should preserve effect32-style
+imitation quality better while still discouraging the observation shortcut.
+
+### Code Change
+
+Added an opt-in low-frame-dropout auxiliary loss:
+
+```text
+low_frame_dropout_aux_prob
+low_frame_dropout_aux_keep_tail_dim
+low_frame_dropout_aux_weight
+```
+
+For each low-level batch, the training loop always optimizes clean BC. If the
+auxiliary weight is positive, it also masks a copy of the frame block with the
+configured probability and adds weighted BC on that masked copy.
+
+Candidate:
+
+```yaml
+effect32_film_scene_drop_aux05:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  low_frame_dropout_aux_prob: 0.25
+  low_frame_dropout_aux_keep_tail_dim: 21
+  low_frame_dropout_aux_weight: 0.5
+  policy_epochs: 40
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_scene_drop_aux05 \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_scene_drop_aux05 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_scene_drop_aux05/diagnostics.json \
+  --force
+
+for source in learned oracle; do
+  TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+    --config configs/pusht_incremental.yaml \
+    --candidate effect32_film_scene_drop_aux05 \
+    --goal-source "${source}" \
+    --episodes 200 \
+    --eval-seed-start 3500000 \
+    --force
+done
+```
+
+### Results
+
+Training validation:
+
+| metric | value |
+| --- | ---: |
+| best epoch | 40 |
+| auxiliary dropout prob | 0.25 |
+| auxiliary keep tail dim | 21 |
+| auxiliary loss weight | 0.5 |
+| oracle action MAE | 0.0410 |
+| predicted action MAE | 0.0415 |
+| prediction-induced action L2 | 0.0143 |
+
+Goal-use/deployment:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.0622 | 0.0368 | 0.645 | 0.645 |
+| effect32_film_scene_drop25 | 0.1141 | 0.0616 | 0.510 | 0.560 |
+| effect32_film_scene_drop_aux05 | 0.0864 | 0.0481 | 0.500 | 0.570 |
+
+After adding this candidate, the aggregate gate report is:
+
+```text
+total: 34
+offline_goal_use_pass: 5
+reject_low_goal_use: 29
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_scene_drop_aux05/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_scene_drop_aux05/seed0/hierarchy_metrics.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_scene_drop_aux05/diagnostics.json`
+- `results/incremental/learned_interface/effect32_film_scene_drop_aux05/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_scene_drop_aux05/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py
+```
+
+### Interpretation
+
+The auxiliary version preserves validation MAE better than primary scene
+dropout, but it does not solve the deployment tradeoff. Goal-shuffle action L2
+rises only to `0.0864`, below the strict `0.1` gate, and learned-goal success is
+still only `0.500`. The result narrows the conclusion: the shortcut cannot be
+fixed by generic masked reconstruction-style auxiliary BC. The missing signal is
+not just "act well when observation is partially hidden"; it must teach which
+goal-conditioned correction improves the closed-loop outcome from the same
+state.

@@ -233,7 +233,7 @@ offline_goal_use_pass if goal_shuffle_action_change_l2 >= 0.1
 or max_goal_sensitivity_l2 >= 0.1
 ```
 
-On the current archive plus the new dropout checks, five of thirty-three
+On the current archive plus the new dropout checks, five of thirty-four
 diagnostics pass:
 
 | status | candidates |
@@ -304,12 +304,15 @@ both still damage deployment:
 | effect32_film | 0.0622 | 0.0368 | 0.645 | 0.645 |
 | effect32_film_frame_drop25 | 0.1121 | 0.0615 | 0.490 | 0.465 |
 | effect32_film_scene_drop25 | 0.1141 | 0.0616 | 0.510 | 0.560 |
+| effect32_film_scene_drop_aux05 | 0.0864 | 0.0481 | 0.500 | 0.570 |
 
 The result is useful diagnostically: goal ignoring is partly an observation
 shortcut problem. Keeping proprio improves the result slightly over full-frame
 dropout, but the dropout family repeats the same bad tradeoff as the
 goal-sensitivity margin loss: it passes the offline gate by weakening the
-learned-goal imitation policy.
+learned-goal imitation policy. Making scene dropout auxiliary to clean BC
+preserves validation MAE better but does not pass the gate and still regresses
+closed-loop learned-goal success.
 
 I then added a direct low-level goal-sensitivity regularizer as an opt-in
 learned-interface policy loss and trained `effect32_film_gsens`, which reuses
