@@ -596,6 +596,19 @@ the current result already supports the conservative conclusion. Use
 `highact_strong` for serial/RL work; keep `actiononly` as a vectorized
 learned-interface lead until the evaluator protocol difference is resolved.
 
+I later completed the second 500-episode single-env window at
+`seed_start=3600000`. The result is effectively tied on that window and the
+two-window single-env aggregate still slightly favors `highact_strong`:
+
+| candidate | seed 3500000 success | seed 3600000 success | aggregate success | aggregate final reward | aggregate max reward |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| highact_strong | 0.690 | 0.690 | 0.690 | 0.7729 | 0.7787 |
+| actiononly | 0.684 | 0.690 | 0.687 | 0.7709 | 0.7782 |
+
+So the action-only candidate remains a default-vectorized evaluator lead, not a
+single-env promotion candidate. The conservative serial/RL base remains
+`highact_strong`.
+
 I also audited the existing 100-episode `eval_num_envs=1` learned-interface JSONs
 against the matching `low-level-rl eval-serial` JSONs episode by episode. The
 single-env trajectories agree exactly on success and max reward for both

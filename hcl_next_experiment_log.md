@@ -18743,3 +18743,66 @@ labels flip depending on candidate and env count, and max-reward mean absolute
 differences are large. Promotion comparisons must pin the evaluator protocol;
 for serial/local-RL work, use the single-env/serial-compatible protocol rather
 than the default vectorized learned-interface evaluator.
+
+## 2026-06-26 - Second-window 500-episode single-env base validation
+
+### Hypothesis
+
+The first 500-episode single-env validation favored `highact_strong` over
+`actiononly`, but only by a small margin. A matched second 500-episode
+single-env window at `seed_start=3600000` should determine whether action-only
+recovers under the serial-compatible protocol.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3600000 \
+  --eval-num-envs 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3600000 \
+  --eval-num-envs 1 \
+  --force
+```
+
+### Results
+
+Matched 500-episode single-env windows:
+
+| candidate | seed start | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| highact_strong | 3500000 | 0.690 | 0.7720 | 0.7784 | 0.0877 |
+| highact_strong | 3600000 | 0.690 | 0.7738 | 0.7790 | 0.0866 |
+| actiononly | 3500000 | 0.684 | 0.7684 | 0.7755 | 0.0846 |
+| actiononly | 3600000 | 0.690 | 0.7734 | 0.7810 | 0.0877 |
+
+Two-window aggregate:
+
+| candidate | episodes | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| highact_strong | 1000 | 0.690 | 0.7729 | 0.7787 | 0.0872 |
+| actiononly | 1000 | 0.687 | 0.7709 | 0.7782 | 0.0861 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_500_seed3600000_envs1.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_500_seed3600000_envs1.json`
+
+### Interpretation
+
+The second single-env window is essentially tied, and the two-window
+single-env aggregate still slightly favors `highact_strong` on success, final
+reward, and max reward. This confirms that `actiononly` is not a
+serial-compatible replacement for `highact_strong` despite its default
+vectorized learned-interface lead. Keep `highact_strong` as the conservative
+base for serial/local-RL work.
