@@ -246,18 +246,20 @@ pass the gate but were weaker deployment bases in prior checks. The next
 candidate worth serious PPO needs both: pass this gate and preserve closed-loop
 imitation quality.
 
-Existing closed-loop checks confirm that neither current gate-passing candidate
-meets the second requirement:
+Fixed-seed 500-episode learned-interface evals confirm that neither current
+gate-passing candidate meets the second requirement:
 
-| candidate | offline gate | base learned success | base oracle success | R3-window frozen success | R3 tuned success |
+| candidate | offline gate | learned success | oracle success | shuffled success | learned final reward |
 | --- | --- | ---: | ---: | ---: | ---: |
-| effect32_film | reject low goal-use | 0.645 | 0.645 | 0.634 | 0.684 |
-| ae256_film | pass | 0.550 | 0.670 | 0.596 | 0.586 |
-| vae512_b1e6_film | pass | 0.425 | 0.535 | 0.418 | 0.478 |
+| effect32_film | reject low goal-use | 0.650 | 0.694 | 0.312 | 0.741 |
+| ae256_film | pass | 0.544 | 0.642 | 0.034 | 0.657 |
+| vae512_b1e6_film | pass | 0.438 | 0.532 | 0.018 | 0.580 |
 
-The promising region is therefore not occupied by any current candidate. We need
-a representation/architecture that keeps the AE/VAE-style goal sensitivity while
-preserving effect32-level closed-loop imitation quality.
+AE/VAE FiLM collapse much more under shuffled goals, so they are genuinely more
+goal-dependent than effect32. They still underperform effect32 on learned-goal
+deployment. The promising region is therefore not occupied by any current
+candidate. We need a representation/architecture that keeps the AE/VAE-style
+goal sensitivity while preserving effect32-level closed-loop imitation quality.
 
 I then added a direct low-level goal-sensitivity regularizer as an opt-in
 learned-interface policy loss and trained `effect32_film_gsens`, which reuses

@@ -15427,3 +15427,80 @@ closed-loop gains: the policy still mostly acts from current observation and
 previous action, not from the future goal. The next productive branch should
 return to representation/architecture or closed-loop intervention training,
 not more one-segment scalar reward tuning on this goal-insensitive low level.
+
+## 2026-06-26 - Fixed-seed 500-episode learned-interface base check
+
+### Hypothesis
+
+The offline goal-use gate currently promotes `ae256_film` and
+`vae512_b1e6_film`, but earlier learned-interface deployment checks were
+smaller than the recent 500-episode R3 windows. If one of these is a serious RL
+base, it should preserve effect32-level learned-goal closed-loop success on the
+same `seed_start=3500000` window.
+
+### Commands
+
+```bash
+for candidate in ae256_film vae512_b1e6_film; do
+  for source in learned oracle shuffled; do
+    TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+      --config configs/pusht_incremental.yaml \
+      --candidate "${candidate}" \
+      --goal-source "${source}" \
+      --episodes 500 \
+      --eval-seed-start 3500000 \
+      --force
+  done
+done
+
+for source in learned oracle shuffled; do
+  TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+    --config configs/pusht_incremental.yaml \
+    --candidate effect32_film \
+    --goal-source "${source}" \
+    --episodes 500 \
+    --eval-seed-start 3500000 \
+    --force
+done
+```
+
+### Results
+
+| candidate | goal source | success | final reward | max reward | high decisions | teacher MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | learned | 0.650 | 0.741 | 0.748 | 6.874 | 0.0996 |
+| effect32_film | oracle | 0.694 | 0.777 | 0.782 | 6.660 | 0.0824 |
+| effect32_film | shuffled | 0.312 | 0.443 | 0.476 | 8.598 | 0.2038 |
+| ae256_film | learned | 0.544 | 0.657 | 0.671 | 7.296 | 0.1184 |
+| ae256_film | oracle | 0.642 | 0.742 | 0.749 | 7.024 | 0.0751 |
+| ae256_film | shuffled | 0.034 | 0.174 | 0.232 | 9.852 | 0.2802 |
+| vae512_b1e6_film | learned | 0.438 | 0.580 | 0.595 | 7.948 | 0.1167 |
+| vae512_b1e6_film | oracle | 0.532 | 0.662 | 0.671 | 7.542 | 0.0812 |
+| vae512_b1e6_film | shuffled | 0.018 | 0.159 | 0.214 | 9.912 | 0.2867 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film/seed0/learned_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film/seed0/oracle_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film/seed0/shuffled_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/ae256_film/seed0/learned_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/ae256_film/seed0/oracle_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/ae256_film/seed0/shuffled_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/vae512_b1e6_film/seed0/learned_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/vae512_b1e6_film/seed0/oracle_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/vae512_b1e6_film/seed0/shuffled_hierarchy_eval_500_seed3500000.json`
+
+### Interpretation
+
+The strict offline goal-use gate identifies real goal dependence: AE/VAE FiLM
+collapse almost completely under shuffled goals, while effect32 still gets
+`0.312` shuffled success. However, that stronger dependence does not produce a
+better learned-goal hierarchy. `effect32_film` remains the best base on this
+fixed 500-episode window (`0.650` learned success), ahead of `ae256_film`
+(`0.544`) and `vae512_b1e6_film` (`0.438`).
+
+This reinforces the current selection rule: goal-use diagnostics are useful as
+a rejection gate, but promotion requires closed-loop learned-goal deployment
+quality. No archived candidate currently combines AE/VAE-style goal dependence
+with effect32-level imitation quality, so the next representation branch should
+explicitly optimize for both rather than selecting on goal sensitivity alone.
