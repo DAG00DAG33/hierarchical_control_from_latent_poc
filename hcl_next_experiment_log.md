@@ -15676,3 +15676,118 @@ damaged deployment, and the AE/VAE FiLM policies, which use the goal but remain
 weaker learned-goal bases than effect32. The next useful representation work
 needs to train for both properties explicitly; there is not an existing
 checkpoint to promote.
+
+## 2026-06-26 - Effect32 FiLM low-frame-dropout check
+
+### Hypothesis
+
+The low-level policy may ignore goals because the current observation is an
+easy shortcut for one-step BC. If so, randomly dropping the current-frame block
+during low-level training should increase goal dependence while preserving the
+same deployment interface. This is a more direct shortcut test than adding an
+action-difference margin to shuffled goals.
+
+### Code Change
+
+Added `low_frame_dropout_prob` to learned-interface hierarchy training. It is
+opt-in per candidate and only applies to low-level BC training samples; high
+level training, validation, and deployment use the normal unmasked frame.
+
+Candidate:
+
+```yaml
+effect32_film_frame_drop25:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  low_frame_dropout_prob: 0.25
+  policy_epochs: 40
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_frame_drop25 \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_frame_drop25 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_frame_drop25/diagnostics.json \
+  --force
+
+for source in learned oracle; do
+  TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+    --config configs/pusht_incremental.yaml \
+    --candidate effect32_film_frame_drop25 \
+    --goal-source "${source}" \
+    --episodes 200 \
+    --eval-seed-start 3500000 \
+    --force
+done
+```
+
+### Results
+
+Training validation:
+
+| metric | value |
+| --- | ---: |
+| best epoch | 40 |
+| low frame dropout prob | 0.25 |
+| oracle action MAE | 0.0427 |
+| predicted action MAE | 0.0432 |
+| prediction-induced action L2 | 0.0194 |
+
+Goal-use/deployment:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.0622 | 0.0368 | 0.645 | 0.645 |
+| effect32_film_frame_drop25 | 0.1121 | 0.0615 | 0.490 | 0.465 |
+
+The 20-episode smoke was also weak: learned `0.35`, oracle `0.45`.
+
+After adding this candidate, the aggregate gate report is:
+
+```text
+total: 32
+offline_goal_use_pass: 4
+reject_low_goal_use: 28
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_frame_drop25/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_frame_drop25/seed0/hierarchy_metrics.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_frame_drop25/diagnostics.json`
+- `results/incremental/learned_interface/effect32_film_frame_drop25/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_frame_drop25/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py
+```
+
+### Interpretation
+
+Frame dropout confirms the shortcut diagnosis: weakening the current-observation
+path raises goal-shuffle action change enough to pass the offline gate
+(`0.0622 -> 0.1121`). But it also hurts closed-loop imitation badly
+(`0.645 -> 0.490` learned success on the same 200-episode seed window). This is
+not a promotable base, and it suggests the next successful approach needs a
+counterfactual or deployment-aligned signal that teaches when the goal matters,
+not just a generic reduction in observation reliance.
