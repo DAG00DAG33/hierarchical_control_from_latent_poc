@@ -18493,3 +18493,61 @@ policy improvement: aggregate success is `0.680` versus frozen `0.720`, and
 final reward is much worse. This suggests multi-replan credit is more promising
 than one-segment scalar reachability, but the current direct-low local update
 still does not solve closed-loop deployment.
+
+## 2026-06-26 - Larger single-env learned-interface evaluator check
+
+### Hypothesis
+
+The `actiononly` high-level lead may be an artifact of the default vectorized
+learned-interface evaluator. The first 100-episode `eval_num_envs=1` check
+favored `highact_strong`; a larger matched 500-episode single-env check on the
+same `seed_start=3500000` window should tell whether that ordering was just
+small-sample noise.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 1 \
+  --force
+```
+
+### Results
+
+Matched 500-episode single-env learned-interface window:
+
+| candidate | success | final reward | max reward | teacher MAE | high-level decisions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| highact_strong | 0.690 | 0.7720 | 0.7784 | 0.0877 | 6.786 |
+| actiononly | 0.684 | 0.7684 | 0.7755 | 0.0846 | 6.746 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_500_seed3500000_envs1.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_500_seed3500000_envs1.json`
+
+### Interpretation
+
+The larger single-env learned-interface check confirms the conservative
+ordering from the 100-episode envs=1 audit: `highact_strong` is slightly better
+than `actiononly` under the single-env protocol used as a proxy for serial/RL
+compatibility. This does not erase the vectorized learned-interface lead for
+`actiononly`, but it means the lead is evaluator-protocol dependent. I did not
+run the second 500-episode single-env window because each run takes roughly
+20 minutes and this first larger window already supports the current policy
+choice: keep `highact_strong` as the serial/RL base and treat `actiononly` as a
+vectorized learned-interface lead until the protocol difference is understood.

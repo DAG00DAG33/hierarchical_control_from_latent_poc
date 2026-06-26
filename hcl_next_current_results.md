@@ -580,6 +580,22 @@ the conservative RL base remains `effect32_film_gsens_ft_highact_strong`, while
 `actiononly` is only a vectorized learned-interface lead. Future promotion
 checks should report `eval_num_envs` explicitly.
 
+I ran a larger matched single-env learned-interface check on the first
+500-episode window to see whether the 100-episode ordering was just noise:
+
+| evaluator | num envs | episodes | candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| learned-interface | 1 | 500 | highact_strong | 0.690 | 0.7720 | 0.7784 | 0.0877 |
+| learned-interface | 1 | 500 | actiononly | 0.684 | 0.7684 | 0.7755 | 0.0846 |
+
+This confirms the mismatch at a larger scale on `seed_start=3500000`: the
+single-env protocol still favors `highact_strong` slightly, while the default
+vectorized protocol favored `actiononly` on the same 500-episode window. I did
+not run the second 500-episode single-env window because each run is slow and
+the current result already supports the conservative conclusion. Use
+`highact_strong` for serial/RL work; keep `actiononly` as a vectorized
+learned-interface lead until the evaluator protocol difference is resolved.
+
 I then tested a middle high-level objective,
 `effect32_film_gsens_ft_highact_goal01`, with the same frozen low policy and
 action-through-low loss but `high_goal_mse_weight=0.1`. On the first 100-seed
