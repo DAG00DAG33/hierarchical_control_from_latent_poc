@@ -13168,3 +13168,59 @@ about `6.5%` of the frame-shuffle action change. This reinforces the hard-gate
 decision: do not spend serious PPO on a new candidate unless goal-use
 diagnostics are materially stronger than this or the experiment is explicitly a
 representation/objective diagnostic.
+
+## 2026-06-26: Short-horizon goal diagnostics
+
+### Hypothesis
+
+The short-horizon `effect32_film_h5` and `effect32_film_h2` hierarchies failed
+closed-loop evaluation. This diagnostic checks whether they failed because they
+were less goal-sensitive than the k10 baseline.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_h5/diagnostics.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_h2 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_h2/diagnostics.json
+```
+
+### Result
+
+| candidate | goal shuffle L2 | frame shuffle L2 | previous-action shuffle L2 | max horizon sensitivity L2 | goal MAE gap | action MAE h2 | action MAE h5 | action MAE h10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| effect32_film k10 | 0.0622 | 0.9503 | 0.1326 | 0.0368 | 0.0102 | 0.0484 | 0.0449 | 0.0425 |
+| effect32_film_h5 | 0.0662 | 0.9442 | 0.1309 | 0.0419 | 0.0122 | 0.0428 | 0.0413 | 0.0460 |
+| effect32_film_h2 | 0.0994 | 0.9346 | 0.1284 | 0.0810 | 0.0199 | 0.0408 | 0.0465 | 0.0585 |
+
+Artifacts:
+
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_h5/diagnostics.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_h2/diagnostics.json`
+
+### Interpretation
+
+The short-horizon variants do not fail because their low-level policies are less
+goal-sensitive. h2 is the most goal-sensitive by these offline metrics, but it
+was much worse in closed loop. This is important for Phase 2 gating:
+goal-identifiability is a necessary rejection gate, not a promotion criterion.
+The candidate also has to preserve closed-loop imitation quality under its
+training/deployment horizon.

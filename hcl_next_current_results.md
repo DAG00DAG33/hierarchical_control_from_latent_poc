@@ -249,6 +249,20 @@ hypothesis for the current effect32 FiLM setup. The remaining issue is not just
 that k=10 goals are too far away; changing horizon without changing the
 objective/closed-loop training distribution degrades deployment.
 
+Goal diagnostics on the short-horizon aliases clarify the failure: they do not
+fail because the low-level ignores goals more. In fact, h2 has the strongest
+offline goal sensitivity of the three:
+
+| candidate | goal shuffle L2 | frame shuffle L2 | max horizon sensitivity L2 | action MAE at h=10 |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film k10 | 0.062 | 0.950 | 0.0368 | 0.0425 |
+| effect32_film_h5 | 0.066 | 0.944 | 0.0419 | 0.0460 |
+| effect32_film_h2 | 0.099 | 0.935 | 0.0810 | 0.0585 |
+
+So the short-horizon regression is a deployment/training-distribution problem,
+not a simple goal-use problem. Increasing low-level goal sensitivity without
+maintaining closed-loop imitation quality can make the hierarchy worse.
+
 ### Initial state features are too weak for a one-shot gate
 
 I added pre-decision eval fields for state/goal distance, base action norm,
@@ -1193,8 +1207,10 @@ results/incremental/goal_diagnostics/n500/seed0/effect32_film/diagnostics.json
 artifacts/incremental/learned_interface/effect32_film_h5/seed0/hierarchy.pt
 results/incremental/learned_interface/effect32_film_h5/seed0/learned_hierarchy_eval_200_seed3500000.json
 results/incremental/learned_interface/effect32_film_h5/seed0/oracle_hierarchy_eval_200_seed3500000.json
+results/incremental/goal_diagnostics/n500/seed0/effect32_film_h5/diagnostics.json
 artifacts/incremental/learned_interface/effect32_film_h2/seed0/hierarchy.pt
 results/incremental/learned_interface/effect32_film_h2/seed0/learned_hierarchy_eval_200_seed3500000.json
+results/incremental/goal_diagnostics/n500/seed0/effect32_film_h2/diagnostics.json
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
