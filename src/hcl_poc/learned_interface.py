@@ -3155,6 +3155,97 @@ def compare_learned_interface_eval_jsons(
     return output
 
 
+def audit_learned_interface_reset_vectorization(
+    config: Config,
+    seed_start: int,
+    episodes: int,
+    eval_num_envs: list[int],
+    output: Path,
+    force: bool = False,
+) -> Path:
+    if output.exists() and not force:
+        return output
+    if episodes <= 0:
+        raise ValueError("episodes must be positive")
+    if not eval_num_envs:
+        raise ValueError("At least one eval_num_envs value is required")
+    if any(value <= 0 for value in eval_num_envs):
+        raise ValueError("eval_num_envs values must be positive")
+
+    seeds = list(range(int(seed_start), int(seed_start) + int(episodes)))
+    states_by_envs: dict[int, dict[int, np.ndarray]] = {}
+    shape_by_envs: dict[int, list[int]] = {}
+    for requested_num_envs in eval_num_envs:
+        max_num_envs = min(int(requested_num_envs), int(episodes))
+        rows: dict[int, np.ndarray] = {}
+        state_shape: list[int] | None = None
+        for batch_start in range(0, episodes, max_num_envs):
+            num_envs = min(max_num_envs, episodes - batch_start)
+            reset_seeds = seeds[batch_start : batch_start + num_envs]
+            env = gym.make(
+                config.get("env_id"),
+                obs_mode="rgb+state",
+                control_mode=config.get("control_mode"),
+                reward_mode="normalized_dense",
+                render_mode=None,
+                sim_backend=_rl_backend(config),
+                num_envs=num_envs,
+                reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+            )
+            try:
+                env.reset(seed=reset_seeds)
+                state = env.unwrapped.get_state().detach().cpu().numpy()
+                state_shape = list(state.shape)
+                for index, seed in enumerate(reset_seeds):
+                    rows[int(seed)] = state[index].astype(np.float32).copy()
+            finally:
+                env.close()
+        states_by_envs[int(requested_num_envs)] = rows
+        shape_by_envs[int(requested_num_envs)] = state_shape or []
+
+    reference_num_envs = int(eval_num_envs[0])
+    reference = states_by_envs[reference_num_envs]
+    comparisons: list[dict[str, Any]] = []
+    for requested_num_envs in eval_num_envs[1:]:
+        candidate = states_by_envs[int(requested_num_envs)]
+        per_seed_max_abs = [
+            float(np.max(np.abs(reference[seed] - candidate[seed])))
+            for seed in seeds
+        ]
+        comparisons.append(
+            {
+                "reference_eval_num_envs": reference_num_envs,
+                "eval_num_envs": int(requested_num_envs),
+                "max_abs_state_diff_mean": float(np.mean(per_seed_max_abs)),
+                "max_abs_state_diff_max": float(np.max(per_seed_max_abs)),
+                "changed_seed_count_at_1e-8": int(
+                    np.sum(np.asarray(per_seed_max_abs) > 1e-8)
+                ),
+                "per_seed_max_abs_state_diff": per_seed_max_abs,
+            }
+        )
+
+    write_json(
+        output,
+        {
+            "stage": "learned_interface_reset_vectorization_audit",
+            "env_id": config.get("env_id"),
+            "control_mode": config.get("control_mode"),
+            "sim_backend": _rl_backend(config),
+            "reconfiguration_freq": config.get("rl.eval_reconfiguration_freq", 1),
+            "seed_start": int(seed_start),
+            "episodes": int(episodes),
+            "eval_num_envs": [int(value) for value in eval_num_envs],
+            "reference_eval_num_envs": reference_num_envs,
+            "state_shape_by_eval_num_envs": {
+                str(key): value for key, value in shape_by_envs.items()
+            },
+            "comparisons": comparisons,
+        },
+    )
+    return output
+
+
 @torch.inference_mode()
 def record_learned_interface_videos(
     config: Config,

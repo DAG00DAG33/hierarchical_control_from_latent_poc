@@ -95,6 +95,7 @@ from hcl_poc.incremental import (
     sweep_phase8_deterministic_predictors,
 )
 from hcl_poc.learned_interface import (
+    audit_learned_interface_reset_vectorization,
     compare_learned_interface_eval_jsons,
     evaluate_learned_interface_hierarchy,
     prepare_learned_interface_episodes,
@@ -2029,6 +2030,15 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             output=Path(args.output),
             force=args.force,
         )
+    elif args.incremental_command == "learned-interface-audit-reset-vectorization":
+        audit_learned_interface_reset_vectorization(
+            config,
+            seed_start=args.seed_start,
+            episodes=args.episodes,
+            eval_num_envs=args.eval_num_envs,
+            output=Path(args.output),
+            force=args.force,
+        )
     elif args.incremental_command == "learned-interface-run":
         run_learned_interface_candidate(
             config,
@@ -3611,6 +3621,22 @@ def build_parser() -> argparse.ArgumentParser:
     learned_interface_compare.add_argument("--output", required=True)
     learned_interface_compare.add_argument("--force", action="store_true")
     learned_interface_compare.set_defaults(func=incremental_cmd)
+
+    learned_interface_reset_audit = incremental_sub.add_parser(
+        "learned-interface-audit-reset-vectorization"
+    )
+    add_config_arg(learned_interface_reset_audit)
+    learned_interface_reset_audit.add_argument("--seed-start", type=int, required=True)
+    learned_interface_reset_audit.add_argument("--episodes", type=int, required=True)
+    learned_interface_reset_audit.add_argument(
+        "--eval-num-envs",
+        nargs="+",
+        type=int,
+        default=[1, 2, 4, 8, 16],
+    )
+    learned_interface_reset_audit.add_argument("--output", required=True)
+    learned_interface_reset_audit.add_argument("--force", action="store_true")
+    learned_interface_reset_audit.set_defaults(func=incremental_cmd)
 
     vae_scaling_manifests = incremental_sub.add_parser("vae-scaling-manifests")
     add_config_arg(vae_scaling_manifests)

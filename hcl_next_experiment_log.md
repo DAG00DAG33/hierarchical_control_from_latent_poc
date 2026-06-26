@@ -18806,3 +18806,74 @@ reward, and max reward. This confirms that `actiononly` is not a
 serial-compatible replacement for `highact_strong` despite its default
 vectorized learned-interface lead. Keep `highact_strong` as the conservative
 base for serial/local-RL work.
+
+## 2026-06-27 - Learned-interface reset vectorization audit
+
+### Hypothesis
+
+The learned-interface evaluator vectorization sensitivity may come from reset
+state mismatch rather than policy dynamics alone. If raw ManiSkill reset seeds
+are not invariant to `num_envs`, the same seed index will start from a different
+simulator state when the evaluator batch size changes.
+
+### Implementation
+
+Added:
+
+```bash
+uv run hcl-poc incremental learned-interface-audit-reset-vectorization \
+  --seed-start ... \
+  --episodes ... \
+  --eval-num-envs ... \
+  --output ...
+```
+
+The command reproduces the raw learned-interface evaluator reset pattern for
+each requested `eval_num_envs`, records `env.unwrapped.get_state()`, and compares
+same-seed state vectors against the first env-count argument as reference.
+
+### Command
+
+```bash
+uv run hcl-poc incremental learned-interface-audit-reset-vectorization \
+  --config configs/pusht_incremental.yaml \
+  --seed-start 3500000 \
+  --episodes 16 \
+  --eval-num-envs 1 2 4 8 16 \
+  --output results/incremental/learned_interface/reset_vectorization_audit_seed3500000_n16.json \
+  --force
+```
+
+### Results
+
+Reference is `eval_num_envs=1`:
+
+| eval num envs | changed seeds | mean max-abs state diff | max max-abs state diff |
+| ---: | ---: | ---: | ---: |
+| 2 | 16 / 16 | 0.4811 | 1.9681 |
+| 4 | 16 / 16 | 0.6172 | 1.6495 |
+| 8 | 16 / 16 | 0.4777 | 1.1450 |
+| 16 | 16 / 16 | 0.6299 | 1.6305 |
+
+Artifact:
+
+- `results/incremental/learned_interface/reset_vectorization_audit_seed3500000_n16.json`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py src/hcl_poc/cli.py
+uv run hcl-poc incremental learned-interface-audit-reset-vectorization --help
+python3 -m json.tool results/incremental/learned_interface/reset_vectorization_audit_seed3500000_n16.json
+```
+
+### Interpretation
+
+The vectorized learned-interface evaluator is not producing matched seed
+conditions across `eval_num_envs`. All 16 checked seeds reset to different
+state vectors when the env count changes. This explains why same-index outcomes
+and candidate rankings are unstable across vectorization settings. For future
+promotion gates, either pin the evaluator protocol or treat vectorized and
+single-env evaluations as different seed distributions, not matched
+comparisons. This further supports using the single-env/serial-compatible
+protocol for local-RL base selection.

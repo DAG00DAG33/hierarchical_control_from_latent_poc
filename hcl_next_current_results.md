@@ -656,6 +656,24 @@ Until the ManiSkill vectorization dependence is understood, promotion claims
 should pin the evaluator protocol and avoid mixing single-env, serial, and
 vectorized results as if they were identical.
 
+I then added `incremental learned-interface-audit-reset-vectorization` and
+confirmed the source of this mismatch: the raw learned-interface ManiSkill
+evaluator does not reset to the same simulator state for a given seed when
+`num_envs` changes. On seeds `3500000..3500015`, using `eval_num_envs=1` as the
+reference:
+
+| eval num envs | seeds with changed reset state | mean max-abs state diff | max max-abs state diff |
+| ---: | ---: | ---: | ---: |
+| 2 | 16 / 16 | 0.4811 | 1.9681 |
+| 4 | 16 / 16 | 0.6172 | 1.6495 |
+| 8 | 16 / 16 | 0.4777 | 1.1450 |
+| 16 | 16 / 16 | 0.6299 | 1.6305 |
+
+So vectorized and single-env learned-interface evals are not matched seed
+comparisons. This explains why the ranking changes with `eval_num_envs` and
+means future promotion gates should either use a fixed evaluator protocol or
+explicitly report that the seed distributions differ.
+
 I then tested a middle high-level objective,
 `effect32_film_gsens_ft_highact_goal01`, with the same frozen low policy and
 action-through-low loss but `high_goal_mse_weight=0.1`. On the first 100-seed
