@@ -670,6 +670,15 @@ the first 100-seed window: success `0.580`, final reward `0.6101`, max reward
 reward in this local direct-low setup is therefore not enough; it makes larger
 changes, but not useful closed-loop changes.
 
+I then extended the dense task-reward diagnostic from one held-goal segment to a
+50-step rollout with `segment_terminates_gae=False`, so credit spans several
+high-level replans. This improved over the one-segment task-reward update but
+still did not beat frozen on the first 100-seed window: roll50 task-reward
+success `0.640`, final reward `0.6171`, max reward `0.7436`, versus frozen
+`0.670 / 0.7092 / 0.7566`. Longer credit helps relative to the roll10
+task-reward failure (`0.580` success), but the current local direct-low update
+still does not produce a useful closed-loop task policy.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

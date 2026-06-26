@@ -18304,3 +18304,100 @@ not simply that `D_phi` is the wrong scalar reward; the current local direct-low
 update can also overfit or misapply privileged dense task reward. A useful next
 target likely needs longer-horizon/closed-loop intervention training or a
 different policy update structure, not another one-segment scalar target.
+
+## 2026-06-26 - Longer-rollout task-reward diagnostic on high-action R3
+
+### Hypothesis
+
+The dense task-reward run failed partly because PPO credit was cut at every
+held-goal segment. A longer rollout with `segment_terminates_gae=False` should
+let task reward propagate across several high-level replans, making the update
+closer to closed-loop training while still using the direct-low R3 machinery.
+
+### Commands
+
+Training:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae \
+  --steps 102400 \
+  --num-envs 2048 \
+  --rollout-steps 50 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 1.0 \
+  --terminal-weight 0.0 \
+  --distance-progress-weight 0.0 \
+  --task-reward-weight 1.0 \
+  --task-progress-weight 0.0 \
+  --reward-mode absolute \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --no-segment-terminate-gae \
+  --force
+```
+
+Serial eval:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_taskreward_roll50_102k_bc1_noseggae_latest_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/latest.pt \
+  --force
+```
+
+### Training Metrics
+
+| run | step | mean reward | terminal D_phi | direct delta L2 | saturation | segment terminates GAE |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| roll10 task reward | 20480 | 0.1285 | 0.4029 | 0.2650 | 0.4062 | true |
+| roll10 task reward | 40960 | 0.1865 | 0.5885 | 0.2640 | 0.1956 | true |
+| roll50 task reward | 102400 | 0.2121 | 0.6198 | 0.2640 | 0.1438 | false |
+
+### Serial Result
+
+First 100-seed learned-goal window, `seed_start=3500000`:
+
+| policy | success | final reward | max reward | segment reach | segment final distance | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen highact_strong | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.5225 | 0.00000 |
+| roll10 task reward | 0.580 | 0.6101 | 0.6976 | 0.693 | 0.6211 | 0.01051 |
+| roll50 task reward | 0.640 | 0.6171 | 0.7436 | 0.743 | 0.6095 | 0.00907 |
+
+Paired final-reward counts versus frozen:
+
+| candidate | wins | losses | ties |
+| --- | ---: | ---: | ---: |
+| roll10 task reward | 30 | 36 | 34 |
+| roll50 task reward | 26 | 40 | 34 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/latest.pt`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_roll50_102k_bc1_noseggae_latest_serial100_seed3500000/serial_eval_100_seed3500000.json`
+
+### Interpretation
+
+Longer credit assignment helps compared with the one-segment task-reward
+diagnostic, but it is still below frozen. Success improves from `0.580` to
+`0.640`, max reward nearly recovers to the paired-Dphi level, and segment reach
+beats frozen, but final reward remains much worse and paired final-reward counts
+are negative. This is a useful direction signal: credit across several replans
+is better than segment-terminated task reward, but the current direct-low local
+update still does not solve closed-loop deployment.
