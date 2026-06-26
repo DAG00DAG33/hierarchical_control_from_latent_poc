@@ -17488,3 +17488,81 @@ future-goal MSE, improves deployment with the frozen goal-sensitive low policy.
 Treat `effect32_film_gsens_ft_highact_actiononly` as the current frozen-low base
 for the next serial/RL compatibility checks. It keeps the same low-level oracle
 behavior as `highact_strong`, but has better learned-goal closed-loop results.
+
+## 2026-06-26 - Action-only high-level serial compatibility check
+
+### Hypothesis
+
+The action-only high-level candidate is the best standard learned-interface
+evaluator result. Before using it as an R3 base, it should pass the same
+`low-level-rl eval-serial` compatibility check used for `highact_strong`.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --seed 0 \
+  --run-name hcl_next_highact_actiononly_frozen_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --seed 0 \
+  --run-name hcl_next_highact_actiononly_frozen_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --force
+```
+
+### Results
+
+Matched serial windows:
+
+| seed start | candidate | success | final reward | max reward | segment goal reach | action saturation |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | highact_strong | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.0458 |
+| 3500000 | actiononly | 0.660 | 0.6161 | 0.7562 | 0.742 | 0.0479 |
+| 3600000 | highact_strong | 0.770 | 0.7199 | 0.8385 | 0.791 | 0.0400 |
+| 3600000 | actiononly | 0.720 | 0.6943 | 0.8058 | 0.767 | 0.0421 |
+
+Two-window aggregate:
+
+| candidate | episodes | success | final reward | max reward | segment goal reach | action saturation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| highact_strong | 200 | 0.720 | 0.7146 | 0.7976 | 0.7565 | 0.0429 |
+| actiononly | 200 | 0.690 | 0.6552 | 0.7810 | 0.7545 | 0.0450 |
+
+Paired action-only-vs-highact-strong success counts:
+
+| seed start | wins | losses | net |
+| ---: | ---: | ---: | ---: |
+| 3500000 | 15 | 16 | -1 |
+| 3600000 | 7 | 12 | -5 |
+| aggregate | 22 | 28 | -6 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_actiononly/seed0/hcl_next_highact_actiononly_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_actiononly/seed0/hcl_next_highact_actiononly_frozen_serial100_seed3600000/serial_eval_100_seed3600000.json`
+
+### Interpretation
+
+This is a compatibility caveat, not a full rejection of action-only. The
+standard learned-interface evaluator favors action-only over `highact_strong` on
+the 2000-episode aggregate, but the serial evaluator favors `highact_strong` on
+the same first two seed banks used for prior R3 checks.
+
+The disagreement matters because the R3/local-RL path uses the serial evaluator.
+Do not immediately replace `highact_strong` with action-only for R3 experiments.
+The next useful step is to inspect the evaluator/protocol difference, or keep
+`highact_strong` as the conservative local-RL base while treating action-only as
+the best standard learned-interface deployment candidate.

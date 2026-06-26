@@ -545,6 +545,22 @@ not explained by that scalar alone. The next validation should treat
 `effect32_film_gsens_ft_highact_actiononly` as the current frozen-low base for
 serial/RL compatibility checks.
 
+That serial check exposed a mismatch between evaluators. On the two 100-episode
+`low-level-rl eval-serial` windows where `highact_strong` had already been run,
+action-only was worse:
+
+| candidate | episodes | serial success | serial final reward | serial max reward | paired wins/losses vs highact_strong |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film_gsens_ft_highact_strong | 200 | 0.720 | 0.7146 | 0.7976 | - |
+| effect32_film_gsens_ft_highact_actiononly | 200 | 0.690 | 0.6552 | 0.7810 | 22 / 28 |
+
+So action-only is the best standard learned-interface evaluator candidate, but
+not yet a clean replacement for `highact_strong` as an R3/serial base. The
+evaluator discrepancy is now an explicit open issue: the next step should either
+identify the protocol difference that makes action-only worse in serial mode or
+use the more conservative `highact_strong` base for local-RL experiments until
+that mismatch is understood.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
