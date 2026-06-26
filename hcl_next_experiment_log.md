@@ -13303,3 +13303,19 @@ pass the gate but were weaker deployment bases in previous closed-loop checks.
 The next candidate worth serious PPO should satisfy both requirements: stronger
 goal-use than effect32 and closed-loop imitation quality near or above
 effect32_film.
+
+I checked the existing closed-loop/R3 artifacts for the two gate-passing
+candidates:
+
+| candidate | offline gate | base learned success | base oracle success | R3-window frozen success | R3 tuned success | R3 delta |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | reject low goal-use | 0.645 | 0.645 | 0.634 | 0.684 | +0.050 |
+| ae256_film | pass | 0.550 | 0.670 | 0.596 | 0.586 | -0.010 |
+| vae512_b1e6_film | pass | 0.425 | 0.535 | 0.418 | 0.478 | +0.060 |
+
+The rows use the existing matched learned-interface evals and 500-episode R3
+checks around `seed_start=3500000`. They confirm that passing the offline
+goal-use gate is not enough. `vae512_b1e6_film` reacts strongly to goals and R3
+improves it, but the base policy is far below `effect32_film`. `ae256_film`
+passes the gate and has a better oracle ceiling, but R3 is slightly negative
+against its frozen branch. No existing candidate satisfies both requirements.
