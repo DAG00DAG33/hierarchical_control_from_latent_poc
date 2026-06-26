@@ -12635,3 +12635,91 @@ be optimized on the sampled training starts without producing a useful held-out
 local controller. The next objective should stop being a filtered version of the
 same local terminal reward and move toward closed-loop outcome supervision or a
 larger policy change with an explicit preservation mechanism.
+
+## 2026-06-26: Task-hard task-paired local R3 with lower BC
+
+### Hypothesis
+
+The task-reward hard filter produced the strongest training signal so far, but
+the policy update was still tiny. This run tests whether the BC anchor is now
+the limiting factor by rerunning the same task-hard one-update diagnostic with
+`bc_weight=0.3` instead of `1.0`.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5 \
+  --steps 40960 \
+  --bc-weight 0.3 \
+  --terminal-weight 1 \
+  --dense-progress-weight 0 \
+  --task-reward-weight 0 \
+  --reward-mode task_paired \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --max-base-terminal-env-reward 0.45 \
+  --force
+```
+
+Matched local validation:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+```
+
+### Results
+
+The rollout-side training metrics are identical to the `bc=1` task-hard run
+because this one-update diagnostic records rollout metrics before the PPO update:
+
+| metric | value |
+| --- | ---: |
+| active fraction | 0.7629 |
+| mean task-paired improvement | 0.03577 |
+| fraction task-paired improved | 0.5219 |
+| terminal env reward | 0.3527 |
+| frozen terminal env reward | 0.3169 |
+| terminal latent distance | 0.6327 |
+| action delta L2 | 0.01088 |
+
+Matched local validation:
+
+| policy | initial distance | final distance | reduction | action delta L2 | task success-once |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 previous baseline | 1.0671 | 0.6020 | 0.4651 | - | - |
+| uniform task-paired bc1 | 1.0671 | 0.6036 | 0.4635 | 0.00042 | 0.3306 |
+| task-hard bc1 | 1.0671 | 0.6092 | 0.4578 | 0.00046 | 0.3335 |
+| task-hard bc0.3 | 1.0671 | 0.6037 | 0.4634 | 0.00046 | 0.3367 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json`
+
+### Interpretation
+
+Lower BC helps relative to task-hard `bc=1`: it recovers most of the latent
+reduction regression and slightly improves the local task-success diagnostic.
+But it remains worse than frozen on latent reduction and does not create a
+meaningful action change. I skipped closed-loop deployment.
+
+This weakens the "BC anchor is the main blocker" explanation for the task-hard
+one-segment objective. The target can be optimized on sampled starts, and lower
+BC can alter the update a little, but the held-out local behavior is still not a
+promotion candidate.

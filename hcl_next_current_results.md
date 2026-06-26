@@ -904,6 +904,24 @@ in-training task-reward improvement, but the learned update does not transfer to
 the held-out local validation bank and remains worse than frozen on latent
 distance reduction. I also skipped closed-loop deployment for this checkpoint.
 
+I also reran the same task-hard setup with a weaker BC anchor (`bc_weight=0.3`).
+Because the training metrics are collected before the PPO update in this
+one-update diagnostic, the rollout-side task-paired metrics match the `bc=1`
+run. The resulting checkpoint did improve over task-hard `bc=1` on matched local
+validation, but still did not beat frozen:
+
+| policy | matched local final distance | reduction | action delta L2 | task success-once |
+| --- | ---: | ---: | ---: | ---: |
+| frozen n500 previous baseline | 0.6020 | 0.4651 | - | - |
+| uniform task-paired bc1 | 0.6036 | 0.4635 | 0.00042 | 0.331 |
+| task-hard bc1 | 0.6092 | 0.4578 | 0.00046 | 0.333 |
+| task-hard bc0.3 | 0.6037 | 0.4634 | 0.00046 | 0.337 |
+
+So lower BC recovers most of the latent-distance regression from task-hard
+filtering and slightly improves local task-success diagnostics, but it remains a
+tiny policy change and below the frozen local-distance baseline. I skipped
+closed-loop deployment.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
@@ -986,7 +1004,9 @@ The next useful directions are:
    task-paired local R3 increased the training reward delta but made matched
    local validation worse than both frozen and the uniform task-paired smoke. A
    task-reward hard filter produced a much stronger training reward delta, but
-   it also failed matched local validation.
+   it also failed matched local validation. Weakening BC for that task-hard
+   target recovered some local validation performance but still stayed below
+   frozen with tiny action changes.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.
@@ -1068,6 +1088,9 @@ results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_b
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/history.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json
