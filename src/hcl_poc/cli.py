@@ -479,6 +479,9 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 manifest_path=Path(args.manifest) if args.manifest else None,
                 output_path=Path(args.output) if args.output else None,
                 include_samples=args.include_samples,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
             )
         )
     elif args.rl_rerun_command == "create-local-eval-manifest":
@@ -524,6 +527,9 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 manifest_path=Path(args.manifest) if args.manifest else None,
                 output_path=Path(args.output) if args.output else None,
                 include_samples=args.include_samples,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
             )
         )
     elif args.rl_rerun_command == "eval-closed-loop-r1":
@@ -596,6 +602,9 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 manifest_path=Path(args.manifest) if args.manifest else None,
                 output_path=Path(args.output) if args.output else None,
                 include_samples=args.include_samples,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
             )
         )
     elif args.rl_rerun_command == "eval-closed-loop-r2":
@@ -660,6 +669,9 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 manifest_path=Path(args.manifest) if args.manifest else None,
                 output_path=Path(args.output) if args.output else None,
                 include_samples=args.include_samples,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
             )
         )
     elif args.rl_rerun_command == "eval-closed-loop-r3":
@@ -2332,6 +2344,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_local_r1.add_argument("--episodes", type=int, default=4)
     eval_local_r1.add_argument("--manifest")
     eval_local_r1.add_argument("--include-samples", action="store_true")
+    eval_local_r1.add_argument("--reachability-checkpoint")
     eval_local_r1.add_argument("--output")
     eval_local_r1.set_defaults(func=rl_rerun_cmd)
     eval_closed_loop_r1 = rl_rerun_sub.add_parser("eval-closed-loop-r1")
@@ -2400,6 +2413,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_local_r2.add_argument("--episodes", type=int, default=4)
     eval_local_r2.add_argument("--manifest")
     eval_local_r2.add_argument("--include-samples", action="store_true")
+    eval_local_r2.add_argument("--reachability-checkpoint")
     eval_local_r2.add_argument("--output")
     eval_local_r2.set_defaults(func=rl_rerun_cmd)
     eval_closed_loop_r2 = rl_rerun_sub.add_parser("eval-closed-loop-r2")
@@ -2462,6 +2476,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_local_r3.add_argument("--episodes", type=int, default=4)
     eval_local_r3.add_argument("--manifest")
     eval_local_r3.add_argument("--include-samples", action="store_true")
+    eval_local_r3.add_argument("--reachability-checkpoint")
     eval_local_r3.add_argument("--output")
     eval_local_r3.set_defaults(func=rl_rerun_cmd)
     eval_closed_loop_r3 = rl_rerun_sub.add_parser("eval-closed-loop-r3")

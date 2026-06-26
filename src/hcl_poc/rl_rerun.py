@@ -3400,16 +3400,26 @@ def evaluate_rl_rerun_local_r1(
     manifest_path: Path | None = None,
     output_path: Path | None = None,
     include_samples: bool = False,
+    reachability_checkpoint_path: Path | None = None,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
-    from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
+    from hcl_poc.low_level_rl import (
+        DirectLowActorCritic,
+        ResidualActorCritic,
+        _load_frozen,
+        _reachability_distance_values,
+    )
+    from hcl_poc.reachability import ReachabilityDistance, load_reachability_distance
+    from hcl_poc.utils import Standardizer
 
     path = dataset_path or _vector_dataset_path(config)
     if not path.exists():
         raise FileNotFoundError(path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(checkpoint_path)
+    if reachability_checkpoint_path is not None and not reachability_checkpoint_path.exists():
+        raise FileNotFoundError(reachability_checkpoint_path)
     if episodes <= 0:
         raise ValueError("episodes must be positive")
 
@@ -3461,6 +3471,13 @@ def evaluate_rl_rerun_local_r1(
     residual_action_mode = str(recipe.get("residual_action_mode", "additive"))
     if residual_action_mode not in {"additive", "margin_scaled"}:
         raise ValueError(f"Unknown residual_action_mode: {residual_action_mode}")
+    reachability_model: ReachabilityDistance | None = None
+    reachability_goal_norm: Standardizer | None = None
+    if reachability_checkpoint_path is not None:
+        reachability_model, reachability_goal_norm, _reachability_checkpoint = (
+            load_reachability_distance(reachability_checkpoint_path, device)
+        )
+        reachability_model.requires_grad_(False)
 
     with h5py.File(path, "r") as h5:
         meta = h5["meta"].attrs
@@ -3481,8 +3498,11 @@ def evaluate_rl_rerun_local_r1(
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
 
     initial_distances: list[np.ndarray] = []
+    initial_reachability_distances: list[np.ndarray] = []
     final_distances: list[np.ndarray] = []
     base_final_distances: list[np.ndarray] = []
+    final_reachability_distances: list[np.ndarray] = []
+    base_final_reachability_distances: list[np.ndarray] = []
     action_delta_norms: list[np.ndarray] = []
     sample_action_delta_means: list[np.ndarray] = []
     final_env_rewards: list[np.ndarray] = []
@@ -3588,6 +3608,17 @@ def evaluate_rl_rerun_local_r1(
                         base_final_distances.append(
                             np.mean(np.square(base_next_z - goal_z), axis=-1).astype(np.float32)
                         )
+                        if reachability_model is not None and reachability_goal_norm is not None:
+                            base_final_reachability_distances.append(
+                                _reachability_distance_values(
+                                    reachability_model,
+                                    reachability_goal_norm,
+                                    frozen,
+                                    base_next_z,
+                                    goal_z,
+                                    device,
+                                )
+                            )
                         base_final_env_rewards.append(base_step_reward_np)
                         base_max_env_rewards.append(base_episode_max_env_reward)
                         base_mean_env_rewards.append(base_total_env_reward / horizon)
@@ -3598,6 +3629,7 @@ def evaluate_rl_rerun_local_r1(
                     ).to(device)
                     obs, _reward, _terminated, _truncated, _info = env.step(replay_action)
                 episode_initial_distance: np.ndarray | None = None
+                episode_initial_reachability_distance: np.ndarray | None = None
                 total_env_reward = np.zeros(num_envs, dtype=np.float32)
                 episode_max_env_reward = np.full(num_envs, -np.inf, dtype=np.float32)
                 episode_action_delta_sum = np.zeros(num_envs, dtype=np.float32)
@@ -3610,6 +3642,20 @@ def evaluate_rl_rerun_local_r1(
                     distance = np.mean(np.square(current_z - goal_z), axis=-1).astype(np.float32)
                     if episode_initial_distance is None:
                         episode_initial_distance = distance.copy()
+                        if (
+                            reachability_model is not None
+                            and reachability_goal_norm is not None
+                        ):
+                            episode_initial_reachability_distance = (
+                                _reachability_distance_values(
+                                    reachability_model,
+                                    reachability_goal_norm,
+                                    frozen,
+                                    current_z,
+                                    goal_z,
+                                    device,
+                                )
+                            )
                     remaining = np.full(
                         (num_envs, 1),
                         (horizon - local_step) / horizon,
@@ -3704,6 +3750,17 @@ def evaluate_rl_rerun_local_r1(
                         final_distances.append(
                             np.mean(np.square(next_z - goal_z), axis=-1).astype(np.float32)
                         )
+                        if reachability_model is not None and reachability_goal_norm is not None:
+                            final_reachability_distances.append(
+                                _reachability_distance_values(
+                                    reachability_model,
+                                    reachability_goal_norm,
+                                    frozen,
+                                    next_z,
+                                    goal_z,
+                                    device,
+                                )
+                            )
                         final_env_rewards.append(step_reward_np)
                         max_env_rewards.append(episode_max_env_reward)
                         mean_env_rewards.append(total_env_reward / horizon)
@@ -3713,6 +3770,10 @@ def evaluate_rl_rerun_local_r1(
                 if episode_initial_distance is None:
                     raise RuntimeError("Local R1 evaluation did not execute any steps")
                 initial_distances.append(episode_initial_distance)
+                if episode_initial_reachability_distance is not None:
+                    initial_reachability_distances.append(
+                        episode_initial_reachability_distance
+                    )
                 saturation_rates.append(saturation_count / float(num_envs * horizon))
                 chosen_batches.append(key)
                 chosen_timesteps.append(t)
@@ -3722,6 +3783,21 @@ def evaluate_rl_rerun_local_r1(
     initial = np.concatenate(initial_distances)
     final = np.concatenate(final_distances)
     base_final = np.concatenate(base_final_distances)
+    initial_reachability = (
+        np.concatenate(initial_reachability_distances)
+        if initial_reachability_distances
+        else None
+    )
+    final_reachability = (
+        np.concatenate(final_reachability_distances)
+        if final_reachability_distances
+        else None
+    )
+    base_final_reachability = (
+        np.concatenate(base_final_reachability_distances)
+        if base_final_reachability_distances
+        else None
+    )
     action_delta = np.concatenate(action_delta_norms)
     sample_action_delta = np.concatenate(sample_action_delta_means)
     final_env_reward = np.concatenate(final_env_rewards)
@@ -3779,6 +3855,11 @@ def evaluate_rl_rerun_local_r1(
         "n_demo": n_demo,
         "seed": seed,
         "evaluation_manifest": str(manifest_path) if manifest_path else None,
+        "reachability_checkpoint": (
+            str(reachability_checkpoint_path)
+            if reachability_checkpoint_path is not None
+            else None
+        ),
         "evaluation_entries": evaluation_entries,
         "episodes": episodes,
         "num_envs": num_envs,
@@ -3817,6 +3898,33 @@ def evaluate_rl_rerun_local_r1(
         "action_saturation_rate": float(np.mean(saturation_rates)),
         "recipe": recipe,
     }
+    if (
+        initial_reachability is not None
+        and final_reachability is not None
+        and base_final_reachability is not None
+    ):
+        result.update(
+            {
+                "initial_reachability_distance_mean": float(
+                    np.mean(initial_reachability)
+                ),
+                "base_final_reachability_distance_mean": float(
+                    np.mean(base_final_reachability)
+                ),
+                "final_reachability_distance_mean": float(
+                    np.mean(final_reachability)
+                ),
+                "base_reachability_reduction_mean": float(
+                    np.mean(initial_reachability - base_final_reachability)
+                ),
+                "reachability_reduction_mean": float(
+                    np.mean(initial_reachability - final_reachability)
+                ),
+                "reachability_reduction_delta_vs_base": float(
+                    np.mean(base_final_reachability - final_reachability)
+                ),
+            }
+        )
     if include_samples:
         result["sample_metrics"] = _local_sample_metrics_payload(
             episodes=episodes,
@@ -3834,6 +3942,39 @@ def evaluate_rl_rerun_local_r1(
             success_once=success_once_flat,
             sample_action_delta=sample_action_delta,
         )
+        if (
+            initial_reachability is not None
+            and final_reachability is not None
+            and base_final_reachability is not None
+        ):
+            result["sample_metrics"].update(
+                {
+                    "initial_reachability_distance": (
+                        initial_reachability.astype(float).tolist()
+                    ),
+                    "base_final_reachability_distance": (
+                        base_final_reachability.astype(float).tolist()
+                    ),
+                    "final_reachability_distance": (
+                        final_reachability.astype(float).tolist()
+                    ),
+                    "base_reachability_reduction": (
+                        initial_reachability - base_final_reachability
+                    )
+                    .astype(float)
+                    .tolist(),
+                    "reachability_reduction": (
+                        initial_reachability - final_reachability
+                    )
+                    .astype(float)
+                    .tolist(),
+                    "reachability_reduction_delta_vs_base": (
+                        base_final_reachability - final_reachability
+                    )
+                    .astype(float)
+                    .tolist(),
+                }
+            )
     out_path = output_path or (
         _state_audit_result_dir(config)
         / str(recipe.get("family_dir", "local_r1"))
@@ -3857,6 +3998,7 @@ def evaluate_rl_rerun_local_r2(
     manifest_path: Path | None = None,
     output_path: Path | None = None,
     include_samples: bool = False,
+    reachability_checkpoint_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_local_r1(
         config,
@@ -3868,6 +4010,7 @@ def evaluate_rl_rerun_local_r2(
         manifest_path=manifest_path,
         output_path=output_path,
         include_samples=include_samples,
+        reachability_checkpoint_path=reachability_checkpoint_path,
     )
 
 
@@ -3882,6 +4025,7 @@ def evaluate_rl_rerun_local_r3(
     manifest_path: Path | None = None,
     output_path: Path | None = None,
     include_samples: bool = False,
+    reachability_checkpoint_path: Path | None = None,
 ) -> Path:
     return evaluate_rl_rerun_local_r1(
         config,
@@ -3893,6 +4037,7 @@ def evaluate_rl_rerun_local_r3(
         manifest_path=manifest_path,
         output_path=output_path,
         include_samples=include_samples,
+        reachability_checkpoint_path=reachability_checkpoint_path,
     )
 
 

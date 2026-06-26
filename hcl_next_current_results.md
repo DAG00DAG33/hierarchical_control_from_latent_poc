@@ -1068,6 +1068,15 @@ balanced (`-1: 11`, `0: 488`, `+1: 13`). This supports the current diagnosis
 that local raw reachability deltas are a poor deployment proxy for this
 checkpoint.
 
+I then extended the same local sample export with optional `D_phi` distances
+via `--reachability-checkpoint`. On the same 512-env smoke, the checkpoint
+improved raw distance (`+0.0135`) but worsened learned reachability distance
+(`-0.0091`), while final dense reward still improved slightly (`+0.0079`).
+Per-sample correlations with final dense-reward delta were weak for both raw
+distance (`0.052`) and `D_phi` (`0.017`), and raw-vs-`D_phi` improvement
+correlation was only `0.139`. This makes the local proxy mismatch directly
+measurable on identical reset samples.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

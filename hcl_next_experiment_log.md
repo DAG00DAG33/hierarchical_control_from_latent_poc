@@ -14453,3 +14453,81 @@ additional evidence that local raw reachability is not a reliable deployment
 proxy for the current checkpoint. The next useful use of this infrastructure is
 to compare raw L2, `D_phi`, dense reward, and success on the same per-sample
 local bank instead of relying only on aggregate means.
+
+## 2026-06-26 - Same-sample D_phi local proxy export
+
+### Hypothesis
+
+Raw local L2 and learned `D_phi` may disagree on whether a tuned policy improved
+the local rollout. Adding optional `D_phi` distances to the same local sample
+export lets us compare raw reachability, learned reachability, dense reward,
+and success on identical reset samples.
+
+### Implementation
+
+I added `--reachability-checkpoint` to `eval-local-r{1,2,3}`. When provided,
+local eval reports:
+
+```text
+initial_reachability_distance_mean
+base_final_reachability_distance_mean
+final_reachability_distance_mean
+base_reachability_reduction_mean
+reachability_reduction_mean
+reachability_reduction_delta_vs_base
+```
+
+With `--include-samples`, the same fields are also exported per sample.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n512_dphi_1_seed0.json
+```
+
+### Results
+
+Aggregate same-sample metrics:
+
+| metric | value |
+| --- | ---: |
+| sampled local episodes | 512 |
+| raw-distance delta vs frozen | +0.0135 |
+| D_phi delta vs frozen | -0.0091 |
+| final dense-reward delta vs frozen | +0.0079 |
+| success-once delta vs frozen | +0.0039 |
+| initial D_phi distance | 0.8485 |
+| frozen final D_phi distance | 0.7909 |
+| tuned final D_phi distance | 0.8000 |
+
+Per-sample proxy correlations:
+
+| pair | Pearson r |
+| --- | ---: |
+| raw-distance delta vs final dense-reward delta | 0.052 |
+| D_phi delta vs final dense-reward delta | 0.017 |
+| raw-distance delta vs max dense-reward delta | 0.0019 |
+| D_phi delta vs max dense-reward delta | -0.0157 |
+| raw-distance delta vs D_phi delta | 0.139 |
+| action-delta mean vs D_phi delta | 0.0084 |
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n512_dphi_1_seed0.json`
+
+### Interpretation
+
+The optional `D_phi` local eval path works and exposes a concrete mismatch: the
+same checkpoint can look slightly positive under raw L2 and slightly negative
+under learned reachability on the same reset samples. Neither proxy correlates
+meaningfully with dense task-reward deltas on this smoke. This strengthens the
+case that the next objective work should use same-sample proxy audits before
+promoting a local metric to PPO reward or checkpoint selection.
