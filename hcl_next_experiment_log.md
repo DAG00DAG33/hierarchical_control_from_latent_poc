@@ -11298,6 +11298,122 @@ leave significant performance on the table, but the low-level R3 update is not
 merely compensating for learned-goal error. It still adds a small benefit when
 given stronger local goals.
 
+## 2026-06-26 - Fresh-bank validation of oracle-goal serial R3
+
+The first 100-seed oracle-goal serial check was promising but too small to
+trust. I reran the same exact-seed learned/oracle comparison on a fresh
+`seed_start=3600000` bank.
+
+Commands:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --goal-source learned \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial100_seed3600000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --goal-source learned \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_oracle_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --goal-source oracle \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_oracle_serial100_seed3600000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --goal-source oracle \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Fresh-bank result:
+
+| goal source | policy | success | max reward | raw reduction | selected reduction | goal reach | action delta L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| learned | frozen | 0.690 | 0.7781 | 0.3923 | 0.0744 | 0.7290 | 0.000000 |
+| learned | R3 | 0.710 | 0.7958 | 0.4151 | 0.0739 | 0.7460 | 0.000921 |
+| oracle | frozen | 0.760 | 0.8310 | 0.8320 | 0.1192 | 0.8180 | 0.000000 |
+| oracle | R3 | 0.690 | 0.7846 | 0.8260 | 0.1229 | 0.7910 | 0.000964 |
+
+Paired exact-seed comparison:
+
+| seed start | goal source | episodes | frozen | R3 | improvements | regressions | net | success delta |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | learned | 100 | 0.600 | 0.670 | 14 | 7 | +7 | +0.070 |
+| 3500000 | oracle | 100 | 0.680 | 0.710 | 11 | 8 | +3 | +0.030 |
+| 3600000 | learned | 100 | 0.690 | 0.710 | 14 | 12 | +2 | +0.020 |
+| 3600000 | oracle | 100 | 0.760 | 0.690 | 12 | 19 | -7 | -0.070 |
+
+Two-bank aggregate:
+
+| goal source | episodes | frozen | R3 | improvements | regressions | net | success delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| learned | 200 | 0.645 | 0.690 | 28 | 19 | +9 | +0.045 |
+| oracle | 200 | 0.720 | 0.700 | 23 | 27 | -4 | -0.020 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial100_seed3600000/serial_eval_100_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial100_seed3600000/serial_eval_100_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial100_seed3600000/paired_vs_frozen_serial100_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_oracle_serial100_seed3600000/serial_eval_100_seed3600000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_oracle_serial100_seed3600000/serial_eval_100_seed3600000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_oracle_serial100_seed3600000/paired_vs_frozen_oracle_serial100_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial_goal_source_2bank_summary.json`
+
+Interpretation:
+
+The fresh bank invalidates the stronger oracle-goal claim from the previous
+100-seed check. Oracle goals consistently improve the frozen policy, but the R3
+low-level update does not validate under oracle goals: the two-bank oracle
+aggregate is `0.720 -> 0.700` with net `-4` paired episodes. Under learned
+goals the R3 update remains mildly positive over these exact serial banks
+(`0.645 -> 0.690`, net `+9`), but that should now be interpreted as a narrow
+distribution-specific effect, not as evidence of a generally better low-level
+controller. This points back to the plan's broader conclusion: the next serious
+work should change the training objective or high-level/local-goal formulation,
+not keep tuning this R3 checkpoint.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:

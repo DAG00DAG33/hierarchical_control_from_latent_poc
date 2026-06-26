@@ -70,18 +70,20 @@ success (`0.645 -> 0.635` learned, `0.645 -> 0.605` oracle). Treat that as an
 evaluator-protocol caveat rather than a low-policy weight mismatch: the low-level
 serial evaluator still shows a paired positive result on exact seeds.
 
-I then added oracle-goal support directly to `low-level-rl eval-serial`. On the
-same 100 fixed seeds, oracle goals improved the frozen policy from `0.600` to
-`0.680`, and R3 still improved over the oracle-goal frozen baseline:
+I then added oracle-goal support directly to `low-level-rl eval-serial`. The
+first 100-seed bank suggested R3 still helped under oracle goals, but a fresh
+100-seed bank reversed that. Over the two exact-seed banks:
 
 | goal source | frozen | R3 | paired improvements | paired regressions | net |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| learned | 0.600 | 0.670 | 14 | 7 | +7 |
-| oracle | 0.680 | 0.710 | 11 | 8 | +3 |
+| learned | 0.645 | 0.690 | 28 | 19 | +9 |
+| oracle | 0.720 | 0.700 | 23 | 27 | -4 |
 
-So the high-level learned goal is a real bottleneck, but it is not the whole
-story. The low-level R3 update has a small positive effect even under oracle
-local goals, while the oracle branch raises the absolute ceiling.
+So the high-level learned goal is a real bottleneck, and oracle local goals
+raise the frozen ceiling. But the R3 low-level update does **not** validate
+under oracle goals; its apparent oracle-goal gain was a one-bank false lead.
+The remaining learned-goal R3 gain is small and should be treated as
+distribution-specific rather than a robust low-level improvement.
 
 ### Residual-L2 gate reduces some damage
 
