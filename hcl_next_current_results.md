@@ -1173,6 +1173,29 @@ outcomes is still not the right training target because the deployed selector
 changes later states/goals. A useful selector needs closed-loop intervention
 training or a much larger effect from the candidate policy.
 
+I then repeated the exact-serial segment-selector check on larger 100-episode
+windows (`4510000..4510099` train, `4511000..4511099` validation). Offline,
+the five-feature selector again looked locally useful:
+
+| split | segments | base raw reduction | R3 raw reduction | selector raw reduction | selector use R3 | selector AUC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| train 4510000 | 1000 | 0.407 | 0.420 | 0.470 | 0.749 | 0.599 |
+| validation 4511000 | 1000 | 0.441 | 0.453 | 0.511 | 0.714 | 0.594 |
+
+Online deployment on the validation window still did not beat frozen:
+
+| policy | success | final reward | max reward | raw local reduction | reach rate | R3 segment use |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.660 | 0.680 | 0.761 | 0.441 | 0.714 | - |
+| ungated R3 | 0.650 | 0.676 | 0.750 | 0.453 | 0.713 | 1.000 |
+| online segment selector | 0.660 | 0.681 | 0.755 | 0.431 | 0.722 | 0.748 |
+
+Paired against frozen, ungated R3 had 10 improvements and 11 regressions; the
+online selector had 11 improvements and 11 regressions. The selector improves
+the offline local raw-reduction objective, but when deployed it changes the
+subsequent closed-loop state distribution and only ties frozen task success.
+This further closes the simple linear segment-selector branch.
+
 ### Lower BC paired reward did not fix the objective
 
 I retried paired R3 with a lower BC anchor (`bc_weight=1`, 2048 envs because the

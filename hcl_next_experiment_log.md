@@ -18978,3 +18978,114 @@ differences can compound across a closed-loop rollout.
 Treat `--eval-reset-mode serial_state` as an audit/debugging tool only. It does
 not replace the single-env/serial-compatible promotion protocol. The
 conservative RL base remains `effect32_film_gsens_ft_highact_strong`.
+
+## 2026-06-27 - Larger exact-serial segment-selector replication
+
+### Hypothesis
+
+The previous exact-serial segment selector may have failed online because it
+was trained on only 50 episodes. A larger exact-seed train/validation pair might
+make the segment-start gate less noisy and improve closed-loop task success.
+
+### Commands
+
+Train-window exact serial evals:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 1000 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_segmentselector_serial100_seed4510000 \
+  --episodes 100 \
+  --seed-start 4510000 \
+  --distance-metric reachability \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 1000 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_segmentselector_serial100_seed4510000 \
+  --episodes 100 \
+  --seed-start 4510000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --distance-metric reachability \
+  --force
+```
+
+Validation-window exact serial evals used the same commands with
+`seed-start=4511000` and matching run names.
+
+Selector fit:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  fit-serial-segment-selector \
+  --base-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial100_seed4510000/serial_eval_100_seed4510000.json \
+  --candidate-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segmentselector_serial100_seed4510000/serial_eval_100_seed4510000.json \
+  --validation-base-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial100_seed4511000/serial_eval_100_seed4511000.json \
+  --validation-candidate-json results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segmentselector_serial100_seed4511000/serial_eval_100_seed4511000.json \
+  --output results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segmentselector_serial100_seed4510000/segment_selector_fit_train4510000_valid4511000.json \
+  --force
+```
+
+Online validation used the fitted weights:
+
+```text
+weights:    [0.026956, -0.292065, 0.167119, -0.033937, -0.130110]
+mean:       [0.711870, 0.922547, 0.449592, 0.983873, 45.0]
+std:        [0.226132, 0.845738, 0.428169, 0.599908, 28.722815]
+threshold:  -0.099340
+```
+
+### Results
+
+Offline local selector metrics:
+
+| split | segments | base raw reduction | R3 raw reduction | selector raw reduction | selector delta vs base | selector use R3 | selector AUC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| train 4510000 | 1000 | 0.4071 | 0.4198 | 0.4703 | +0.0632 | 0.749 | 0.599 |
+| validation 4511000 | 1000 | 0.4407 | 0.4527 | 0.5108 | +0.0701 | 0.714 | 0.594 |
+
+Online validation on `4511000..4511099`:
+
+| policy | success | final reward | max reward | raw local reduction | reach rate | residual L2 | R3 segment use |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.660 | 0.6802 | 0.7611 | 0.4407 | 0.714 | 0.000000 | - |
+| ungated R3 | 0.650 | 0.6760 | 0.7502 | 0.4527 | 0.713 | 0.001034 | 1.000 |
+| online segment selector | 0.660 | 0.6810 | 0.7554 | 0.4307 | 0.722 | 0.000731 | 0.748 |
+
+Paired against frozen:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| ungated R3 | 10 | 11 | -1 |
+| online segment selector | 11 | 11 | 0 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial100_seed4510000/serial_eval_100_seed4510000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segmentselector_serial100_seed4510000/serial_eval_100_seed4510000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial100_seed4511000/serial_eval_100_seed4511000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segmentselector_serial100_seed4511000/serial_eval_100_seed4511000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segmentselector_serial100_seed4510000/segment_selector_fit_train4510000_valid4511000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_segmentselector_fit4510000_online_serial100_seed4511000/serial_eval_100_seed4511000.json`
+
+### Interpretation
+
+The larger exact-serial dataset reproduces the old pattern. The segment-start
+linear selector improves held-out local raw reduction offline, but online
+deployment only ties frozen task success and does not preserve the offline local
+raw-reduction gain. The deployed selector changes later states and goals, so
+the completed-segment labels remain a poor online intervention target.
+
+This further rejects simple offline linear segment gating for the current R3
+checkpoint. The next selector attempt needs closed-loop intervention training
+or a larger/more task-aligned residual effect, not just more exact serial
+segments for the same five-feature linear gate.
