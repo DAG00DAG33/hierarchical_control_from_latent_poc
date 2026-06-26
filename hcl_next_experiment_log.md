@@ -17205,3 +17205,135 @@ remains frozen `effect32_film_gsens_ft_highact_strong`. A better next joint
 variant should anchor the low policy's oracle-goal action/closed-loop behavior
 while tuning high-level compatibility, instead of letting low-level BC drift
 erase the oracle-goal improvement.
+
+## 2026-06-26 - Anchored joint high/low action-through-low fine-tune
+
+### Hypothesis
+
+The naive joint high/low fine-tune damaged oracle-goal low-level behavior. A
+simple low-policy anchor may preserve the useful initialized low-level behavior
+while still allowing a small joint update under the action-through-low high-level
+loss and low-level goal-sensitivity objective.
+
+### Implementation
+
+Added optional `low_anchor_loss_weight` to `train_learned_interface_hierarchy`.
+When the weight is positive, the trainer keeps a frozen copy of the initialized
+low policy and adds an MSE penalty between the trainable low policy and the
+anchor low policy on the same low-level training inputs. This is deliberately a
+small offline action anchor; it does not add a new rollout evaluator.
+
+Added candidate:
+
+```yaml
+effect32_film_gsens_ft_highact_joint_anchor:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32_film_gsens_ft_highact_joint_anchor
+  conditioning: film
+  high_init_candidate: effect32
+  low_init_candidate: effect32_film_gsens_ft
+  high_goal_mse_weight: 0.3
+  high_action_loss_weight: 300.0
+  low_anchor_loss_weight: 10.0
+  goal_sensitivity_weight: 0.02
+  goal_sensitivity_margin: 0.2
+  policy_lr: 1.0e-5
+  policy_epochs: 20
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_joint_anchor \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_joint_anchor \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_joint_anchor \
+  --goal-source oracle \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_joint_anchor \
+  --seed 0 \
+  --samples 4096 \
+  --horizons 2,5,10,20 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft_highact_joint_anchor/diagnostics.json \
+  --force
+```
+
+### Training Metrics
+
+Best epoch: `18`.
+
+| metric | value |
+| --- | ---: |
+| validation normalized goal L2 | 2.5443 |
+| validation oracle action MAE | 0.0361 |
+| validation predicted action MAE | 0.0364 |
+| validation prediction-induced action L2 | 0.0125 |
+| last low train MSE | 0.000925 |
+| last low anchor loss | 0.00000749 |
+| last low goal-sensitivity loss | 0.00501 |
+
+The anchor strongly constrained drift on the sampled low-level training inputs,
+but the validation action-through-low metrics were not better than the previous
+joint run.
+
+### Results
+
+Matched 200-episode window, `seed_start=3500000`:
+
+| candidate | learned success | learned final | learned max | learned teacher MAE | oracle success | oracle final | oracle max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 0.645 | 0.7347 | 0.7420 | 0.1073 | 0.645 | 0.7399 | 0.7464 |
+| effect32_film_gsens_ft_highact_strong | 0.640 | 0.7316 | 0.7403 | 0.0958 | 0.675 | 0.7657 | 0.7733 |
+| effect32_film_gsens_ft_highact_joint | 0.635 | 0.7260 | 0.7358 | 0.1034 | 0.615 | 0.7173 | 0.7270 |
+| effect32_film_gsens_ft_highact_joint_anchor | 0.595 | 0.7006 | 0.7113 | 0.0975 | 0.635 | 0.7395 | 0.7455 |
+
+Goal-use diagnostic:
+
+| candidate | frame shuffle L2 | goal shuffle L2 | max goal sensitivity L2 |
+| --- | ---: | ---: | ---: |
+| highact strong | 0.9386 | 0.0919 | 0.0399 |
+| highact joint | 0.9381 | 0.0812 | 0.0598 |
+| highact joint anchor | 0.9349 | 0.0878 | 0.0653 |
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_joint_anchor/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_joint_anchor/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_joint_anchor/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_joint_anchor/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft_highact_joint_anchor/diagnostics.json`
+
+### Interpretation
+
+Reject this anchored joint recipe. The anchor prevents the worst oracle-goal
+collapse from the naive joint run (`0.615 -> 0.635`), but it is still below
+`highact_strong` oracle performance (`0.675`) and it substantially hurts
+learned-goal deployment (`0.640 -> 0.595` versus `highact_strong`).
+
+The offline same-input anchor is too indirect. It can constrain sampled action
+drift while still failing to preserve the closed-loop behavior that matters, and
+it does not fix the low-level goal-use gate. The next coupled objective should
+anchor deployment behavior more directly, for example by preserving oracle-goal
+closed-loop or serial-segment behavior while optimizing learned-goal
+action-through-low compatibility.

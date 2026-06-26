@@ -507,6 +507,24 @@ joint objective should constrain low-policy drift more directly, for example by
 anchoring oracle-goal closed-loop/action behavior while training the high-level
 action compatibility term.
 
+I then added a simple low-policy anchor loss for joint fine-tuning. The trainable
+low policy is penalized for deviating from a frozen copy of its initialized
+`effect32_film_gsens_ft` weights on the same low-level training inputs. The
+first anchored joint candidate used `low_anchor_loss_weight=10.0`:
+
+| candidate | learned success 200 | oracle success 200 | learned max reward | oracle max reward | goal shuffle L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film_gsens_ft_highact_strong | 0.640 | 0.675 | 0.7403 | 0.7733 | 0.0919 |
+| effect32_film_gsens_ft_highact_joint | 0.635 | 0.615 | 0.7358 | 0.7270 | 0.0812 |
+| effect32_film_gsens_ft_highact_joint_anchor | 0.595 | 0.635 | 0.7113 | 0.7455 | 0.0878 |
+
+The anchor prevents the worst oracle collapse from the naive joint variant, but
+learned-goal deployment gets worse and the low-level still fails the goal-use
+gate. This rejects the simple same-input action anchor. The next coupled variant
+needs a deployment-aligned anchor, not just an offline action anchor on training
+inputs: for example, explicitly preserve oracle-goal closed-loop behavior while
+optimizing high-level learned-goal compatibility.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

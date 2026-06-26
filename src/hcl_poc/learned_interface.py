@@ -2354,6 +2354,7 @@ def train_learned_interface_hierarchy(
         conditioning,
         residual_scale=goal_residual_scale,
     ).to(device)
+    low_anchor_model: _GoalConditionedLowPolicy | None = None
     low_init_candidate = spec.get("low_init_candidate")
     if low_init_candidate is not None:
         source_path = train_learned_interface_hierarchy(
@@ -2377,6 +2378,13 @@ def train_learned_interface_hierarchy(
                 "low_init_candidate checkpoint is incompatible with this low policy"
             )
         low_model.load_state_dict(source_checkpoint["low_model"])
+    low_anchor_loss_weight = float(spec.get("low_anchor_loss_weight", 0.0))
+    if low_anchor_loss_weight < 0.0:
+        raise ValueError("low_anchor_loss_weight must be non-negative")
+    if low_anchor_loss_weight > 0.0:
+        low_anchor_model = copy.deepcopy(low_model).to(device)
+        low_anchor_model.requires_grad_(False)
+        low_anchor_model.eval()
     freeze_low_policy = bool(spec.get("freeze_low_policy", False))
     if freeze_low_policy:
         low_model.requires_grad_(False)
@@ -2465,6 +2473,7 @@ def train_learned_interface_hierarchy(
         low_model.train()
         high_sum = 0.0
         low_sum = 0.0
+        anchor_sum = 0.0
         sensitivity_sum = 0.0
         frame_dropout_aux_sum = 0.0
         for (high_x, high_y, high_low_x, high_action_y), (low_x, low_y) in zip(
@@ -2500,10 +2509,23 @@ def train_learned_interface_hierarchy(
             low_y = low_y.to(device, non_blocking=True)
             low_prediction = low_model(low_x)
             low_bc_loss = torch.mean((low_prediction - low_y) ** 2)
+            low_anchor_loss = low_bc_loss.new_tensor(0.0)
             sensitivity_loss = low_bc_loss.new_tensor(0.0)
             frame_dropout_aux_loss = low_bc_loss.new_tensor(0.0)
             if low_optimizer is not None:
                 low_loss = low_bc_loss
+                if (
+                    low_anchor_model is not None
+                    and low_anchor_loss_weight > 0.0
+                ):
+                    with torch.no_grad():
+                        anchored_prediction = low_anchor_model(low_x)
+                    low_anchor_loss = torch.mean(
+                        (low_prediction - anchored_prediction) ** 2
+                    )
+                    low_loss = low_loss + (
+                        low_anchor_loss_weight * low_anchor_loss
+                    )
                 if (
                     low_frame_dropout_aux_weight > 0.0
                     and low_frame_dropout_aux_prob > 0.0
@@ -2532,6 +2554,7 @@ def train_learned_interface_hierarchy(
                 low_loss.backward()
                 low_optimizer.step()
             low_sum += float(low_bc_loss.detach().cpu())
+            anchor_sum += float(low_anchor_loss.detach().cpu())
             sensitivity_sum += float(sensitivity_loss.detach().cpu())
             frame_dropout_aux_sum += float(frame_dropout_aux_loss.detach().cpu())
         high_model.eval()
@@ -2553,6 +2576,7 @@ def train_learned_interface_hierarchy(
                 "epoch": epoch,
                 "high_train_mse": high_sum / batches_per_epoch,
                 "low_train_mse": low_sum / batches_per_epoch,
+                "low_anchor_loss": anchor_sum / batches_per_epoch,
                 "low_goal_sensitivity_loss": sensitivity_sum / batches_per_epoch,
                 "low_frame_dropout_aux_loss": frame_dropout_aux_sum
                 / batches_per_epoch,
@@ -2584,6 +2608,7 @@ def train_learned_interface_hierarchy(
         "freeze_low_policy": freeze_low_policy,
         "high_goal_mse_weight": high_goal_mse_weight,
         "high_action_loss_weight": high_action_loss_weight,
+        "low_anchor_loss_weight": low_anchor_loss_weight,
         "goal_residual_scale": goal_residual_scale,
         "low_frame_dropout_prob": low_frame_dropout_prob,
         "low_frame_dropout_keep_tail_dim": low_frame_dropout_keep_tail_dim,
