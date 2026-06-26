@@ -728,6 +728,28 @@ This closes the hand-coded gate branch for this checkpoint. The next useful work
 should alter the training target or train a selector/policy directly in the
 closed-loop distribution.
 
+I then added an offline `rl-rerun fit-closed-loop-selector` audit. It fits a
+ridge linear selector from matched closed-loop frozen/residual outcome labels and
+validates on a separate matched bank. With only initial, deployable-at-episode
+features (`initial action delta`, `initial policy saturation`, `initial goal
+L2`), the selector was weak:
+
+| selector features | train seed | validation seed | frozen | residual | selector | discordant AUC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| initial only | 4600000 | 4700000 | 0.290 | 0.290 | 0.310 | 0.537 |
+
+The non-deployable episode-summary upper bound on the same banks was much
+stronger:
+
+| selector features | train seed | validation seed | frozen | residual | selector | discordant AUC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| full episode summary | 4600000 | 4700000 | 0.290 | 0.290 | 0.390 | 0.909 |
+
+This sharpens the diagnosis: outcome information exists in the rollout
+trajectory, but not enough in first-decision features. A useful selector likely
+needs online recurrent/step-level context or must be trained as part of the
+closed-loop policy, not as an episode-start switch.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -760,9 +782,12 @@ The next useful directions are:
    saturation, local progress, and compact pre-decision state/goal features.
    Initial episode features and scalar current-distance gating are both weak,
    and the exact-serial multifeature segment selector improved held-out local
-   raw reduction offline but failed online. Further gate work should train
-   directly against closed-loop episode outcomes or use a richer policy/context
-   model; offline local segment deltas are not enough.
+   raw reduction offline but failed online. A closed-loop outcome selector using
+   only initial deployable features also barely validated, while a non-deployable
+   full-episode summary selector was strong. Further gate work should therefore
+   use online step/recurrent context or train a selector/policy directly in the
+   closed-loop distribution; offline local segment deltas and initial switches
+   are not enough.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not

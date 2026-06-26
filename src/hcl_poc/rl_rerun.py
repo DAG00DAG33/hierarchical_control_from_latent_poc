@@ -30,6 +30,20 @@ def _to_numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
+def _binary_auc(scores: np.ndarray, labels: np.ndarray) -> float | None:
+    labels_bool = labels.astype(bool)
+    positives = scores[labels_bool]
+    negatives = scores[~labels_bool]
+    if len(positives) == 0 or len(negatives) == 0:
+        return None
+    return float(
+        (
+            (positives[:, None] > negatives[None, :]).mean()
+            + 0.5 * (positives[:, None] == negatives[None, :]).mean()
+        )
+    )
+
+
 def _scalar(value: Any) -> float:
     return float(_to_numpy(value).reshape(-1)[0])
 
@@ -1131,7 +1145,7 @@ def collect_rl_rerun_vector_dataset(
     disturbed: bool = False,
     force: bool = False,
 ) -> Path:
-    from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
+    from hcl_poc.incremental import _phase4_dino_from_config
     from hcl_poc.incremental import _pre_rl_phase_d_schedule, PRE_RL_PHASE_D_PERTURBATIONS
 
     if num_envs <= 0 or batches <= 0 or max_steps <= 10:
@@ -1658,7 +1672,6 @@ def train_rl_rerun_low_flow_base(
     from hcl_poc.learned_interface import (
         _HeldGoalDataset,
         _load_phase6_train_episodes,
-        _low_condition_array,
         prepare_learned_interface_episodes,
     )
     from hcl_poc.low_level_rl import _load_frozen
@@ -2066,7 +2079,7 @@ def train_rl_rerun_local_r1(
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
-    from hcl_poc.low_level_rl import DirectLowActorCritic, ResidualActorCritic, _load_frozen
+    from hcl_poc.low_level_rl import ResidualActorCritic, _load_frozen
     from hcl_poc.utils import set_seed
 
     path = dataset_path or _vector_dataset_path(config)
@@ -3689,6 +3702,169 @@ def evaluate_rl_rerun_learned_goal_validity(
     return out_path
 
 
+DEFAULT_CLOSED_LOOP_SELECTOR_FEATURES = [
+    "episode_action_delta_l2_initial",
+    "episode_policy_saturation_initial",
+    "episode_goal_l2_initial",
+]
+
+
+def _closed_loop_selector_arrays(
+    payload: dict[str, Any],
+    feature_names: list[str],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if payload.get("stage") != "closed_loop_residual_paired":
+        raise ValueError("Expected a closed_loop_residual_paired JSON payload")
+    if "frozen" not in payload or "residual" not in payload:
+        raise ValueError("Closed-loop payload must contain frozen and residual results")
+    frozen_success = np.asarray(payload["frozen"]["episode_success"], dtype=np.float32)
+    residual_success = np.asarray(payload["residual"]["episode_success"], dtype=np.float32)
+    if len(frozen_success) != len(residual_success):
+        raise ValueError("Frozen and residual episode_success arrays have different lengths")
+    feature_columns: list[np.ndarray] = []
+    for name in feature_names:
+        if name not in payload["residual"]:
+            raise ValueError(f"Residual result is missing selector feature: {name}")
+        values = np.asarray(payload["residual"][name], dtype=np.float32)
+        if len(values) != len(residual_success):
+            raise ValueError(f"Selector feature has wrong length: {name}")
+        values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+        feature_columns.append(values)
+    return np.stack(feature_columns, axis=1), frozen_success, residual_success
+
+
+def _closed_loop_selector_metrics(
+    *,
+    features: np.ndarray,
+    frozen_success: np.ndarray,
+    residual_success: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    weights: np.ndarray,
+    bias: float,
+) -> dict[str, Any]:
+    normalized = (features - mean) / std
+    scores = normalized @ weights + bias
+    choose_residual = scores >= 0.0
+    selected_success = np.where(choose_residual, residual_success, frozen_success)
+    delta = residual_success - frozen_success
+    discordant = delta != 0.0
+    labels = (delta > 0.0).astype(np.float32)
+    accuracy = (
+        float((choose_residual[discordant] == labels[discordant].astype(bool)).mean())
+        if np.any(discordant)
+        else None
+    )
+    return {
+        "episodes": int(len(frozen_success)),
+        "frozen_success": float(frozen_success.mean()),
+        "residual_success": float(residual_success.mean()),
+        "selector_success": float(selected_success.mean()),
+        "selector_vs_frozen_delta": float(selected_success.mean() - frozen_success.mean()),
+        "selector_vs_residual_delta": float(
+            selected_success.mean() - residual_success.mean()
+        ),
+        "selector_uses_residual_rate": float(choose_residual.mean()),
+        "discordant_episodes": int(discordant.sum()),
+        "residual_improvements": int((delta > 0.0).sum()),
+        "residual_regressions": int((delta < 0.0).sum()),
+        "selector_discordant_accuracy": accuracy,
+        "selector_discordant_auc": _binary_auc(scores[discordant], labels[discordant])
+        if np.any(discordant)
+        else None,
+        "selector_false_residual_regressions": int(
+            (choose_residual & (delta < 0.0)).sum()
+        ),
+        "selector_missed_residual_improvements": int(
+            ((~choose_residual) & (delta > 0.0)).sum()
+        ),
+    }
+
+
+def fit_rl_rerun_closed_loop_selector(
+    train_json_path: Path,
+    output_path: Path,
+    validation_json_path: Path | None = None,
+    feature_names: list[str] | None = None,
+    ridge: float = 1.0,
+    force: bool = False,
+) -> Path:
+    if output_path.exists() and not force:
+        return output_path
+    if ridge < 0.0:
+        raise ValueError("ridge must be non-negative")
+    feature_names = feature_names or DEFAULT_CLOSED_LOOP_SELECTOR_FEATURES
+    train_payload = json.loads(train_json_path.read_text())
+    train_x, train_frozen_success, train_residual_success = _closed_loop_selector_arrays(
+        train_payload,
+        feature_names,
+    )
+    train_delta = train_residual_success - train_frozen_success
+    train_mask = train_delta != 0.0
+    if int(train_mask.sum()) < 2:
+        raise ValueError("Need at least two discordant training episodes")
+    train_x_discordant = train_x[train_mask]
+    mean = train_x_discordant.mean(axis=0)
+    std = train_x_discordant.std(axis=0)
+    std = np.where(std > 1e-6, std, 1.0)
+    train_z = (train_x_discordant - mean) / std
+    design = np.concatenate(
+        [train_z, np.ones((len(train_z), 1), dtype=np.float32)],
+        axis=1,
+    )
+    labels = np.where(train_delta[train_mask] > 0.0, 1.0, -1.0).astype(np.float32)
+    penalty = np.eye(design.shape[1], dtype=np.float32) * ridge
+    penalty[-1, -1] = 0.0
+    solution = np.linalg.solve(design.T @ design + penalty, design.T @ labels)
+    weights = solution[:-1].astype(np.float32)
+    bias = float(solution[-1])
+    payload: dict[str, Any] = {
+        "stage": "closed_loop_outcome_selector_fit",
+        "train_json": str(train_json_path),
+        "validation_json": str(validation_json_path) if validation_json_path else None,
+        "feature_names": feature_names,
+        "ridge": ridge,
+        "feature_mean": mean.astype(float).tolist(),
+        "feature_std": std.astype(float).tolist(),
+        "weights": weights.astype(float).tolist(),
+        "bias": bias,
+        "threshold": 0.0,
+        "selector_note": (
+            "Offline selector audit: scores are fit from discordant closed-loop "
+            "episodes using residual-branch features. A positive "
+            "validation result is a prerequisite for direct online selector work, "
+            "not proof of deployable improvement by itself."
+        ),
+        "train": _closed_loop_selector_metrics(
+            features=train_x,
+            frozen_success=train_frozen_success,
+            residual_success=train_residual_success,
+            mean=mean,
+            std=std,
+            weights=weights,
+            bias=bias,
+        ),
+    }
+    if validation_json_path is not None:
+        validation_payload = json.loads(validation_json_path.read_text())
+        val_x, val_frozen_success, val_residual_success = _closed_loop_selector_arrays(
+            validation_payload,
+            feature_names,
+        )
+        payload["validation"] = _closed_loop_selector_metrics(
+            features=val_x,
+            frozen_success=val_frozen_success,
+            residual_success=val_residual_success,
+            mean=mean,
+            std=std,
+            weights=weights,
+            bias=bias,
+        )
+    ensure_dir(output_path.parent)
+    write_json(output_path, payload)
+    return output_path
+
+
 @torch.inference_mode()
 def evaluate_rl_rerun_closed_loop_r1(
     config: Config,
@@ -3798,8 +3974,10 @@ def evaluate_rl_rerun_closed_loop_r1(
         final_rewards: list[float] = []
         max_rewards: list[float] = []
         residual_norms: list[float] = []
+        episode_action_delta_l2_initial: list[float] = []
         episode_action_delta_l2_mean: list[float] = []
         episode_action_delta_l2_max: list[float] = []
+        episode_policy_saturation_initial: list[float] = []
         episode_policy_saturation_rate: list[float] = []
         episode_action_delta_gate_rate: list[float] = []
         episode_goal_l2_gate_rate: list[float] = []
@@ -3887,7 +4065,11 @@ def evaluate_rl_rerun_closed_loop_r1(
             batch_final = np.zeros(batch_envs, dtype=np.float32)
             batch_max = np.full(batch_envs, -np.inf, dtype=np.float32)
             current_action_delta_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_action_delta_initial = np.full(batch_envs, np.nan, dtype=np.float32)
             current_action_delta_max = np.zeros(batch_envs, dtype=np.float32)
+            current_policy_saturation_initial = np.full(
+                batch_envs, np.nan, dtype=np.float32
+            )
             current_policy_saturation_sum = np.zeros(batch_envs, dtype=np.float32)
             current_action_delta_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_gate_sum = np.zeros(batch_envs, dtype=np.float32)
@@ -4168,9 +4350,21 @@ def evaluate_rl_rerun_closed_loop_r1(
                             goal_l2_gated_actions += int(goal_l2_gate_to_base_np.sum())
                             current_goal_l2_gate_sum[goal_l2_gate_to_base_np] += 1.0
                     current_action_delta_sum[active] += action_delta_np[active]
+                    missing_action_delta_initial = active & np.isnan(
+                        current_action_delta_initial
+                    )
+                    current_action_delta_initial[missing_action_delta_initial] = (
+                        action_delta_np[missing_action_delta_initial]
+                    )
                     current_action_delta_max[active] = np.maximum(
                         current_action_delta_max[active],
                         action_delta_np[active],
+                    )
+                    missing_saturation_initial = active & np.isnan(
+                        current_policy_saturation_initial
+                    )
+                    current_policy_saturation_initial[missing_saturation_initial] = (
+                        policy_saturation_np[missing_saturation_initial]
                     )
                     current_policy_saturation_sum[active] += policy_saturation_np[active]
                     current_action_count[active] += 1.0
@@ -4268,8 +4462,14 @@ def evaluate_rl_rerun_closed_loop_r1(
             episode_action_delta_l2_mean.extend(
                 (current_action_delta_sum / action_denominator).astype(float).tolist()
             )
+            episode_action_delta_l2_initial.extend(
+                current_action_delta_initial.astype(float).tolist()
+            )
             episode_action_delta_l2_max.extend(
                 current_action_delta_max.astype(float).tolist()
+            )
+            episode_policy_saturation_initial.extend(
+                current_policy_saturation_initial.astype(float).tolist()
             )
             episode_policy_saturation_rate.extend(
                 (current_policy_saturation_sum / action_denominator)
@@ -4334,7 +4534,9 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_final_reward": final_rewards,
             "episode_max_reward": max_rewards,
             "episode_action_delta_l2_mean": episode_action_delta_l2_mean,
+            "episode_action_delta_l2_initial": episode_action_delta_l2_initial,
             "episode_action_delta_l2_max": episode_action_delta_l2_max,
+            "episode_policy_saturation_initial": episode_policy_saturation_initial,
             "episode_policy_saturation_rate": episode_policy_saturation_rate,
             "episode_action_delta_gate_rate": episode_action_delta_gate_rate,
             "episode_goal_l2_gate_rate": episode_goal_l2_gate_rate,

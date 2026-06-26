@@ -11653,3 +11653,106 @@ problem is not just an off-manifold high-level output that can be repaired with
 nearest-neighbor snapping; future work should either improve the high-level
 model/objective directly or train/evaluate low-level adaptation in the actual
 closed-loop learned-goal distribution.
+
+## 2026-06-26 - Closed-loop outcome selector audit
+
+I added `rl-rerun fit-closed-loop-selector`, an offline audit for selector
+learnability from matched closed-loop frozen/residual JSONs. It fits a
+ridge-regularized linear score on discordant episodes and evaluates the implied
+per-episode frozen/residual choice on train and validation banks.
+
+The default feature set is intentionally limited to initial features that an
+episode-start selector could know:
+
+```text
+episode_action_delta_l2_initial
+episode_policy_saturation_initial
+episode_goal_l2_initial
+```
+
+To support that, I also added initial action-delta and initial saturation fields
+to `eval-closed-loop-r{1,2,3}` result JSONs.
+
+Fresh paired evals with the new fields:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4600000 \
+  --num-envs 64 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4600000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4700000 \
+  --num-envs 64 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4700000.json
+```
+
+Initial-feature selector fit:
+
+```bash
+uv run hcl-poc rl-rerun fit-closed-loop-selector \
+  --train-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4600000.json \
+  --validation-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4700000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initial_selector_fit_train460_valid470.json \
+  --force
+```
+
+Result:
+
+| split | frozen | residual | selector | uses residual | discordant | AUC | accuracy |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| train 4600000 | 0.260 | 0.290 | 0.300 | 0.700 | 23 | 0.631 | 0.609 |
+| validation 4700000 | 0.290 | 0.290 | 0.310 | 0.700 | 22 | 0.537 | 0.591 |
+
+Validation details: 9 false residual regressions and 0 missed residual
+improvements. This is only a weak positive offline result and does not justify a
+larger direct deployment run by itself.
+
+I also fit a deliberately non-deployable full-episode-summary selector on the
+same fresh banks:
+
+```bash
+uv run hcl-poc rl-rerun fit-closed-loop-selector \
+  --train-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4600000.json \
+  --validation-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4700000.json \
+  --feature-names episode_action_delta_l2_mean episode_action_delta_l2_max episode_policy_saturation_rate episode_goal_l2_initial episode_goal_l2_mean episode_high_level_decisions \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_summary_selector_fit_train460_valid470.json \
+  --force
+```
+
+Validation result:
+
+| selector | frozen | residual | selector | uses residual | discordant AUC | accuracy |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| full episode summary | 0.290 | 0.290 | 0.390 | 0.260 | 0.909 | 0.955 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initialfeatures_100_seed4700000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initial_selector_fit_train460_valid470.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_summary_selector_fit_train460_valid470.json`
+
+Interpretation:
+
+The contrast is the result. Initial deployable features barely predict which
+branch wins, while full trajectory summary features predict discordant outcomes
+well. So a one-shot episode-start selector is probably too weak for this
+checkpoint. If selector work continues, it should use online step-level or
+recurrent context, or train the selector/policy directly inside the closed-loop
+distribution. Otherwise, the more promising path remains changing the training
+target so the tuned policy creates a larger and more consistently useful effect.
