@@ -643,6 +643,15 @@ an upper bound that uses future outcome information, but it says selector work i
 not impossible; it must be trained/evaluated on closed-loop task outcomes rather
 than local segment reachability.
 
+I then fit the existing three-feature initial selector on exact paired serial
+success labels with both train/validation window orders. Under learned goals the
+selector was not robust: validation success was `0.740` versus `0.770` frozen in
+one direction, and `0.690` versus `0.670` frozen in the reverse direction, for a
+two-split average of `0.715` versus `0.720` frozen. Under oracle goals it was
+consistently mildly positive (`0.710` vs `0.680`, and `0.690` vs `0.660`), but
+oracle-goal selection is not the target deployment setting. This rejects the
+current initial-feature selector for learned-goal deployment.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

@@ -18064,3 +18064,74 @@ goal success by `+0.125` over frozen. This does not rescue the checkpoint as a
 policy because the selector uses full-episode future information, but it keeps
 the selector direction alive. The selector target needs to be closed-loop
 task-outcome labels, not local segment reachability or terminal `D_phi`.
+
+## 2026-06-26 - Initial selector cross-split audit for high-action paired R3
+
+### Hypothesis
+
+The hindsight upper bound shows branch complementarity, but a deployable selector
+needs to predict useful branch choices from pre-decision features. The existing
+`low-level-rl fit-serial-selector` command fits a three-feature initial selector
+from exact paired serial success labels. If this simple selector transfers across
+seed windows, it is worth validating online; if it does not, selector work needs
+richer closed-loop context.
+
+### Commands
+
+```bash
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml \
+  fit-serial-selector \
+  --base-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json \
+  --candidate-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3500000/serial_eval_100_seed3500000.json \
+  --validation-base-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3600000/serial_eval_100_seed3600000.json \
+  --validation-candidate-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3600000/serial_eval_100_seed3600000.json \
+  --output results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_initial_selector_learned_train3500000_valid3600000.json \
+  --force
+
+uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml \
+  fit-serial-selector \
+  --base-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3600000/serial_eval_100_seed3600000.json \
+  --candidate-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3600000/serial_eval_100_seed3600000.json \
+  --validation-base-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json \
+  --validation-candidate-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3500000/serial_eval_100_seed3500000.json \
+  --output results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_initial_selector_learned_train3600000_valid3500000.json \
+  --force
+```
+
+I repeated the same cross-split fit with the oracle-goal JSONs from the previous
+diagnostic.
+
+### Results
+
+Selector features:
+
+```text
+episode_initial_selected_distance
+episode_initial_raw_distance
+episode_initial_base_action_l2
+```
+
+| goal source | train window | validation window | train frozen | train R3 | train selector | validation frozen | validation R3 | validation selector | validation use R3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| learned | 3500000 | 3600000 | 0.670 | 0.640 | 0.700 | 0.770 | 0.680 | 0.740 | 0.690 |
+| learned | 3600000 | 3500000 | 0.770 | 0.680 | 0.780 | 0.670 | 0.640 | 0.690 | 0.240 |
+| oracle | 3500000 | 3600000 | 0.660 | 0.650 | 0.710 | 0.680 | 0.700 | 0.710 | 0.480 |
+| oracle | 3600000 | 3500000 | 0.680 | 0.700 | 0.720 | 0.660 | 0.650 | 0.690 | 0.540 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_initial_selector_learned_train3500000_valid3600000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_initial_selector_learned_train3600000_valid3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_initial_selector_oracle_train3500000_valid3600000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_initial_selector_oracle_train3600000_valid3500000.json`
+
+### Interpretation
+
+Reject this simple initial selector for learned-goal deployment. It overfits in
+both directions and has a two-split validation average of `0.715`, slightly
+below the frozen learned-goal average of `0.720`. The oracle-goal selector is
+consistently mildly positive, but oracle goals are not the deployment setting
+and the oracle-goal frozen baseline is itself worse than learned-goal frozen on
+these windows. The selector direction still needs richer online context or
+direct closed-loop intervention training; the existing three initial features
+are not enough.
