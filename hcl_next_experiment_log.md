@@ -13319,3 +13319,133 @@ goal-use gate is not enough. `vae512_b1e6_film` reacts strongly to goals and R3
 improves it, but the base policy is far below `effect32_film`. `ae256_film`
 passes the gate and has a better oracle ceiling, but R3 is slightly negative
 against its frozen branch. No existing candidate satisfies both requirements.
+
+## 2026-06-26: Effect32 FiLM goal-sensitivity regularizer
+
+### Hypothesis
+
+The aggregate gate showed that effect32 has the best deployment quality but weak
+offline goal use. This run tests the simplest architecture/objective fix: keep
+the effect32 representation and high level, but add a low-level supervised
+regularizer that penalizes shuffled-goal predictions that stay too close to the
+correct-goal prediction.
+
+### Code Change
+
+`train_learned_interface_hierarchy` now supports candidate-level policy
+overrides:
+
+```text
+policy_batch_size
+policy_batches_per_epoch
+policy_epochs
+policy_lr
+goal_sensitivity_weight
+goal_sensitivity_margin
+```
+
+If `goal_sensitivity_weight > 0`, the low-level loss is:
+
+```text
+BC_MSE + weight * mean(relu(margin - ||pi(x_goal_shuffled) - stopgrad(pi(x))||_2)^2)
+```
+
+The regularizer is opt-in and does not affect existing candidates.
+
+Candidate:
+
+```yaml
+effect32_film_gsens:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  goal_sensitivity_weight: 0.05
+  goal_sensitivity_margin: 0.2
+  policy_epochs: 40
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_gsens \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens/diagnostics.json
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens \
+  --seed 0 \
+  --episodes 200 \
+  --goal-source learned \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens \
+  --seed 0 \
+  --episodes 200 \
+  --goal-source oracle \
+  --eval-seed-start 3500000 \
+  --force
+```
+
+### Training Metrics
+
+Best hierarchy epoch was `37`. Validation action errors stayed close to the
+baseline:
+
+```text
+oracle_action_mae: 0.0408
+predicted_action_mae: 0.0413
+prediction_induced_action_l2: 0.0169
+```
+
+### Goal Diagnostics
+
+| candidate | goal shuffle L2 | frame shuffle L2 | goal/frame | max horizon sensitivity L2 | goal MAE gap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 0.0622 | 0.9503 | 0.0655 | 0.0368 | 0.0102 |
+| effect32_film_gsens | 0.1149 | 0.9406 | 0.1221 | 0.0476 | 0.0279 |
+
+The aggregate gate now counts 3 passes out of 12 diagnostics; the new candidate
+is one of the passes.
+
+### Closed-Loop Evaluation
+
+Matched 200-episode window at `seed_start=3500000`:
+
+| candidate | learned success | learned max reward | oracle success | oracle max reward |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.645 | 0.742 | 0.645 | 0.746 |
+| effect32_film_gsens | 0.500 | 0.647 | 0.515 | 0.661 |
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens/seed0/hierarchy.pt`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens/diagnostics.json`
+- `results/incremental/learned_interface/effect32_film_gsens/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+
+### Interpretation
+
+The regularizer proves that the offline gate can be moved directly: goal-shuffle
+action change nearly doubled and crossed the `0.1` pass threshold. But the
+closed-loop hierarchy regressed badly. This rejects the naive "increase
+goal-sensitivity by margin loss" fix. Future attempts should not optimize goal
+sensitivity in isolation; they need a preservation constraint or a
+closed-loop/deployment-aligned objective.

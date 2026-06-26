@@ -1830,6 +1830,14 @@ def _low_condition_array(
     ).astype(np.float32)
 
 
+def _low_goal_feature_slice(frame_dim: int, goal_dim: int, conditioning: str) -> slice:
+    if conditioning in {"concat", "delta", "film"}:
+        return slice(frame_dim, frame_dim + goal_dim)
+    if conditioning == "relation":
+        return slice(frame_dim, frame_dim + 2 * goal_dim)
+    raise ValueError(f"Unknown goal conditioning: {conditioning}")
+
+
 class _GoalConditionedLowPolicy(nn.Module):
     def __init__(
         self,
@@ -2074,14 +2082,26 @@ def train_learned_interface_hierarchy(
     action_norm = Standardizer.fit(
         np.concatenate([episode["actions"] for episode in train], axis=0)
     )
-    conditioning = str(
-        learned_interface_candidate_spec(config, candidate)["conditioning"]
+    spec = learned_interface_candidate_spec(config, candidate)
+    conditioning = str(spec["conditioning"])
+    batch_size = int(
+        spec.get(
+            "policy_batch_size",
+            config.get("learned_interface.policy.batch_size", 512),
+        )
     )
-    batch_size = int(config.get("learned_interface.policy.batch_size", 512))
     batches_per_epoch = int(
-        config.get("learned_interface.policy.batches_per_epoch", 200)
+        spec.get(
+            "policy_batches_per_epoch",
+            config.get("learned_interface.policy.batches_per_epoch", 200),
+        )
     )
-    epochs = int(config.get("learned_interface.policy.epochs", 60))
+    epochs = int(
+        spec.get(
+            "policy_epochs",
+            config.get("learned_interface.policy.epochs", 60),
+        )
+    )
     high_dataset = _HeldGoalDataset(
         train,
         frame_norm,
@@ -2121,11 +2141,7 @@ def train_learned_interface_hierarchy(
     hidden_dim = int(config.get("learned_interface.policy.hidden_dim", 512))
     device = default_device()
     high_model = MLP(frame_dim + 3, goal_dim, hidden_dim, depth=4).to(device)
-    high_level_candidate = str(
-        learned_interface_candidate_spec(config, candidate)[
-            "high_level_candidate"
-        ]
-    )
+    high_level_candidate = str(spec["high_level_candidate"])
     reused_high_level = high_level_candidate != candidate
     if reused_high_level:
         source_path = train_learned_interface_hierarchy(
@@ -2146,7 +2162,16 @@ def train_learned_interface_hierarchy(
     low_model = _GoalConditionedLowPolicy(
         frame_dim, goal_dim, hidden_dim, conditioning
     ).to(device)
-    learning_rate = float(config.get("learned_interface.policy.lr", 3e-4))
+    learning_rate = float(
+        spec.get("policy_lr", config.get("learned_interface.policy.lr", 3e-4))
+    )
+    goal_sensitivity_weight = float(spec.get("goal_sensitivity_weight", 0.0))
+    goal_sensitivity_margin = float(spec.get("goal_sensitivity_margin", 0.0))
+    if goal_sensitivity_weight < 0.0:
+        raise ValueError("goal_sensitivity_weight must be non-negative")
+    if goal_sensitivity_margin < 0.0:
+        raise ValueError("goal_sensitivity_margin must be non-negative")
+    goal_slice = _low_goal_feature_slice(frame_dim, goal_dim, conditioning)
     high_optimizer = (
         None
         if reused_high_level
@@ -2170,6 +2195,7 @@ def train_learned_interface_hierarchy(
         low_model.train()
         high_sum = 0.0
         low_sum = 0.0
+        sensitivity_sum = 0.0
         for (high_x, high_y), (low_x, low_y) in zip(
             high_loader, low_loader, strict=True
         ):
@@ -2184,11 +2210,28 @@ def train_learned_interface_hierarchy(
 
             low_x = low_x.to(device, non_blocking=True)
             low_y = low_y.to(device, non_blocking=True)
-            low_loss = torch.mean((low_model(low_x) - low_y) ** 2)
+            low_prediction = low_model(low_x)
+            low_bc_loss = torch.mean((low_prediction - low_y) ** 2)
+            sensitivity_loss = low_bc_loss.new_tensor(0.0)
+            low_loss = low_bc_loss
+            if goal_sensitivity_weight > 0.0 and len(low_x) > 1:
+                shuffled_x = low_x.clone()
+                order = torch.randperm(len(shuffled_x), device=shuffled_x.device)
+                shuffled_x[:, goal_slice] = shuffled_x[order, goal_slice]
+                shuffled_prediction = low_model(shuffled_x)
+                action_delta = torch.linalg.norm(
+                    shuffled_prediction - low_prediction.detach(),
+                    dim=-1,
+                )
+                sensitivity_loss = torch.mean(
+                    torch.relu(goal_sensitivity_margin - action_delta) ** 2
+                )
+                low_loss = low_loss + goal_sensitivity_weight * sensitivity_loss
             low_optimizer.zero_grad(set_to_none=True)
             low_loss.backward()
             low_optimizer.step()
-            low_sum += float(low_loss.detach().cpu())
+            low_sum += float(low_bc_loss.detach().cpu())
+            sensitivity_sum += float(sensitivity_loss.detach().cpu())
         high_model.eval()
         low_model.eval()
         metrics = _hierarchy_validation_metrics(
@@ -2208,6 +2251,7 @@ def train_learned_interface_hierarchy(
                 "epoch": epoch,
                 "high_train_mse": high_sum / batches_per_epoch,
                 "low_train_mse": low_sum / batches_per_epoch,
+                "low_goal_sensitivity_loss": sensitivity_sum / batches_per_epoch,
                 **metrics,
             }
         )
@@ -2231,6 +2275,8 @@ def train_learned_interface_hierarchy(
         "hidden_dim": hidden_dim,
         "conditioning": conditioning,
         "high_level_candidate": high_level_candidate,
+        "goal_sensitivity_weight": goal_sensitivity_weight,
+        "goal_sensitivity_margin": goal_sensitivity_margin,
         "high_model": best_state["high_model"],
         "low_model": best_state["low_model"],
         "frame_norm": frame_norm.state_dict(),

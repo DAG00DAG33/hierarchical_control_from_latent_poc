@@ -259,6 +259,23 @@ The promising region is therefore not occupied by any current candidate. We need
 a representation/architecture that keeps the AE/VAE-style goal sensitivity while
 preserving effect32-level closed-loop imitation quality.
 
+I then added a direct low-level goal-sensitivity regularizer as an opt-in
+learned-interface policy loss and trained `effect32_film_gsens`, which reuses
+the effect32 representation and high level but penalizes shuffled-goal actions
+that remain too close to the correct-goal action. This successfully moved the
+offline gate but hurt deployment:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.062 | 0.0368 | 0.645 | 0.645 |
+| effect32_film_gsens | 0.115 | 0.0476 | 0.500 | 0.515 |
+
+So the missing ingredient is not merely "make actions change when the goal is
+shuffled." A naive sensitivity margin creates goal dependence but damages the
+closed-loop controller. The next representation/architecture attempt should
+preserve imitation quality more explicitly, not optimize goal sensitivity as an
+isolated objective.
+
 I added candidate-level `horizon_steps` / `update_period` overrides for learned
 interfaces and trained short-horizon aliases of the effect32 FiLM interface:
 
@@ -1247,6 +1264,10 @@ results/incremental/learned_interface/effect32_film_h2/seed0/learned_hierarchy_e
 results/incremental/goal_diagnostics/n500/seed0/effect32_film_h2/diagnostics.json
 results/incremental/goal_diagnostics/gate_report.json
 results/incremental/goal_diagnostics/gate_report.md
+artifacts/incremental/learned_interface/effect32_film_gsens/seed0/hierarchy.pt
+results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens/diagnostics.json
+results/incremental/learned_interface/effect32_film_gsens/seed0/learned_hierarchy_eval_200_seed3500000.json
+results/incremental/learned_interface/effect32_film_gsens/seed0/oracle_hierarchy_eval_200_seed3500000.json
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
