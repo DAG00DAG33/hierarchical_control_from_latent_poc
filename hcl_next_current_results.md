@@ -1057,6 +1057,17 @@ slightly lower. The sparse `success` metric selected residual `0%` of the time
 on the same smoke. This suggests the currently available one-segment task
 signals are still too weak/sparse as an upper-bound selector.
 
+To make local-to-task proxy checks less indirect, I added
+`eval-local-r{1,2,3} --include-samples`, which exports per-sample local
+distances, dense rewards, success flags, and action deltas under
+`sample_metrics`. A 512-env one-entry smoke on the task-reward debug checkpoint
+validated the format and gave another weak proxy signal: local raw-distance
+improvement versus final dense-reward improvement had Pearson correlation
+`0.052`, versus max-reward improvement `0.0019`, and success deltas were nearly
+balanced (`-1: 11`, `0: 488`, `+1: 13`). This supports the current diagnosis
+that local raw reachability deltas are a poor deployment proxy for this
+checkpoint.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

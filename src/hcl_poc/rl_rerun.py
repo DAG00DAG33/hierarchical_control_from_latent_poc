@@ -1532,6 +1532,87 @@ def _summarize_float_array(values: np.ndarray) -> dict[str, float]:
     }
 
 
+def _local_sample_metrics_payload(
+    *,
+    episodes: int,
+    num_envs: int,
+    initial: np.ndarray,
+    base_final: np.ndarray,
+    final: np.ndarray,
+    base_final_env_reward: np.ndarray,
+    final_env_reward: np.ndarray,
+    base_max_env_reward: np.ndarray,
+    max_env_reward: np.ndarray,
+    base_mean_env_reward: np.ndarray,
+    mean_env_reward: np.ndarray,
+    base_success_once: np.ndarray,
+    success_once: np.ndarray,
+    sample_action_delta: np.ndarray,
+) -> dict[str, list[Any]]:
+    expected = episodes * num_envs
+    arrays = {
+        "initial": initial,
+        "base_final": base_final,
+        "final": final,
+        "base_final_env_reward": base_final_env_reward,
+        "final_env_reward": final_env_reward,
+        "base_max_env_reward": base_max_env_reward,
+        "max_env_reward": max_env_reward,
+        "base_mean_env_reward": base_mean_env_reward,
+        "mean_env_reward": mean_env_reward,
+        "base_success_once": base_success_once,
+        "success_once": success_once,
+        "sample_action_delta": sample_action_delta,
+    }
+    bad_lengths = {
+        name: int(len(values))
+        for name, values in arrays.items()
+        if len(values) != expected
+    }
+    if bad_lengths:
+        raise ValueError(
+            f"Sample metric arrays must have length {expected}, got {bad_lengths}"
+        )
+    sample_episode_index = np.repeat(
+        np.arange(episodes, dtype=np.int32),
+        num_envs,
+    )
+    sample_env_index = np.tile(np.arange(num_envs, dtype=np.int32), episodes)
+    return {
+        "episode_index": sample_episode_index.astype(int).tolist(),
+        "env_index": sample_env_index.astype(int).tolist(),
+        "initial_distance": initial.astype(float).tolist(),
+        "base_final_distance": base_final.astype(float).tolist(),
+        "final_distance": final.astype(float).tolist(),
+        "base_distance_reduction": (initial - base_final).astype(float).tolist(),
+        "distance_reduction": (initial - final).astype(float).tolist(),
+        "distance_reduction_delta_vs_base": (
+            base_final - final
+        ).astype(float).tolist(),
+        "base_final_env_reward": base_final_env_reward.astype(float).tolist(),
+        "final_env_reward": final_env_reward.astype(float).tolist(),
+        "final_env_reward_delta_vs_base": (
+            final_env_reward - base_final_env_reward
+        ).astype(float).tolist(),
+        "base_max_env_reward": base_max_env_reward.astype(float).tolist(),
+        "max_env_reward": max_env_reward.astype(float).tolist(),
+        "max_env_reward_delta_vs_base": (
+            max_env_reward - base_max_env_reward
+        ).astype(float).tolist(),
+        "base_mean_env_reward": base_mean_env_reward.astype(float).tolist(),
+        "mean_env_reward": mean_env_reward.astype(float).tolist(),
+        "mean_env_reward_delta_vs_base": (
+            mean_env_reward - base_mean_env_reward
+        ).astype(float).tolist(),
+        "base_success_once": base_success_once.astype(int).tolist(),
+        "success_once": success_once.astype(int).tolist(),
+        "success_once_delta_vs_base": (
+            success_once.astype(np.int32) - base_success_once.astype(np.int32)
+        ).astype(int).tolist(),
+        "mean_action_delta_l2": sample_action_delta.astype(float).tolist(),
+    }
+
+
 def _nearest_l2_distances(
     queries: np.ndarray,
     bank: np.ndarray,
@@ -3318,6 +3399,7 @@ def evaluate_rl_rerun_local_r1(
     episodes: int = 4,
     manifest_path: Path | None = None,
     output_path: Path | None = None,
+    include_samples: bool = False,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
@@ -3735,6 +3817,23 @@ def evaluate_rl_rerun_local_r1(
         "action_saturation_rate": float(np.mean(saturation_rates)),
         "recipe": recipe,
     }
+    if include_samples:
+        result["sample_metrics"] = _local_sample_metrics_payload(
+            episodes=episodes,
+            num_envs=num_envs,
+            initial=initial,
+            base_final=base_final,
+            final=final,
+            base_final_env_reward=base_final_env_reward,
+            final_env_reward=final_env_reward,
+            base_max_env_reward=base_max_env_reward,
+            max_env_reward=max_env_reward,
+            base_mean_env_reward=base_mean_env_reward,
+            mean_env_reward=mean_env_reward,
+            base_success_once=base_success_once_flat,
+            success_once=success_once_flat,
+            sample_action_delta=sample_action_delta,
+        )
     out_path = output_path or (
         _state_audit_result_dir(config)
         / str(recipe.get("family_dir", "local_r1"))
@@ -3757,6 +3856,7 @@ def evaluate_rl_rerun_local_r2(
     episodes: int = 4,
     manifest_path: Path | None = None,
     output_path: Path | None = None,
+    include_samples: bool = False,
 ) -> Path:
     return evaluate_rl_rerun_local_r1(
         config,
@@ -3767,6 +3867,7 @@ def evaluate_rl_rerun_local_r2(
         episodes=episodes,
         manifest_path=manifest_path,
         output_path=output_path,
+        include_samples=include_samples,
     )
 
 
@@ -3780,6 +3881,7 @@ def evaluate_rl_rerun_local_r3(
     episodes: int = 4,
     manifest_path: Path | None = None,
     output_path: Path | None = None,
+    include_samples: bool = False,
 ) -> Path:
     return evaluate_rl_rerun_local_r1(
         config,
@@ -3790,6 +3892,7 @@ def evaluate_rl_rerun_local_r3(
         episodes=episodes,
         manifest_path=manifest_path,
         output_path=output_path,
+        include_samples=include_samples,
     )
 
 

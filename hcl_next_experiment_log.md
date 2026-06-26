@@ -14355,3 +14355,101 @@ success or max reward on this small window. `success` is too sparse: it chose
 the residual branch zero times. This reinforces the previous conclusion that
 one-segment branch selection signals are not the main missing ingredient for
 this checkpoint.
+
+## 2026-06-26 - Per-sample local eval export for proxy analysis
+
+### Hypothesis
+
+The plan calls for validating reachability/local metrics against task outcomes.
+Existing local eval JSONs only saved aggregate means, making proxy analysis
+indirect. Exporting bounded per-sample local outcomes should make it possible to
+measure whether local distance improvements actually align with task reward and
+success deltas.
+
+### Implementation
+
+I added `--include-samples` to:
+
+```text
+eval-local-r1
+eval-local-r2
+eval-local-r3
+```
+
+When enabled, local eval writes a `sample_metrics` block with one row per local
+sample:
+
+```text
+initial_distance
+base_final_distance
+final_distance
+distance_reduction_delta_vs_base
+base/final/max/mean dense rewards and deltas
+base/tuned success-once flags and delta
+mean_action_delta_l2
+episode_index
+env_index
+```
+
+### Commands
+
+The first attempt used the full 4096-env validation bank and was interrupted
+after several minutes in DINO preprocessing. I then validated the same path on
+the smaller 512-env validation bank:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n512_1_seed0.json
+```
+
+### Results
+
+Aggregate smoke metrics:
+
+| metric | value |
+| --- | ---: |
+| sampled local episodes | 512 |
+| initial distance mean | 0.8632 |
+| frozen final distance mean | 0.5688 |
+| tuned final distance mean | 0.5553 |
+| raw-distance delta vs frozen | +0.0135 |
+| final dense-reward delta vs frozen | +0.0079 |
+| success-once delta vs frozen | +0.0039 |
+
+Per-sample proxy correlations:
+
+| pair | Pearson r |
+| --- | ---: |
+| raw-distance delta vs final dense-reward delta | 0.052 |
+| raw-distance delta vs max dense-reward delta | 0.0019 |
+| action-delta mean vs final dense-reward delta | 0.014 |
+| frozen final distance vs final dense-reward delta | 0.022 |
+| initial distance vs final dense-reward delta | 0.035 |
+
+Success-delta counts:
+
+```text
+-1: 11
+ 0: 488
++1: 13
+```
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n512_1_seed0.json`
+
+### Interpretation
+
+The export works and gives the missing per-sample substrate for proxy analysis.
+On this smoke, raw local distance improvement is only weakly correlated with
+task dense-reward improvement, and success deltas are almost balanced. This is
+additional evidence that local raw reachability is not a reliable deployment
+proxy for the current checkpoint. The next useful use of this infrastructure is
+to compare raw L2, `D_phi`, dense reward, and success on the same per-sample
+local bank instead of relying only on aggregate means.
