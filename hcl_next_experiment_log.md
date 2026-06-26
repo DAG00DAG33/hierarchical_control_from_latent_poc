@@ -15572,3 +15572,107 @@ future goals. None reaches the strict `0.1` gate on either block-shuffle goal
 action change or same-state horizon sensitivity. I skipped larger closed-loop
 evals because the whole purpose of this screen was to avoid scaling candidates
 that fail the low-level goal-use gate.
+
+## 2026-06-26 - Remaining archived hierarchy goal-use sweep
+
+### Hypothesis
+
+Several trained hierarchy checkpoints still had no goal-diagnostics entry. A
+complete archived sweep could reveal a hidden candidate that already has better
+low-level goal usage, avoiding a new training branch.
+
+### Code Change
+
+Older `encoded_episodes.pt` artifacts store validation goals under
+`validation[*].goals` instead of top-level `validation_goals`. I updated
+`_load_encoded_validation_goals` to support both schemas and still fail clearly
+if neither is present.
+
+### Commands
+
+```bash
+for candidate in \
+  ae256_control dae256_n005 dae512_w2048_n005 effect16 effect64 \
+  jepa256_predonly_v1_c001 jepa256_r001_v1_c001 jepa256_r1_v10_c01 \
+  vae256_b1e6 vae256_b1e7 vae512_w2048_b1e6 vae512_w2048_b1e7; do
+  TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+    --config configs/pusht_incremental.yaml \
+    goal-diagnostics \
+    --representation learned_interface \
+    --candidate "${candidate}" \
+    --n-demo 1800 \
+    --seed 0 \
+    --samples 5000 \
+    --horizons 2,5,10 \
+    --output "results/incremental/goal_diagnostics/n1800/seed0/${candidate}/diagnostics.json" \
+    --force
+done
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  aggregate-goal-diagnostics \
+  --input-glob 'results/incremental/goal_diagnostics/**/diagnostics.json' \
+  --output results/incremental/goal_diagnostics/gate_report.json \
+  --force
+```
+
+### Results
+
+No newly screened candidate passed. The aggregate report now contains:
+
+```text
+total: 31
+offline_goal_use_pass: 3
+reject_low_goal_use: 28
+```
+
+Passing rows remain unchanged:
+
+| candidate | N | conditioning | goal shuffle L2 | max horizon sensitivity L2 |
+| --- | ---: | --- | ---: | ---: |
+| effect32_film_gsens | 500 | film | 0.1149 | 0.0476 |
+| ae256_film | 1800 | film | 0.2506 | 0.0937 |
+| vae512_b1e6_film | 1800 | film | 0.2783 | 0.1266 |
+
+Best newly screened rows:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | status |
+| --- | ---: | ---: | --- |
+| dae512_w2048_n005 | 0.0799 | 0.0310 | reject low goal-use |
+| vae512_w2048_b1e7 | 0.0789 | 0.0317 | reject low goal-use |
+| ae256_control | 0.0784 | 0.0277 | reject low goal-use |
+| dae256_n005 | 0.0780 | 0.0272 | reject low goal-use |
+| vae512_w2048_b1e6 | 0.0740 | 0.0308 | reject low goal-use |
+
+Artifacts:
+
+- `results/incremental/goal_diagnostics/n1800/seed0/ae256_control/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/dae256_n005/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/dae512_w2048_n005/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/effect16/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/effect64/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/jepa256_predonly_v1_c001/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/jepa256_r001_v1_c001/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/jepa256_r1_v10_c01/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/vae256_b1e6/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/vae256_b1e7/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/vae512_w2048_b1e6/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/vae512_w2048_b1e7/diagnostics.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/goal_diagnostics.py
+```
+
+### Interpretation
+
+The archived candidate search is now mostly exhausted. No hidden VAE, DAE,
+JEPA, or effect-code checkpoint passes the low-level goal-use gate. The only
+passes are still the direct sensitivity-regularized effect32 policy, which
+damaged deployment, and the AE/VAE FiLM policies, which use the goal but remain
+weaker learned-goal bases than effect32. The next useful representation work
+needs to train for both properties explicitly; there is not an existing
+checkpoint to promote.

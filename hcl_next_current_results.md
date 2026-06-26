@@ -233,12 +233,12 @@ offline_goal_use_pass if goal_shuffle_action_change_l2 >= 0.1
 or max_goal_sensitivity_l2 >= 0.1
 ```
 
-On the current archive, three of nineteen diagnostics pass:
+On the current archive, three of thirty-one diagnostics pass:
 
 | status | candidates |
 | --- | --- |
 | offline goal-use pass | `effect32_film_gsens`, `ae256_film`, `vae512_b1e6_film` |
-| reject low goal-use | `effect32_film`, `effect32_film_gsens_light`, `effect32_film_h2`, `effect32_film_h5`, `effect32_goal_residual`, `effect64_film`, `ae256_delta`, `ae256_relation`, `dae256_n010`, `effect32`, `effect32_scene_film`, `jepa256_r01_v1_c01`, `vae256_b1e5`, `vae512_b1e6_delta`, `vae512_b1e6_relation` |
+| reject low goal-use | all other archived hierarchy candidates checked so far |
 
 This formalizes the current decision rule. Effect32 remains the best observed
 deployment base, but it fails the strict offline goal-use gate; AE/VAE FiLM
@@ -275,6 +275,22 @@ offline goal-use gate:
 So the only archived AE/VAE conditioning mode that meaningfully uses the goal is
 FiLM, and FiLM's stronger goal dependence still does not recover effect32-level
 learned-goal performance.
+
+I then completed the same 5k-sample gate for the remaining archived hierarchy
+checkpoints that had not been in the report. None passed. The best new rows were
+still below the `0.1` goal-shuffle threshold:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | status |
+| --- | ---: | ---: | --- |
+| dae512_w2048_n005 | 0.0799 | 0.0310 | reject |
+| vae512_w2048_b1e7 | 0.0789 | 0.0317 | reject |
+| ae256_control | 0.0784 | 0.0277 | reject |
+| dae256_n005 | 0.0780 | 0.0272 | reject |
+| vae512_w2048_b1e6 | 0.0740 | 0.0308 | reject |
+
+This makes the current archive search fairly complete: there is no hidden
+candidate that already combines strong low-level goal usage with effect32-level
+closed-loop quality.
 
 I then added a direct low-level goal-sensitivity regularizer as an opt-in
 learned-interface policy loss and trained `effect32_film_gsens`, which reuses

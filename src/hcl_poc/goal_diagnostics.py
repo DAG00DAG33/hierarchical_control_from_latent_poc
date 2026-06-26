@@ -193,9 +193,21 @@ def _load_encoded_validation_goals(
             point_config, candidate, seed=seed, force=False
         )
     payload = torch.load(encoded_path, map_location="cpu", weights_only=False)
-    if "validation_goals" not in payload:
-        raise ValueError(f"Missing validation_goals in {encoded_path}")
-    return [np.asarray(goals, dtype=np.float32) for goals in payload["validation_goals"]]
+    if "validation_goals" in payload:
+        return [
+            np.asarray(goals, dtype=np.float32)
+            for goals in payload["validation_goals"]
+        ]
+    if "validation" in payload:
+        validation_goals = []
+        for episode in payload["validation"]:
+            if "goals" not in episode:
+                raise ValueError(
+                    f"Missing goals in validation episode from {encoded_path}"
+                )
+            validation_goals.append(np.asarray(episode["goals"], dtype=np.float32))
+        return validation_goals
+    raise ValueError(f"Missing validation goals in {encoded_path}")
 
 
 def _load_candidate_frozen(
