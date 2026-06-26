@@ -883,6 +883,27 @@ training signal less noisy, but it still does not transfer to the matched local
 validation bank and remains below frozen (`0.6020` final distance,
 `0.4651` reduction). I skipped closed-loop deployment for this checkpoint.
 
+I then added a task-difficulty filter,
+`--max-base-terminal-env-reward`, for `task_paired` local R3. This selects starts
+where the frozen same-state segment has low terminal ManiSkill dense reward,
+which is closer to the task-paired target than latent terminal distance. With
+`max_base_terminal_env_reward=0.45`, the one-update training signal was much
+stronger:
+
+| metric | uniform | latent-hard | task-hard |
+| --- | ---: | ---: | ---: |
+| active fraction | 1.000 | 0.389 | 0.763 |
+| train task-paired improvement | 0.00150 | 0.00469 | 0.03577 |
+| train fraction task-improved | 0.398 | 0.451 | 0.522 |
+| matched local final distance | 0.6036 | 0.6093 | 0.6092 |
+| matched local reduction | 0.4635 | 0.4578 | 0.4578 |
+| matched local task success-once fraction | 0.331 | 0.329 | 0.333 |
+
+This is informative but still negative. Task-hard filtering gives a real
+in-training task-reward improvement, but the learned update does not transfer to
+the held-out local validation bank and remains worse than frozen on latent
+distance reduction. I also skipped closed-loop deployment for this checkpoint.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
@@ -963,7 +984,9 @@ The next useful directions are:
    and a terminal task-paired reward mode produced only tiny local action
    changes with a negative 8-episode deployability smoke. Hard-start masking for
    task-paired local R3 increased the training reward delta but made matched
-   local validation worse than both frozen and the uniform task-paired smoke.
+   local validation worse than both frozen and the uniform task-paired smoke. A
+   task-reward hard filter produced a much stronger training reward delta, but
+   it also failed matched local validation.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.
@@ -1042,6 +1065,9 @@ results/incremental/learned_interface/effect32_film_h2/seed0/learned_hierarchy_e
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/latest.pt
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/history.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json

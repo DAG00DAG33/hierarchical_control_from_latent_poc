@@ -12533,3 +12533,105 @@ This closes the simple "same objective but only hard local starts" variant for
 effect32 local R3. The next objective-side experiment should use a more
 deployment-aligned target than one-segment terminal dense reward, or train the
 intervention policy/selector directly from closed-loop outcomes.
+
+## 2026-06-26: Task-reward-hard task-paired local R3
+
+### Hypothesis
+
+The latent hard-start filter improved the task-paired training signal but
+worsened matched local validation. This run targets the task-paired reward more
+directly by selecting local starts where the frozen same-state terminal
+ManiSkill dense reward is low.
+
+### Implementation
+
+Added `--max-base-terminal-env-reward` to `rl-rerun train-local-r3`. It is only
+valid with `--reward-mode task_paired`. When set, active samples satisfy:
+
+```text
+base_terminal_env_reward <= max_base_terminal_env_reward
+```
+
+The active mask composes with `--min-base-terminal-distance` if both filters are
+provided, but this diagnostic used only the task-reward filter.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5 \
+  --steps 40960 \
+  --bc-weight 1 \
+  --terminal-weight 1 \
+  --dense-progress-weight 0 \
+  --task-reward-weight 0 \
+  --reward-mode task_paired \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --max-base-terminal-env-reward 0.45 \
+  --force
+```
+
+Matched local validation:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+```
+
+### Results
+
+Training metrics after one update:
+
+| metric | value |
+| --- | ---: |
+| active fraction | 0.7629 |
+| mean task-paired improvement | 0.03577 |
+| fraction task-paired improved | 0.5219 |
+| terminal env reward | 0.3527 |
+| frozen terminal env reward | 0.3169 |
+| terminal latent distance | 0.6327 |
+| action delta L2 | 0.01088 |
+| task success diagnostic rate | 0.0643 |
+
+Matched local validation on the same 4096-row validation manifest:
+
+| policy | initial distance | final distance | reduction | action delta L2 | task success-once |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 previous baseline | 1.0671 | 0.6020 | 0.4651 | - | - |
+| uniform task-paired | 1.0671 | 0.6036 | 0.4635 | 0.00042 | 0.3306 |
+| latent-hard task-paired | 1.0671 | 0.6093 | 0.4578 | 0.00054 | 0.3291 |
+| task-hard task-paired | 1.0671 | 0.6092 | 0.4578 | 0.00046 | 0.3335 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json`
+
+### Interpretation
+
+The task-reward hard filter substantially improves the in-training task-paired
+signal and almost reaches the plan's `fraction_improved > 0.55` local bar, but
+the effect does not transfer to matched local validation. The policy's action
+changes are still tiny, latent reduction is worse than frozen, and local task
+success-once barely changes. I skipped closed-loop deployment.
+
+This is stronger evidence that the one-segment terminal dense-reward target can
+be optimized on the sampled training starts without producing a useful held-out
+local controller. The next objective should stop being a filtered version of the
+same local terminal reward and move toward closed-loop outcome supervision or a
+larger policy change with an explicit preservation mechanism.
