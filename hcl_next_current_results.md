@@ -2016,6 +2016,10 @@ The next useful directions are:
    avoided paired desyncs and produced a small positive training signal, but it
    transferred worse than frozen and the earlier terminal-D_phi R3 on the
    matched `4511000..4511099` serial validation slice.
+   A candidate-specific D_phi for the high-action pairedsync branch was also a
+   no-op: it used the same `effect32` representation cache as the base
+   `effect32_film` D_phi, produced a bitwise-identical distance model, and
+   reproduced a bitwise-identical paired R3 checkpoint.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.

@@ -19357,3 +19357,108 @@ cleanly to deployment success. This keeps the general selector diagnosis
 unchanged: retrospective local or segment-start linear selectors are not enough;
 the next selector attempt needs direct closed-loop/intervention training or a
 substantially richer online policy.
+
+## 2026-06-27 - High-action candidate-specific D_phi identity check
+
+The high-action pairedsync R3 runs used the base
+`effect32_film/seed0/d_phi.pt` reachability checkpoint. Since cached
+reachability latents also existed under
+`effect32_film_gsens_ft_highact_strong`, I checked whether training a
+candidate-specific D_phi changed the reward metric.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-reachability-distance \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-reachability-distance \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --force
+```
+
+I then reran the high-action pairedsync 40k recipe with only the checkpoint path
+changed:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_candidate_dphi_2048_terminal_40k_bc10 \
+  --steps 40960 \
+  --num-envs 2048 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --reward-mode paired \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film_gsens_ft_highact_strong/seed0/d_phi.pt \
+  --force
+```
+
+### Results
+
+Reachability eval:
+
+| D_phi | temporal MSE | temporal Spearman | near/far acc | shuffled AUC | demo decrease acc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| base effect32 | 0.03267 | 0.8333 | 0.9275 | 0.9075 | 0.7396 |
+| high-action path | 0.03216 | 0.8321 | 0.9219 | 0.9083 | 0.7327 |
+
+The apparent metric difference is not a real independent checkpoint:
+
+| comparison | result |
+| --- | ---: |
+| D_phi model max tensor delta | 0.0 |
+| D_phi model mean tensor delta | 0.0 |
+| paired R3 best-agent max tensor delta vs old base-D_phi pairedsync run | 0.0 |
+| paired R3 best-agent mean tensor delta vs old base-D_phi pairedsync run | 0.0 |
+
+The cached reachability metadata explains why:
+
+```text
+base candidate:      effect32_film
+high-action path:    effect32_film_gsens_ft_highact_strong
+representation ckpt: artifacts/incremental/learned_interface/effect32/seed0/representation.pt
+encoder_type:        effect
+```
+
+Both D_phi checkpoints train from the same effect representation and identical
+encoded goal caches. The R3 training history is consequently identical to the
+old pairedsync run:
+
+| global step | mean paired improvement | fraction improved | tuned terminal D_phi | base terminal D_phi | saturation |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 20480 | 0.0907 | 0.5869 | 0.4029 | 0.4935 | 0.4062 |
+| 40960 | 0.0161 | 0.4854 | 0.5889 | 0.6049 | 0.1917 |
+
+Artifacts:
+
+- `artifacts/incremental/reachability_distance/effect32_film_gsens_ft_highact_strong/seed0/d_phi.pt`
+- `results/incremental/reachability_distance/effect32_film_gsens_ft_highact_strong/seed0/eval.json`
+- `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_candidate_dphi_2048_terminal_40k_bc10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_candidate_dphi_2048_terminal_40k_bc10/train_metrics.json`
+
+### Interpretation
+
+This closes the "metric mismatch" hypothesis for the high-action pairedsync
+branch. The candidate-specific D_phi path is just a different artifact location
+for the same learned effect-space distance. The high-action R3 failure is not
+explained by accidentally using the base `effect32_film` D_phi checkpoint; the
+next reward/representation experiment needs a genuinely different encoder or
+distance target, not another alias over the same effect representation.
