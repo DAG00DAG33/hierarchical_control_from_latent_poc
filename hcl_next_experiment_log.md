@@ -15262,3 +15262,92 @@ learned-goal closed-loop gain. The next check should change the deployment
 alignment of the reward, for example paired D_phi terminal improvement or a
 longer-horizon/closed-loop objective, rather than simply adding more identical
 updates.
+
+## 2026-06-26 - Paired D_phi terminal reward check
+
+### Hypothesis
+
+The progress-only D_phi reward improves held-out local metrics but does not
+transfer reliably to learned-goal closed-loop deployment. A paired terminal
+reward should be more deployment-aligned because it rewards improvement over the
+frozen low-level from the same local reset and goal.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name dphi_paired_n4096_1update_bc1_lr1e5_logstd5 \
+  --steps 40960 \
+  --bc-weight 1 \
+  --terminal-weight 1 \
+  --dense-progress-weight 1 \
+  --reward-mode paired \
+  --reward-distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --checkpoint-every-updates 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-local-sample-proxies \
+  --local-json results/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml compare-local-proxy-audits \
+  --audit-json \
+    results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+    results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+    results/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --name dphi_progress_1update dphi_progress_3update dphi_paired_1update \
+  --output results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_dphi_progress_vs_paired.json \
+  --force
+```
+
+### Results
+
+Training final row:
+
+| reward | mean reward | mean D_phi distance | terminal D_phi distance | base terminal D_phi distance | paired D_phi improvement | fraction paired improved | action delta | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| paired D_phi | +0.0063 | 0.8402 | 0.8024 | 0.7987 | -0.0037 | 0.488 | 0.0108 | 0.0075 |
+
+Full-bank local proxy comparison:
+
+| checkpoint | final reward delta | max reward delta | success delta | raw delta | D_phi delta | raw success AUC | D_phi success AUC | positive task gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| D_phi progress 1 update | +0.0026 | +0.0005 | +0.0007 | +0.0002 | +0.0035 | 0.549 | 0.500 | true |
+| D_phi progress 3 updates | +0.0024 | +0.0009 | +0.0012 | +0.0026 | +0.0025 | 0.545 | 0.497 | true |
+| paired D_phi 1 update | -0.0008 | +0.0012 | +0.0017 | -0.0011 | -0.0063 | 0.555 | 0.504 | false |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json`
+- `results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_dphi_progress_vs_paired.json`
+
+### Interpretation
+
+The paired D_phi terminal reward is runnable, but this one-update checkpoint
+does not pass the local promotion gate. Training already showed negative paired
+D_phi improvement against the cached frozen terminal distance, and the held-out
+full-bank audit regressed final dense reward and D_phi reduction. I did not run
+closed-loop validation. This weakens the idea that simply changing the terminal
+reward from absolute D_phi to paired D_phi is enough; the next reward experiment
+should likely change horizon/deployment alignment more substantially rather than
+rerun the same one-segment local objective.

@@ -1147,6 +1147,12 @@ residual norm, but still failed the 500-episode learned-goal promotion check:
 success stayed at `0.302` versus frozen `0.306`, with max reward delta
 `-0.0032`. More D_phi updates improve local metrics but still do not create a
 robust deployment improvement.
+I then tested paired D_phi terminal improvement (`reward_mode=paired` with
+`reward_distance_metric=reachability`). It failed the full-bank local promotion
+gate: final reward delta `-0.0008` and D_phi delta `-0.0063`, even though max
+reward and success deltas were slightly positive. The training paired D_phi
+improvement was also negative (`-0.0037`, `48.8%` improved), so this checkpoint
+was not promoted to closed-loop validation.
 
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
