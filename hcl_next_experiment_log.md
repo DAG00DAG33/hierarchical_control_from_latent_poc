@@ -12723,3 +12723,112 @@ This weakens the "BC anchor is the main blocker" explanation for the task-hard
 one-segment objective. The target can be optimized on sampled starts, and lower
 BC can alter the update a little, but the held-out local behavior is still not a
 promotion candidate.
+
+## 2026-06-26: Targeted subset validation for task-hard local R3
+
+### Hypothesis
+
+The aggregate validation for task-hard local R3 is weak, but the training target
+is explicitly conditional: starts where the frozen same-state segment has low
+terminal task reward. This check asks whether the update at least helps that
+same target subset on held-out validation.
+
+### Implementation
+
+Extended `eval-local-r3` so it first runs the frozen low-level branch from the
+same held-out local start, then resets/replays the same start and runs the tuned
+checkpoint. The output now records base-vs-tuned deltas and subset summaries:
+
+```text
+base_final_env_reward_le_0p45
+base_final_distance_ge_0p6
+```
+
+The evaluator uses the same vector environment sequentially for base and tuned
+rollouts, avoiding the GPU camera allocation issue from opening two 4096-env RGB
+environments at once.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
+```
+
+### Results
+
+Full held-out local bank, tuned minus frozen:
+
+| policy | latent reduction delta | final reward delta | success-once delta |
+| --- | ---: | ---: | ---: |
+| uniform task-paired | -0.0016 | -0.0024 | -0.0024 |
+| task-hard bc1 | -0.0072 | -0.0024 | +0.0005 |
+| task-hard bc0.3 | -0.0017 | +0.0009 | +0.0037 |
+
+Task-hard held-out subset (`base_final_env_reward <= 0.45`, 3150 / 4096
+samples), tuned minus frozen:
+
+| policy | latent reduction delta | final reward delta | success-once delta |
+| --- | ---: | ---: | ---: |
+| uniform task-paired | -0.0018 | +0.0273 | +0.0149 |
+| task-hard bc1 | -0.0061 | +0.0304 | +0.0200 |
+| task-hard bc0.3 | -0.0032 | +0.0314 | +0.0225 |
+
+Latent-hard held-out subset (`base_final_distance >= 0.6`, 1606 / 4096
+samples), tuned minus frozen:
+
+| policy | latent reduction delta | final reward delta | success-once delta |
+| --- | ---: | ---: | ---: |
+| uniform task-paired | +0.0571 | +0.0018 | -0.0019 |
+| task-hard bc1 | +0.0529 | -0.0045 | -0.0006 |
+| task-hard bc0.3 | +0.0528 | -0.0054 | -0.0031 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json`
+
+### Interpretation
+
+The task-hard target is not pure noise: it improves terminal task reward on the
+held-out task-hard subset, and weaker BC slightly improves that subset result.
+However, the effect is small and comes with tradeoffs. The aggregate bank still
+does not beat frozen on latent reduction, and the latent-hard subset loses task
+reward under the task-hard-trained checkpoints.
+
+This suggests local terminal dense reward can shape a tiny task-specific
+correction, but the current final-layer R3 update is too small and too
+single-objective. A promotion candidate likely needs either a larger policy
+change with explicit preservation, or direct closed-loop outcome training rather
+than another filtered one-segment reward.

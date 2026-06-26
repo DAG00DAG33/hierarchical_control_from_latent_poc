@@ -922,6 +922,25 @@ filtering and slightly improves local task-success diagnostics, but it remains a
 tiny policy change and below the frozen local-distance baseline. I skipped
 closed-loop deployment.
 
+I then extended `eval-local-r3` to run the frozen low-level branch from the same
+held-out local starts before evaluating the tuned checkpoint. This gives direct
+base-vs-tuned local deltas and subset summaries for the task-hard filter
+(`base_final_env_reward <= 0.45`) and latent-hard filter
+(`base_final_distance >= 0.6`). On the same validation manifest:
+
+| policy | all reward delta | all success delta | task-hard reward delta | task-hard success delta | latent-hard reward delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| uniform task-paired | -0.0024 | -0.0024 | +0.0273 | +0.0149 | +0.0018 |
+| task-hard bc1 | -0.0024 | +0.0005 | +0.0304 | +0.0200 | -0.0045 |
+| task-hard bc0.3 | +0.0009 | +0.0037 | +0.0314 | +0.0225 | -0.0054 |
+
+This narrows the diagnosis: the task-hard target is not pure noise. It improves
+terminal task reward on the held-out starts it was meant to target. But the
+gain is small, action changes remain tiny, latent reduction worsens, and the
+latent-hard subset loses task reward. This is still not a deployment candidate;
+it is evidence that local task-reward filtering can shape a very small
+task-specific correction but not a robust low-level improvement.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
@@ -1006,7 +1025,9 @@ The next useful directions are:
    task-reward hard filter produced a much stronger training reward delta, but
    it also failed matched local validation. Weakening BC for that task-hard
    target recovered some local validation performance but still stayed below
-   frozen with tiny action changes.
+   frozen with tiny action changes. Targeted held-out subset validation shows
+   task-hard local R3 does improve the task-hard subset's terminal task reward,
+   but only slightly and with a latent-hard tradeoff.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.
@@ -1091,6 +1112,9 @@ results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1upd
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json
