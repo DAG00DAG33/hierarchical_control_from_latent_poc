@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -3049,6 +3050,109 @@ def evaluate_learned_interface_hierarchy(
     write_json(output_path, payload)
     console.print(payload)
     return output_path
+
+
+def compare_learned_interface_eval_jsons(
+    eval_jsons: list[Path],
+    names: list[str] | None,
+    output: Path,
+    force: bool = False,
+) -> Path:
+    if output.exists() and not force:
+        return output
+    if len(eval_jsons) < 2:
+        raise ValueError("At least two eval JSONs are required")
+    if names is not None and len(names) != len(eval_jsons):
+        raise ValueError("--name count must match --eval-json count")
+
+    payloads = [json.loads(path.read_text()) for path in eval_jsons]
+    labels = names or [
+        str(payload.get("candidate") or path.stem)
+        for path, payload in zip(eval_jsons, payloads, strict=True)
+    ]
+
+    required_arrays = [
+        "episode_success",
+        "episode_final_reward",
+        "episode_max_reward",
+    ]
+    episodes = len(payloads[0].get("episode_success", []))
+    if episodes == 0:
+        raise ValueError("Reference eval JSON has no episode_success rows")
+    for path, payload in zip(eval_jsons, payloads, strict=True):
+        for key in required_arrays:
+            if key not in payload:
+                raise ValueError(f"{path} is missing {key}")
+            if len(payload[key]) != episodes:
+                raise ValueError(
+                    f"{path} has {len(payload[key])} {key} rows, expected {episodes}"
+                )
+
+    reference = payloads[0]
+
+    def scalar_summary(label: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+        success = np.asarray(payload["episode_success"], dtype=np.float32)
+        final_reward = np.asarray(payload["episode_final_reward"], dtype=np.float32)
+        max_reward = np.asarray(payload["episode_max_reward"], dtype=np.float32)
+        return {
+            "name": label,
+            "path": str(path),
+            "candidate": payload.get("candidate"),
+            "episodes": int(len(success)),
+            "seed_start": payload.get("seed_start"),
+            "eval_num_envs": payload.get("eval_num_envs"),
+            "success": float(success.mean()),
+            "final_reward": float(final_reward.mean()),
+            "max_reward": float(max_reward.mean()),
+            "teacher_action_mae": payload.get("teacher_action_mae"),
+        }
+
+    summaries = [
+        scalar_summary(label, path, payload)
+        for label, path, payload in zip(labels, eval_jsons, payloads, strict=True)
+    ]
+
+    ref_success = np.asarray(reference["episode_success"], dtype=np.float32)
+    ref_final = np.asarray(reference["episode_final_reward"], dtype=np.float32)
+    ref_max = np.asarray(reference["episode_max_reward"], dtype=np.float32)
+    comparisons: list[dict[str, Any]] = []
+    for label, path, payload in zip(labels[1:], eval_jsons[1:], payloads[1:], strict=True):
+        success = np.asarray(payload["episode_success"], dtype=np.float32)
+        final_reward = np.asarray(payload["episode_final_reward"], dtype=np.float32)
+        max_reward = np.asarray(payload["episode_max_reward"], dtype=np.float32)
+        success_equal = success == ref_success
+        final_abs = np.abs(final_reward - ref_final)
+        max_abs = np.abs(max_reward - ref_max)
+        comparisons.append(
+            {
+                "reference": labels[0],
+                "name": label,
+                "path": str(path),
+                "success_exact_matches": int(success_equal.sum()),
+                "success_flips": int((~success_equal).sum()),
+                "success_delta_vs_reference": float(success.mean() - ref_success.mean()),
+                "final_reward_exact_matches": int((final_abs < 1e-7).sum()),
+                "final_reward_mean_abs_diff": float(final_abs.mean()),
+                "final_reward_max_abs_diff": float(final_abs.max()),
+                "max_reward_exact_matches": int((max_abs < 1e-7).sum()),
+                "max_reward_mean_abs_diff": float(max_abs.mean()),
+                "max_reward_max_abs_diff": float(max_abs.max()),
+                "success_flip_indices": [
+                    int(index) for index in np.flatnonzero(~success_equal).tolist()
+                ],
+            }
+        )
+
+    write_json(
+        output,
+        {
+            "reference": labels[0],
+            "episodes": int(episodes),
+            "evals": summaries,
+            "comparisons": comparisons,
+        },
+    )
+    return output
 
 
 @torch.inference_mode()

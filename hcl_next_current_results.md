@@ -622,6 +622,27 @@ promotion signal. The candidate ranking is sensitive to evaluator vectorization
 rather than a stable property across protocols. For RL-base selection, continue
 to prefer single-env/serial evidence.
 
+I added `incremental learned-interface-compare-evals` to make this audit
+repeatable. Using the single-env file as reference, the same seed window changes
+substantially as vectorization changes:
+
+| candidate | comparison | success flips vs envs=1 | max-reward mean abs diff |
+| --- | --- | ---: | ---: |
+| highact_strong | envs=2 | 32 / 100 | 0.2425 |
+| highact_strong | envs=4 | 40 / 100 | 0.3026 |
+| highact_strong | envs=8 | 47 / 100 | 0.3503 |
+| highact_strong | envs=16 | 42 / 100 | 0.3125 |
+| actiononly | envs=2 | 33 / 100 | 0.2437 |
+| actiononly | envs=4 | 39 / 100 | 0.2870 |
+| actiononly | envs=8 | 48 / 100 | 0.3471 |
+| actiononly | envs=16 | 45 / 100 | 0.3291 |
+
+So this is not just aggregate binomial noise. The same seed indices often land
+in different success/max-reward outcomes when the evaluator batch size changes.
+Until the ManiSkill vectorization dependence is understood, promotion claims
+should pin the evaluator protocol and avoid mixing single-env, serial, and
+vectorized results as if they were identical.
+
 I then tested a middle high-level objective,
 `effect32_film_gsens_ft_highact_goal01`, with the same frozen low policy and
 action-through-low loss but `high_goal_mse_weight=0.1`. On the first 100-seed

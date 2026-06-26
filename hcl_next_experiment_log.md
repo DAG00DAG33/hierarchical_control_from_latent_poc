@@ -18655,3 +18655,91 @@ promotion. The single-env/serial-compatible evidence remains the more
 conservative deployment criterion, so `highact_strong` stays the local-RL base
 despite `actiononly` being the best candidate under the default vectorized
 learned-interface evaluator.
+
+## 2026-06-26 - Reproducible eval-vectorization comparison command
+
+### Hypothesis
+
+The vectorization sensitivity should be captured by a repeatable JSON artifact
+rather than an ad hoc Python snippet. If the same seeds have unstable outcomes
+across `eval_num_envs`, the comparison should show many per-index success flips
+and large max-reward differences relative to the single-env reference.
+
+### Implementation
+
+Added:
+
+```bash
+uv run hcl-poc incremental learned-interface-compare-evals \
+  --eval-json ... \
+  --name ... \
+  --output ...
+```
+
+The command reads two or more learned-interface eval JSONs with matching episode
+counts, treats the first file as reference, and writes scalar summaries plus
+per-index agreement metrics for success, final reward, and max reward.
+
+### Commands
+
+```bash
+uv run hcl-poc incremental learned-interface-compare-evals \
+  --config configs/pusht_incremental.yaml \
+  --eval-json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs2.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs4.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs8.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000.json \
+  --name envs1 envs2 envs4 envs8 envs16 \
+  --output results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/eval_num_envs_sensitivity_100_seed3500000.json \
+  --force
+
+uv run hcl-poc incremental learned-interface-compare-evals \
+  --config configs/pusht_incremental.yaml \
+  --eval-json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs2.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs4.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs8.json \
+    results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000.json \
+  --name envs1 envs2 envs4 envs8 envs16 \
+  --output results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/eval_num_envs_sensitivity_100_seed3500000.json \
+  --force
+```
+
+### Results
+
+Reference is `eval_num_envs=1` for each candidate:
+
+| candidate | comparison | success delta | success flips | max-reward mean abs diff |
+| --- | --- | ---: | ---: | ---: |
+| highact_strong | envs=2 | -0.020 | 32 | 0.2425 |
+| highact_strong | envs=4 | -0.040 | 40 | 0.3026 |
+| highact_strong | envs=8 | -0.030 | 47 | 0.3503 |
+| highact_strong | envs=16 | +0.020 | 42 | 0.3125 |
+| actiononly | envs=2 | -0.010 | 33 | 0.2437 |
+| actiononly | envs=4 | +0.030 | 39 | 0.2870 |
+| actiononly | envs=8 | -0.060 | 48 | 0.3471 |
+| actiononly | envs=16 | +0.050 | 45 | 0.3291 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/eval_num_envs_sensitivity_100_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/eval_num_envs_sensitivity_100_seed3500000.json`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py src/hcl_poc/cli.py
+uv run hcl-poc incremental learned-interface-compare-evals --help
+```
+
+### Interpretation
+
+This confirms that evaluator vectorization changes same-index outcomes, not
+just aggregate estimates. Relative to `eval_num_envs=1`, 32-48 of 100 success
+labels flip depending on candidate and env count, and max-reward mean absolute
+differences are large. Promotion comparisons must pin the evaluator protocol;
+for serial/local-RL work, use the single-env/serial-compatible protocol rather
+than the default vectorized learned-interface evaluator.

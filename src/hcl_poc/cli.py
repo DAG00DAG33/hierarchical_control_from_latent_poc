@@ -95,6 +95,7 @@ from hcl_poc.incremental import (
     sweep_phase8_deterministic_predictors,
 )
 from hcl_poc.learned_interface import (
+    compare_learned_interface_eval_jsons,
     evaluate_learned_interface_hierarchy,
     prepare_learned_interface_episodes,
     probe_learned_interface_representation,
@@ -2021,6 +2022,13 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
             force=args.force,
         )
+    elif args.incremental_command == "learned-interface-compare-evals":
+        compare_learned_interface_eval_jsons(
+            eval_jsons=[Path(path) for path in args.eval_json],
+            names=args.name,
+            output=Path(args.output),
+            force=args.force,
+        )
     elif args.incremental_command == "learned-interface-run":
         run_learned_interface_candidate(
             config,
@@ -3593,6 +3601,16 @@ def build_parser() -> argparse.ArgumentParser:
             )
             learned_interface.add_argument("--eval-seed-start", type=int)
         learned_interface.set_defaults(func=incremental_cmd)
+
+    learned_interface_compare = incremental_sub.add_parser(
+        "learned-interface-compare-evals"
+    )
+    add_config_arg(learned_interface_compare)
+    learned_interface_compare.add_argument("--eval-json", nargs="+", required=True)
+    learned_interface_compare.add_argument("--name", nargs="+")
+    learned_interface_compare.add_argument("--output", required=True)
+    learned_interface_compare.add_argument("--force", action="store_true")
+    learned_interface_compare.set_defaults(func=incremental_cmd)
 
     vae_scaling_manifests = incremental_sub.add_parser("vae-scaling-manifests")
     add_config_arg(vae_scaling_manifests)
