@@ -15143,3 +15143,122 @@ below the `bc=1` D_phi run. Since `bc=0.3` failed the local promotion gate, I di
 not run closed-loop validation. The next D_phi reward check should change the
 optimization regime more substantially, such as more updates or a paired D_phi
 terminal reward, rather than simply weakening this already-small BC term.
+
+## 2026-06-26 - D_phi reward 3-update check
+
+### Hypothesis
+
+The one-update D_phi reward run passed the full-bank local gate but had tiny
+closed-loop action changes. Since lowering BC failed, the next clean effect-size
+test is to keep the stable `bc=1`, `lr=1e-5`, `logstd=-5` setup and run three
+PPO updates.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name dphi_reward_n4096_3update_bc1_lr1e5_logstd5 \
+  --steps 122880 \
+  --bc-weight 1 \
+  --terminal-weight 1 \
+  --dense-progress-weight 1 \
+  --reward-mode progress \
+  --reward-distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --checkpoint-every-updates 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-local-sample-proxies \
+  --local-json results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml compare-local-proxy-audits \
+  --audit-json \
+    results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+    results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --name dphi_1update dphi_3update \
+  --output results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_dphi_1update_vs_3update.json \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/closed_loop_learned_100_seed4800000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/closed_loop_learned_500_seed4800000.json
+```
+
+### Results
+
+Training history:
+
+| update | global step | mean reward | mean D_phi distance | terminal D_phi distance | action delta | saturation | task success diagnostic |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 40960 | -0.0736 | 0.8402 | 0.8024 | 0.0108 | 0.0075 | 0.213 |
+| 2 | 81920 | -0.0721 | 0.8396 | 0.7951 | 0.0108 | 0.0077 | 0.212 |
+| 3 | 122880 | -0.0724 | 0.8352 | 0.7957 | 0.0108 | 0.0078 | 0.215 |
+
+Full-bank local proxy comparison:
+
+| checkpoint | final reward delta | max reward delta | success delta | raw delta | D_phi delta | positive task gate |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| D_phi 1 update | +0.0026 | +0.0005 | +0.0007 | +0.0002 | +0.0035 | true |
+| D_phi 3 updates | +0.0024 | +0.0009 | +0.0012 | +0.0026 | +0.0025 | true |
+
+Closed-loop learned-goal validation:
+
+| run | episodes | frozen success | tuned success | success delta | final reward delta | max reward delta | residual norm | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| D_phi 3 updates | 100 | 0.300 | 0.330 | +0.030 | +0.0271 | +0.0232 | 0.00090 | 0.0453 |
+| D_phi 3 updates | 500 | 0.306 | 0.302 | -0.004 | +0.0007 | -0.0032 | 0.00091 | 0.0431 |
+| D_phi 1 update | 500 | 0.306 | 0.302 | -0.004 | -0.0046 | -0.0052 | 0.00048 | 0.0446 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json`
+- `results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_dphi_1update_vs_3update.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/closed_loop_learned_100_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/closed_loop_learned_500_seed4800000.json`
+
+### Interpretation
+
+Three D_phi reward updates improve the full-bank local proxy audit relative to
+one update on success delta, max-reward delta, and raw-distance delta, and the
+100-episode closed-loop smoke looked promising. The 500-episode validation did
+not confirm a robust deployment improvement: success stayed slightly below
+frozen, and max reward was still negative. This is the strongest D_phi-reward
+local candidate so far, but it remains a local improvement without a reliable
+learned-goal closed-loop gain. The next check should change the deployment
+alignment of the reward, for example paired D_phi terminal improvement or a
+longer-horizon/closed-loop objective, rather than simply adding more identical
+updates.

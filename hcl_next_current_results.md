@@ -1140,6 +1140,13 @@ improvement. I then tried the smallest stronger-effect variant, lowering
 setup. That failed the full-bank local gate: final reward delta `-0.0034`, max
 reward delta `-0.0032`, success delta `-0.0049`, and `D_phi` delta `-0.0018`.
 So simple BC weakening does not solve the D_phi effect-size problem.
+Extending the stable `bc=1` D_phi reward setup to three updates kept the
+full-bank local gate positive (`+0.0024` final reward, `+0.0009` max reward,
+`+0.0012` success, `+0.0025` D_phi reduction) and doubled the closed-loop
+residual norm, but still failed the 500-episode learned-goal promotion check:
+success stayed at `0.302` versus frozen `0.306`, with max reward delta
+`-0.0032`. More D_phi updates improve local metrics but still do not create a
+robust deployment improvement.
 
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
