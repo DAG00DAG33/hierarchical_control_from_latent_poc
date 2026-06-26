@@ -3400,12 +3400,18 @@ def evaluate_rl_rerun_local_r1(
 
     initial_distances: list[np.ndarray] = []
     final_distances: list[np.ndarray] = []
+    base_final_distances: list[np.ndarray] = []
     action_delta_norms: list[np.ndarray] = []
+    sample_action_delta_means: list[np.ndarray] = []
     final_env_rewards: list[np.ndarray] = []
+    base_final_env_rewards: list[np.ndarray] = []
     max_env_rewards: list[np.ndarray] = []
+    base_max_env_rewards: list[np.ndarray] = []
     mean_env_rewards: list[np.ndarray] = []
+    base_mean_env_rewards: list[np.ndarray] = []
     saturation_rates: list[float] = []
     task_success_once = np.zeros((episodes, num_envs), dtype=np.bool_)
+    base_task_success_once = np.zeros((episodes, num_envs), dtype=np.bool_)
     chosen_batches: list[str] = []
     chosen_timesteps: list[int] = []
     try:
@@ -3415,12 +3421,14 @@ def evaluate_rl_rerun_local_r1(
                 key = str(entry["batch"])
                 group = h5[key]
                 t = int(entry["timestep"])
-                obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
+                base_obs, _base_info = env.reset(seed=int(group.attrs["batch_seed"]))
                 for replay_step in range(t):
                     replay_action = torch.from_numpy(
                         np.asarray(group["executed_actions"][replay_step], dtype=np.float32)
                     ).to(device)
-                    obs, _reward, _terminated, _truncated, _info = env.step(replay_action)
+                    base_obs, _reward, _terminated, _truncated, _info = env.step(
+                        replay_action
+                    )
                 goal_frame = np.concatenate(
                     [
                         np.asarray(group["dino"][t + horizon], dtype=np.float32),
@@ -3432,9 +3440,85 @@ def evaluate_rl_rerun_local_r1(
                 previous = frozen.action_norm.transform(
                     np.asarray(group["previous_executed_actions"][t], dtype=np.float32)
                 )
+                base_previous = previous.copy()
+                base_total_env_reward = np.zeros(num_envs, dtype=np.float32)
+                base_episode_max_env_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+                for local_step in range(horizon):
+                    base_frames = _phase4_frame_inputs(
+                        base_obs, dino, int(config.get("dino.batch_size", 64))
+                    )
+                    base_current_z = _encode_rerun_frames(frozen, base_frames, device)
+                    remaining = np.full(
+                        (num_envs, 1),
+                        (horizon - local_step) / horizon,
+                        dtype=np.float32,
+                    )
+                    base_condition_np = _low_condition_array(
+                        frozen.frame_norm.transform(base_frames),
+                        base_current_z,
+                        goal_z,
+                        base_previous,
+                        remaining,
+                        frozen.conditioning,
+                    )
+                    base_condition_t = torch.from_numpy(base_condition_np).to(device).float()
+                    if base_policy == "deterministic":
+                        normalized_base = frozen.low_model(base_condition_t)
+                        base_action = torch.from_numpy(
+                            frozen.action_norm.inverse(
+                                normalized_base.cpu().numpy().astype(np.float32)
+                            )
+                        ).to(device)
+                    else:
+                        if flow_model is None or flow_checkpoint is None:
+                            raise RuntimeError("R2 flow base was not loaded")
+                        base_action = _low_flow_base_action(
+                            flow_model,
+                            flow_checkpoint,
+                            base_condition_t,
+                            frozen,
+                        )
+                    base_action = torch.clamp(base_action, action_low, action_high)
+                    base_obs, base_step_reward, _terminated, _truncated, base_info = (
+                        env.step(base_action)
+                    )
+                    base_step_reward_np = _to_numpy(base_step_reward).reshape(-1).astype(np.float32)
+                    base_total_env_reward += base_step_reward_np
+                    base_episode_max_env_reward = np.maximum(
+                        base_episode_max_env_reward,
+                        base_step_reward_np,
+                    )
+                    base_task_success_once[episode_index] |= (
+                        _to_numpy(base_info.get("success", np.zeros(num_envs, dtype=np.bool_)))
+                        .reshape(-1)
+                        .astype(np.bool_)
+                    )
+                    base_previous = frozen.action_norm.transform(base_action.cpu().numpy())
+                    if local_step == horizon - 1:
+                        base_next_frames = _phase4_frame_inputs(
+                            base_obs, dino, int(config.get("dino.batch_size", 64))
+                        )
+                        base_next_z = _encode_rerun_frames(
+                            frozen,
+                            base_next_frames,
+                            device,
+                        )
+                        base_final_distances.append(
+                            np.mean(np.square(base_next_z - goal_z), axis=-1).astype(np.float32)
+                        )
+                        base_final_env_rewards.append(base_step_reward_np)
+                        base_max_env_rewards.append(base_episode_max_env_reward)
+                        base_mean_env_rewards.append(base_total_env_reward / horizon)
+                obs, _info = env.reset(seed=int(group.attrs["batch_seed"]))
+                for replay_step in range(t):
+                    replay_action = torch.from_numpy(
+                        np.asarray(group["executed_actions"][replay_step], dtype=np.float32)
+                    ).to(device)
+                    obs, _reward, _terminated, _truncated, _info = env.step(replay_action)
                 episode_initial_distance: np.ndarray | None = None
                 total_env_reward = np.zeros(num_envs, dtype=np.float32)
                 episode_max_env_reward = np.full(num_envs, -np.inf, dtype=np.float32)
+                episode_action_delta_sum = np.zeros(num_envs, dtype=np.float32)
                 saturation_count = 0
                 for local_step in range(horizon):
                     frames = _phase4_frame_inputs(
@@ -3485,6 +3569,7 @@ def evaluate_rl_rerun_local_r1(
                             .cpu()
                             .numpy()
                         )
+                        episode_action_delta_sum += action_delta_norms[-1]
                     else:
                         residual_condition_np = _residual_condition_array(
                             mode=residual_condition_mode,
@@ -3512,6 +3597,7 @@ def evaluate_rl_rerun_local_r1(
                         action_delta_norms.append(
                             torch.linalg.vector_norm(residual, dim=-1).cpu().numpy()
                         )
+                        episode_action_delta_sum += action_delta_norms[-1]
                     if is_direct:
                         action = torch.clamp(unclipped, action_low, action_high)
                     saturation_count += int(torch.any(unclipped != action, dim=-1).sum().cpu())
@@ -3539,6 +3625,9 @@ def evaluate_rl_rerun_local_r1(
                         final_env_rewards.append(step_reward_np)
                         max_env_rewards.append(episode_max_env_reward)
                         mean_env_rewards.append(total_env_reward / horizon)
+                        sample_action_delta_means.append(
+                            episode_action_delta_sum / horizon
+                        )
                 if episode_initial_distance is None:
                     raise RuntimeError("Local R1 evaluation did not execute any steps")
                 initial_distances.append(episode_initial_distance)
@@ -3550,10 +3639,58 @@ def evaluate_rl_rerun_local_r1(
 
     initial = np.concatenate(initial_distances)
     final = np.concatenate(final_distances)
+    base_final = np.concatenate(base_final_distances)
     action_delta = np.concatenate(action_delta_norms)
+    sample_action_delta = np.concatenate(sample_action_delta_means)
     final_env_reward = np.concatenate(final_env_rewards)
+    base_final_env_reward = np.concatenate(base_final_env_rewards)
     max_env_reward = np.concatenate(max_env_rewards)
+    base_max_env_reward = np.concatenate(base_max_env_rewards)
     mean_env_reward = np.concatenate(mean_env_rewards)
+    base_mean_env_reward = np.concatenate(base_mean_env_rewards)
+    success_once_flat = task_success_once.reshape(-1)
+    base_success_once_flat = base_task_success_once.reshape(-1)
+
+    def subset_summary(mask: np.ndarray) -> dict[str, Any]:
+        mask = np.asarray(mask, dtype=np.bool_)
+        if not np.any(mask):
+            return {"count": 0}
+        return {
+            "count": int(mask.sum()),
+            "fraction": float(np.mean(mask)),
+            "initial_distance_mean": float(np.mean(initial[mask])),
+            "base_final_distance_mean": float(np.mean(base_final[mask])),
+            "final_distance_mean": float(np.mean(final[mask])),
+            "base_distance_reduction_mean": float(
+                np.mean(initial[mask] - base_final[mask])
+            ),
+            "distance_reduction_mean": float(np.mean(initial[mask] - final[mask])),
+            "distance_reduction_delta_vs_base": float(
+                np.mean(base_final[mask] - final[mask])
+            ),
+            "base_final_env_reward_mean": float(np.mean(base_final_env_reward[mask])),
+            "final_env_reward_mean": float(np.mean(final_env_reward[mask])),
+            "final_env_reward_delta_vs_base": float(
+                np.mean(final_env_reward[mask] - base_final_env_reward[mask])
+            ),
+            "base_task_success_once_fraction": float(
+                np.mean(base_success_once_flat[mask])
+            ),
+            "task_success_once_fraction": float(np.mean(success_once_flat[mask])),
+            "task_success_once_delta_vs_base": float(
+                np.mean(success_once_flat[mask].astype(np.float32))
+                - np.mean(base_success_once_flat[mask].astype(np.float32))
+            ),
+            "mean_action_delta_l2": float(np.mean(sample_action_delta[mask])),
+        }
+
+    eval_subsets = {
+        "all": subset_summary(np.ones_like(final, dtype=np.bool_)),
+        "base_final_env_reward_le_0p45": subset_summary(
+            base_final_env_reward <= 0.45
+        ),
+        "base_final_distance_ge_0p6": subset_summary(base_final >= 0.6),
+    }
     result = {
         "checkpoint": str(checkpoint_path),
         "dataset": str(path),
@@ -3570,15 +3707,31 @@ def evaluate_rl_rerun_local_r1(
         "chosen_timestep_min": int(min(chosen_timesteps)),
         "chosen_timestep_max": int(max(chosen_timesteps)),
         "initial_distance_mean": float(np.mean(initial)),
+        "base_final_distance_mean": float(np.mean(base_final)),
         "final_distance_mean": float(np.mean(final)),
+        "base_distance_reduction_mean": float(np.mean(initial - base_final)),
         "distance_reduction_mean": float(np.mean(initial - final)),
+        "distance_reduction_delta_vs_base": float(np.mean(base_final - final)),
         "distance_reduction_fraction": float(np.mean(final < initial)),
         "mean_residual_norm": float(np.mean(action_delta)),
         "mean_action_delta_l2": float(np.mean(action_delta)),
+        "sample_mean_action_delta_l2": float(np.mean(sample_action_delta)),
+        "base_final_env_reward_mean": float(np.mean(base_final_env_reward)),
         "final_env_reward_mean": float(np.mean(final_env_reward)),
+        "final_env_reward_delta_vs_base": float(
+            np.mean(final_env_reward - base_final_env_reward)
+        ),
+        "base_max_env_reward_mean": float(np.mean(base_max_env_reward)),
         "max_env_reward_mean": float(np.mean(max_env_reward)),
+        "base_mean_env_reward_mean": float(np.mean(base_mean_env_reward)),
         "mean_env_reward_mean": float(np.mean(mean_env_reward)),
-        "task_success_once_fraction": float(np.mean(task_success_once)),
+        "base_task_success_once_fraction": float(np.mean(base_success_once_flat)),
+        "task_success_once_fraction": float(np.mean(success_once_flat)),
+        "task_success_once_delta_vs_base": float(
+            np.mean(success_once_flat.astype(np.float32))
+            - np.mean(base_success_once_flat.astype(np.float32))
+        ),
+        "eval_subsets": eval_subsets,
         "action_saturation_rate": float(np.mean(saturation_rates)),
         "recipe": recipe,
     }
