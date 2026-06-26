@@ -447,6 +447,26 @@ effect32 FiLM learned-goal baseline on larger validation. It is not enough to
 declare the RL proof-of-concept solved, but it is strong enough to use as a
 follow-up RL base or as the template for joint high/low coupled training.
 
+I then ran the candidate through the `low-level-rl eval-serial` path on the
+same 100-seed bank used by the earlier frozen/R3 comparison
+(`seed_start=3500000`). This checks that the new learned-interface candidate is
+usable by the local-RL tooling and gives a direct serial comparison:
+
+| policy | projection | success | final reward | max reward | paired vs original frozen |
+| --- | --- | ---: | ---: | ---: | ---: |
+| original effect32_film frozen | none | 0.600 | 0.6237 | 0.7085 | - |
+| old effect32_film R3 checkpoint | none | 0.670 | 0.6416 | 0.7618 | - |
+| effect32_film_gsens_ft_highact_strong frozen | none | 0.670 | 0.7092 | 0.7566 | +7 |
+| effect32_film_gsens_ft_highact_strong frozen | nearest_train_dphi | 0.610 | 0.6438 | 0.7213 | - |
+
+The high-action candidate is compatible with the local-RL serial evaluator and
+matches the old R3 checkpoint's success without applying an RL residual. It also
+has much stronger final reward on this window. Reusing the old
+`effect32_film` D_phi projection is harmful (`8` paired wins / `14` losses
+against no projection), so follow-up RL should start from the unprojected
+high-action candidate rather than trying to repair its goals with that
+projection layer.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

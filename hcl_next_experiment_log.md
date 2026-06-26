@@ -16856,3 +16856,82 @@ The next useful work should either validate this candidate against the R3/local
 RL path or turn this high-only objective into a joint high/low coupled training
 recipe. It is now strong enough to be a candidate base for follow-up RL, but the
 margin is still too small to call the overall RL proof-of-concept solved.
+
+## 2026-06-26 - Low-level-RL serial compatibility for strong action-aware candidate
+
+### Hypothesis
+
+The strong action-aware high-level candidate is the best learned-interface lead
+so far, but the next plan-aligned question is whether it is compatible with the
+`low-level-rl` serial evaluator and whether the earlier R3/projection machinery
+still looks useful around this candidate.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_frozen_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_frozen_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --goal-projection nearest_train_dphi \
+  --goal-projection-topk 32 \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+### Results
+
+Same serial 100-episode window, `seed_start=3500000`:
+
+| policy | projection | success | final reward | max reward | segment goal reach | action saturation |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| original effect32_film frozen | none | 0.600 | 0.6237 | 0.7085 | 0.719 | 0.0325 |
+| old effect32_film R3 checkpoint | none | 0.670 | 0.6416 | 0.7618 | 0.730 | 0.0288 |
+| effect32_film_gsens_ft_highact_strong frozen | none | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.0458 |
+| effect32_film_gsens_ft_highact_strong frozen | nearest_train_dphi | 0.610 | 0.6438 | 0.7213 | 0.673 | 0.0428 |
+
+Paired success counts:
+
+| comparison | wins | losses | net |
+| --- | ---: | ---: | ---: |
+| highact strong frozen vs original frozen | 17 | 10 | +7 |
+| highact strong frozen vs old R3 checkpoint | 13 | 13 | 0 |
+| nearest_train_dphi vs no projection for highact strong | 8 | 14 | -6 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3500000/serial_eval_100_seed3500000_nearest_train_dphi.json`
+
+### Interpretation
+
+The high-action candidate is compatible with the local-RL serial path and
+matches the old R3 checkpoint's task success on the same fixed reset bank
+without applying any learned residual. It also has a much better final reward
+than both original effect32_film frozen and the old R3 checkpoint on this
+window.
+
+Reusing the original effect32_film D_phi projection hurts this candidate. The
+projection result is worse in success, final reward, max reward, segment goal
+reach, and paired wins/losses against the unprojected high-action candidate.
+
+This makes the next RL step narrower: use
+`effect32_film_gsens_ft_highact_strong` as the base candidate for follow-up
+local-RL experiments, but do not add the old nearest-neighbor D_phi goal
+projection by default.
