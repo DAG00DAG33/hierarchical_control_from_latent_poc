@@ -2009,7 +2009,10 @@ The next useful directions are:
    task-hard local R3 does improve the task-hard subset's terminal task reward,
    but only slightly and with a latent-hard tradeoff. Extending the best
    task-hard setup to three updates increases latent-hard reduction but reduces
-   task-hard reward/success gains.
+   task-hard reward/success gains. A long-credit paired terminal reward run
+   avoided paired desyncs and produced a small positive training signal, but it
+   transferred worse than frozen and the earlier terminal-D_phi R3 on the
+   matched `4511000..4511099` serial validation slice.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.
