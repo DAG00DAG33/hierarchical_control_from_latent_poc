@@ -634,6 +634,15 @@ candidate, and the paired R3 checkpoint is only neutral under oracle goals. This
 argues against treating learned high-level goal quality as the sole explanation
 for the paired-R3 failure.
 
+The exact paired serial outputs do show some non-deployable episode-level
+branch complementarity. A hindsight selector that chooses the branch with higher
+episode max reward would reach `0.805` learned-goal success versus `0.720`
+frozen and `0.660` paired-R3. Under oracle goals, the same hindsight max selector
+would reach `0.795` success versus `0.670` frozen and `0.675` paired-R3. This is
+an upper bound that uses future outcome information, but it says selector work is
+not impossible; it must be trained/evaluated on closed-loop task outcomes rather
+than local segment reachability.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

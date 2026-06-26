@@ -18024,3 +18024,43 @@ higher, and paired final-reward counts are negative (`66` wins / `75` losses).
 This weakens the hypothesis that paired-R3 failed only because learned
 high-level goals were poor. The low-level update still improves local reach-like
 metrics without creating a reliable task-level gain.
+
+## 2026-06-26 - Hindsight branch-selector upper bound for high-action paired R3
+
+### Hypothesis
+
+If frozen and paired-R3 make complementary closed-loop mistakes, then an
+episode-level hindsight selector should outperform both. If the upper bound is
+weak, deployable selector work is probably not worth pursuing on this checkpoint.
+
+### Command
+
+Computed directly from the exact paired serial JSONs for learned and oracle
+goals on seed windows `3500000` and `3600000`.
+
+### Results
+
+Here `success` is the same max-reward threshold used by the serial evaluator.
+The final-reward selector chooses the branch with better episode final reward;
+the max-reward selector chooses the branch with better episode max reward.
+
+| goal source | policy / selector | final reward | max reward | success |
+| --- | --- | ---: | ---: | ---: |
+| learned | frozen | 0.7146 | 0.7976 | 0.720 |
+| learned | pairedsync R3 | 0.6587 | 0.7584 | 0.660 |
+| learned | hindsight final-reward selector | 0.7956 | - | - |
+| learned | hindsight max-reward selector | 0.7537 | 0.8616 | 0.805 |
+| oracle | frozen | 0.6105 | 0.7663 | 0.670 |
+| oracle | pairedsync R3 | 0.6065 | 0.7704 | 0.675 |
+| oracle | hindsight final-reward selector | 0.7194 | - | - |
+| oracle | hindsight max-reward selector | 0.6708 | 0.8571 | 0.795 |
+
+### Interpretation
+
+There is real branch complementarity at the episode-outcome level. The
+paired-R3 branch is bad on average, but a non-deployable max-reward oracle
+selector would improve learned-goal success by `+0.085` over frozen and oracle
+goal success by `+0.125` over frozen. This does not rescue the checkpoint as a
+policy because the selector uses full-episode future information, but it keeps
+the selector direction alive. The selector target needs to be closed-loop
+task-outcome labels, not local segment reachability or terminal `D_phi`.
