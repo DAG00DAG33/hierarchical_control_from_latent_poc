@@ -10759,6 +10759,101 @@ this checkpoint. This is useful negative evidence: the paired target and
 sensitivity regularizer are not obviously conflicting, but their simple sum is
 still too weak to beat frozen local reaching.
 
+## 2026-06-26 - AE256 FiLM D_phi representation screen
+
+After the VAE512 `rl-rerun` sensitivity and paired branches remained neutral, I
+screened an existing alternative representation/architecture candidate:
+`ae256_film`. It had learned-interface artifacts and goal diagnostics already,
+but no learned reachability distance.
+
+I trained and evaluated D_phi:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-reachability-distance \
+  --candidate ae256_film \
+  --seed 0
+
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-reachability-distance \
+  --candidate ae256_film \
+  --seed 0 \
+  --force
+```
+
+Reachability-distance diagnostics:
+
+| candidate | temporal MSE | temporal Spearman | near/far acc | shuffled AUC | demo-decrease acc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ae256_film | 0.00793 | 0.9334 | 0.9863 | 0.8678 | 0.6936 |
+| effect32_film | 0.03267 | 0.8333 | 0.9275 | 0.9074 | 0.7396 |
+| vae512_w2048_b1e6 | 0.00793 | 0.9296 | 0.9841 | 0.8769 | 0.7031 |
+
+Goal-use diagnostics from the existing 5000-sample offline gate:
+
+| candidate | goal-shuffle action L2 | max valid-goal sensitivity L2 | frame-shuffle action L2 |
+| --- | ---: | ---: | ---: |
+| ae256_film | 0.2506 | 0.0937 | 0.8645 |
+| effect32_film | 0.0622 | 0.0368 | 0.9503 |
+| vae512_b1e6_film | 0.2783 | 0.1266 | 0.8213 |
+
+Then I ran the same 40k D_phi terminal-only final-layer R3 smoke shape used for
+effect32:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate ae256_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_ae256_dphi_r3_4096_terminal_smoke_40k_bc10 \
+  --steps 40960 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/ae256_film/seed0/d_phi.pt \
+  --num-envs 4096
+```
+
+Training metrics:
+
+| candidate | terminal distance | action delta L2 | saturation |
+| --- | ---: | ---: | ---: |
+| ae256_film R3 | 0.7728 | 0.02931 | 0.3218 |
+| effect32_film R3 | 0.5757 | 0.02931 | 0.2587 |
+
+Closed-loop check on `seed_start=3500000`, 500 episodes:
+
+| policy | success | max reward | raw reduction | selected reduction | goal reach | action delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ae256_film frozen | 0.596 | 0.7100 | 0.2938 | 0.0701 | 0.8133 | 0.000000 |
+| ae256_film R3 | 0.586 | 0.7057 | 0.2916 | 0.0698 | 0.8117 | 0.001307 |
+| effect32_film frozen | 0.634 | 0.7378 | 0.3965 | 0.0731 | 0.7176 | 0.000000 |
+| effect32_film R3 | 0.684 | 0.7725 | 0.4097 | 0.0801 | 0.7307 | 0.001006 |
+
+Artifacts:
+
+- `artifacts/incremental/reachability_distance/ae256_film/seed0/d_phi.pt`
+- `results/incremental/reachability_distance/ae256_film/seed0/eval.json`
+- `artifacts/incremental/low_level_rl/ae256_film/seed0/hcl_next_ae256_dphi_r3_4096_terminal_smoke_40k_bc10/latest.pt`
+- `results/incremental/low_level_rl/ae256_film/seed0/hcl_next_ae256_dphi_r3_4096_terminal_smoke_40k_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/ae256_film/seed0/hcl_next_ae256_dphi_frozen_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/ae256_film/seed0/hcl_next_ae256_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3500000/eval_500_seed3500000.json`
+
+Interpretation:
+
+`ae256_film` is not the next RL base despite its stronger one-step goal
+sensitivity. D_phi fits the AE latent well on temporal/near-far metrics, but
+the closed-loop frozen hierarchy is weaker than effect32, and the analogous
+40k D_phi R3 update slightly regresses task success and local reductions.
+This reinforces the earlier lesson that one-step goal sensitivity alone is not
+enough; the representation also needs a deployment-useful closed-loop base and
+a reachability metric whose local improvements transfer to task behavior.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:
