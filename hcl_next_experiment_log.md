@@ -18135,3 +18135,71 @@ and the oracle-goal frozen baseline is itself worse than learned-goal frozen on
 these windows. The selector direction still needs richer online context or
 direct closed-loop intervention training; the existing three initial features
 are not enough.
+
+## 2026-06-26 - Weaker BC anchor for high-action paired R3
+
+### Hypothesis
+
+The paired-R3 branch may be too close to the frozen low policy to create a useful
+closed-loop effect. Reducing the BC anchor from `10.0` to `1.0` should allow
+larger action changes while keeping the paired terminal-`D_phi` objective.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc1 \
+  --steps 40960 \
+  --num-envs 2048 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --reward-mode paired \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+### Results
+
+Comparison against the previous `bc_weight=10.0` pairedsync run:
+
+| run | step | mean paired improvement | fraction improved | tuned terminal D_phi | base terminal D_phi | direct delta L2 | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| bc10 | 20480 | 0.0907 | 0.5869 | 0.4029 | 0.4935 | 0.2650 | 0.4062 |
+| bc10 | 40960 | 0.0161 | 0.4854 | 0.5889 | 0.6049 | 0.2640 | 0.1917 |
+| bc1 | 20480 | 0.0907 | 0.5869 | 0.4029 | 0.4935 | 0.2650 | 0.4062 |
+| bc1 | 40960 | 0.0176 | 0.4888 | 0.5874 | 0.6049 | 0.2639 | 0.1894 |
+
+Both runs selected the 20480-step checkpoint as best. The bc1 and bc10 best
+agent tensors differ only slightly:
+
+| comparison | value |
+| --- | ---: |
+| global step | 20480 for both |
+| max absolute tensor delta | 0.000482 |
+| average per-tensor mean absolute delta | 0.0000159 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc1/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc1/train_metrics.json`
+
+### Interpretation
+
+Reject this as a meaningfully new deployment candidate. Weakening the BC anchor
+did not produce larger action changes or a materially different paired training
+signal. Since the bc10 best checkpoint already failed serial deployment, and bc1
+is nearly identical at the selected step, I skipped another serial evaluation.
+The next objective change needs to alter the target/regime more substantially
+than just reducing the final-layer BC coefficient.

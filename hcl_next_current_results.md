@@ -652,6 +652,15 @@ consistently mildly positive (`0.710` vs `0.680`, and `0.690` vs `0.660`), but
 oracle-goal selection is not the target deployment setting. This rejects the
 current initial-feature selector for learned-goal deployment.
 
+I also retried high-action paired R3 with a weaker BC anchor
+(`bc_weight=1.0`) to see whether the tuned branch could create a larger effect.
+It did not materially change training behavior versus `bc_weight=10.0`: the
+20480-step paired improvement was identical (`0.0907`, fraction improved
+`0.5869`), the final row changed only from `0.0161` to `0.0176`, and the best
+checkpoint parameters differed only slightly from bc10 (`max_abs` tensor delta
+about `4.8e-4`). I skipped serial deployment because this did not create a
+meaningfully different policy.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
