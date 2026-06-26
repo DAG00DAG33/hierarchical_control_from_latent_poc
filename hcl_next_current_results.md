@@ -958,21 +958,23 @@ the target task-hard subset. This reinforces that repeatedly optimizing the same
 one-segment task-paired target changes the local tradeoff; it still does not
 produce a robust low-level improvement.
 
-I then ran a compact learned-goal closed-loop smoke for the best one-update
-task-hard checkpoint (`bc=0.3`, `max_base_terminal_env_reward=0.45`) on 100
-matched episodes from `seed_start=4800000`. The residual branch was mildly
-positive against its frozen branch in the same evaluator run:
+I then ran learned-goal closed-loop transfer checks for the best one-update
+task-hard checkpoint (`bc=0.3`, `max_base_terminal_env_reward=0.45`) from
+`seed_start=4800000`. A compact 100-episode smoke was mildly positive, but the
+larger 500-episode matched window reversed the sign:
 
-| branch | success | final reward | max reward |
-| --- | ---: | ---: | ---: |
-| frozen | 0.230 | 0.4147 | 0.4376 |
-| task-hard residual | 0.250 | 0.4240 | 0.4549 |
-| delta | +0.020 | +0.0093 | +0.0172 |
+| episodes | branch | success | final reward | max reward |
+| ---: | --- | ---: | ---: | ---: |
+| 100 | frozen | 0.230 | 0.4147 | 0.4376 |
+| 100 | task-hard residual | 0.250 | 0.4240 | 0.4549 |
+| 100 | delta | +0.020 | +0.0093 | +0.0172 |
+| 500 | frozen | 0.312 | 0.4727 | 0.4960 |
+| 500 | task-hard residual | 0.304 | 0.4635 | 0.4931 |
+| 500 | delta | -0.008 | -0.0093 | -0.0029 |
 
-This is the first task-hard local-R3 transfer smoke with a positive sign, but
-the sample is small and absolute success is low. It is a follow-up signal, not a
-promotion result. The next useful check is a larger matched closed-loop window
-for this checkpoint before spending more training runs on the same objective.
+The 100-episode improvement was therefore a small-window false lead. The
+task-hard local objective does shape its targeted local subset, but it still
+does not validate as a closed-loop policy improvement.
 
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
@@ -1148,6 +1150,7 @@ artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1u
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_100_seed4800000.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_500_seed4800000.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json

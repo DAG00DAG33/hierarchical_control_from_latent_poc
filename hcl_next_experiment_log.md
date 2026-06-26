@@ -12965,3 +12965,48 @@ on its own, but it contradicts the earlier blanket conclusion that task-hard R3
 should skip all closed-loop deployment. The next check should be a larger
 matched closed-loop window for this exact checkpoint before changing the
 training objective again.
+
+## 2026-06-26: Task-hard one-update larger closed-loop check
+
+### Hypothesis
+
+The 100-episode smoke was mildly positive but too noisy. This reruns the same
+checkpoint and seed start over 500 learned-goal closed-loop episodes.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 20 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_500_seed4800000.json
+```
+
+### Result
+
+| branch | success | final reward | max reward | mean residual norm |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.312 | 0.4727 | 0.4960 | 0.000000 |
+| residual | 0.304 | 0.4635 | 0.4931 | 0.000482 |
+| delta | -0.008 | -0.0093 | -0.0029 | - |
+
+High-level decisions per episode were close (`8.516` frozen, `8.576`
+residual).
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_500_seed4800000.json`
+
+### Interpretation
+
+The larger matched check rejects the 100-episode smoke as a promotion signal.
+The residual branch is slightly worse than frozen on success and reward over 500
+episodes. Task-hard local R3 can improve the targeted held-out local subset, but
+that still does not transfer into a reliable closed-loop policy improvement.
