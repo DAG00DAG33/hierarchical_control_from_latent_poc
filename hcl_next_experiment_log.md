@@ -15504,3 +15504,71 @@ a rejection gate, but promotion requires closed-loop learned-goal deployment
 quality. No archived candidate currently combines AE/VAE-style goal dependence
 with effect32-level imitation quality, so the next representation branch should
 explicitly optimize for both rather than selecting on goal sensitivity alone.
+
+## 2026-06-26 - Delta/relation conditioning goal-use screen
+
+### Hypothesis
+
+The repository already had trained `delta` and `relation` conditioning variants
+for AE256 and VAE512. Their 20-episode smokes were not obviously bad, so they
+were a cheap way to check whether a non-FiLM conditioning mode can preserve
+deployment quality while improving goal use.
+
+### Commands
+
+```bash
+for candidate in ae256_delta ae256_relation vae512_b1e6_delta vae512_b1e6_relation; do
+  TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+    --config configs/pusht_incremental.yaml \
+    goal-diagnostics \
+    --representation learned_interface \
+    --candidate "${candidate}" \
+    --n-demo 1800 \
+    --seed 0 \
+    --samples 5000 \
+    --horizons 2,5,10 \
+    --output "results/incremental/goal_diagnostics/n1800/seed0/${candidate}/diagnostics.json"
+done
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  aggregate-goal-diagnostics \
+  --input-glob 'results/incremental/goal_diagnostics/**/diagnostics.json' \
+  --output results/incremental/goal_diagnostics/gate_report.json \
+  --force
+```
+
+### Results
+
+| candidate | conditioning | goal shuffle L2 | frame shuffle L2 | max horizon sensitivity L2 | gate status |
+| --- | --- | ---: | ---: | ---: | --- |
+| ae256_delta | delta | 0.0589 | 0.9547 | 0.0340 | reject low goal-use |
+| ae256_relation | relation | 0.0707 | 0.7603 | 0.0287 | reject low goal-use |
+| vae512_b1e6_delta | delta | 0.0599 | 0.9513 | 0.0355 | reject low goal-use |
+| vae512_b1e6_relation | relation | 0.0620 | 0.8163 | 0.0270 | reject low goal-use |
+
+After adding these rows, the aggregate gate report is:
+
+```text
+total: 19
+offline_goal_use_pass: 3
+reject_low_goal_use: 16
+```
+
+Artifacts:
+
+- `results/incremental/goal_diagnostics/n1800/seed0/ae256_delta/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/ae256_relation/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/vae512_b1e6_delta/diagnostics.json`
+- `results/incremental/goal_diagnostics/n1800/seed0/vae512_b1e6_relation/diagnostics.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Interpretation
+
+The cheap delta/relation branch is closed. These variants can look acceptable in
+tiny deployment smokes, but their low-level policies still barely react to valid
+future goals. None reaches the strict `0.1` gate on either block-shuffle goal
+action change or same-state horizon sensitivity. I skipped larger closed-loop
+evals because the whole purpose of this screen was to avoid scaling candidates
+that fail the low-level goal-use gate.

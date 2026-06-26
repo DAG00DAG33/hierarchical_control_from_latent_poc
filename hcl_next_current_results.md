@@ -233,12 +233,12 @@ offline_goal_use_pass if goal_shuffle_action_change_l2 >= 0.1
 or max_goal_sensitivity_l2 >= 0.1
 ```
 
-On the current archive, only two of eleven diagnostics pass:
+On the current archive, three of nineteen diagnostics pass:
 
 | status | candidates |
 | --- | --- |
-| offline goal-use pass | `ae256_film`, `vae512_b1e6_film` |
-| reject low goal-use | `effect32_film`, `effect32_film_h2`, `effect32_film_h5`, `dae256_n010`, `effect32`, `effect32_scene_film`, `jepa256_r01_v1_c01`, `vae256_b1e5` |
+| offline goal-use pass | `effect32_film_gsens`, `ae256_film`, `vae512_b1e6_film` |
+| reject low goal-use | `effect32_film`, `effect32_film_gsens_light`, `effect32_film_h2`, `effect32_film_h5`, `effect32_goal_residual`, `effect64_film`, `ae256_delta`, `ae256_relation`, `dae256_n010`, `effect32`, `effect32_scene_film`, `jepa256_r01_v1_c01`, `vae256_b1e5`, `vae512_b1e6_delta`, `vae512_b1e6_relation` |
 
 This formalizes the current decision rule. Effect32 remains the best observed
 deployment base, but it fails the strict offline goal-use gate; AE/VAE FiLM
@@ -260,6 +260,21 @@ goal-dependent than effect32. They still underperform effect32 on learned-goal
 deployment. The promising region is therefore not occupied by any current
 candidate. We need a representation/architecture that keeps the AE/VAE-style
 goal sensitivity while preserving effect32-level closed-loop imitation quality.
+
+I also checked the already-trained AE/VAE `delta` and `relation` conditioning
+variants. They had decent 20-episode deployment smokes, but all four fail the
+offline goal-use gate:
+
+| candidate | conditioning | goal shuffle L2 | max horizon sensitivity L2 | status |
+| --- | --- | ---: | ---: | --- |
+| ae256_delta | delta | 0.0589 | 0.0340 | reject |
+| ae256_relation | relation | 0.0707 | 0.0287 | reject |
+| vae512_b1e6_delta | delta | 0.0599 | 0.0355 | reject |
+| vae512_b1e6_relation | relation | 0.0620 | 0.0270 | reject |
+
+So the only archived AE/VAE conditioning mode that meaningfully uses the goal is
+FiLM, and FiLM's stronger goal dependence still does not recover effect32-level
+learned-goal performance.
 
 I then added a direct low-level goal-sensitivity regularizer as an opt-in
 learned-interface policy loss and trained `effect32_film_gsens`, which reuses
