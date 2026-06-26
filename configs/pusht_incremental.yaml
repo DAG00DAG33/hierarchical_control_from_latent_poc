@@ -576,6 +576,11 @@ learned_interface:
       representation_candidate: effect32
       high_level_candidate: effect32
       conditioning: film
+    effect64_film:
+      family: conditioning_ablation
+      representation_candidate: effect64
+      high_level_candidate: effect64
+      conditioning: film
     effect32_film_gsens:
       family: conditioning_ablation
       representation_candidate: effect32

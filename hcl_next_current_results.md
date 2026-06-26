@@ -295,6 +295,21 @@ screen were worse than the baseline. This closes the simple residual-addition
 architecture branch: separating a base path from a goal residual did not force
 useful goal-conditioned corrections.
 
+I also tested an `effect64_film` capacity variant that reuses the existing
+64-dimensional effect-code representation and high level with FiLM low-level
+conditioning. It increased offline goal-shuffle response compared with
+`effect32_film`, but not enough to pass the gate, and it weakened deployment:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.062 | 0.0368 | 0.645 | 0.645 |
+| effect64_film | 0.082 | 0.0488 | 0.595 | 0.535 |
+
+The aggregate goal-use gate now has `3` pass / `12` reject / `15` total. This
+closes the simple effect-code capacity increase as a fix: larger effect latents
+move the offline goal-use metric in the right direction, but again trade away
+the closed-loop quality needed before PPO scaling is justified.
+
 I added candidate-level `horizon_steps` / `update_period` overrides for learned
 interfaces and trained short-horizon aliases of the effect32 FiLM interface:
 
@@ -1296,6 +1311,11 @@ artifacts/incremental/learned_interface/effect32_goal_residual/seed0/hierarchy_m
 results/incremental/learned_interface/effect32_goal_residual/seed0/learned_hierarchy_eval_20.json
 results/incremental/learned_interface/effect32_goal_residual/seed0/oracle_hierarchy_eval_20.json
 results/incremental/goal_diagnostics/n500/seed0/effect32_goal_residual/diagnostics.json
+artifacts/incremental/learned_interface/effect64_film/seed0/hierarchy.pt
+artifacts/incremental/learned_interface/effect64_film/seed0/hierarchy_metrics.json
+results/incremental/learned_interface/effect64_film/seed0/learned_hierarchy_eval_200_seed3500000.json
+results/incremental/learned_interface/effect64_film/seed0/oracle_hierarchy_eval_200_seed3500000.json
+results/incremental/goal_diagnostics/n500/seed0/effect64_film/diagnostics.json
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json

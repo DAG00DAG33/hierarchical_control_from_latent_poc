@@ -13646,3 +13646,103 @@ preserve effect32 imitation quality and did not increase goal dependence; it
 reduced goal-shuffle action change from `0.0622` to `0.0218`. I skipped the
 longer 200-episode cross-check because both the offline gate and the 20-episode
 deployment smoke were worse than the existing effect32 FiLM baseline.
+
+## 2026-06-26: Effect64 FiLM capacity check
+
+After the sensitivity and goal-residual branches failed to preserve deployment
+quality, I tested a simple effect-code capacity increase: reuse the existing
+`effect64` representation and high level, but train a FiLM-conditioned low
+level.
+
+Config:
+
+```yaml
+effect64_film:
+  family: conditioning_ablation
+  representation_candidate: effect64
+  high_level_candidate: effect64
+  conditioning: film
+```
+
+Commands:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect64_film \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect64_film \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect64_film/diagnostics.json
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect64_film \
+  --seed 0 \
+  --episodes 200 \
+  --goal-source learned \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect64_film \
+  --seed 0 \
+  --episodes 200 \
+  --goal-source oracle \
+  --eval-seed-start 3500000 \
+  --force
+```
+
+### Training Metrics
+
+Best hierarchy epoch was `57`:
+
+```text
+oracle_action_mae: 0.0384
+predicted_action_mae: 0.0386
+prediction_induced_action_l2: 0.0142
+normalized_goal_l2: 4.1331
+```
+
+### Results
+
+| candidate | goal shuffle L2 | frame shuffle L2 | max horizon sensitivity L2 | gate status | learned success | oracle success |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| effect32_film | 0.0622 | 0.9503 | 0.0368 | reject | 0.645 | 0.645 |
+| effect64_film | 0.0823 | 0.9348 | 0.0488 | reject | 0.595 | 0.535 |
+
+After including this candidate, the aggregate goal-diagnostics report has:
+
+```text
+total: 15
+offline_goal_use_pass: 3
+reject_low_goal_use: 12
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect64_film/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect64_film/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect64_film/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect64_film/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect64_film/diagnostics.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+
+### Interpretation
+
+The larger effect code moves goal sensitivity in the desired direction
+(`0.0622 -> 0.0823` goal-shuffle L2), but it still fails the strict gate and
+loses deployment quality (`0.645 -> 0.595` learned, `0.645 -> 0.535` oracle).
+This closes the simple "increase effect latent capacity" branch as a fix. Like
+the sensitivity-margin branch, it improves an offline goal-use number while
+making the hierarchy less useful as an RL base.
