@@ -11037,6 +11037,146 @@ does use goals in closed loop, but not enough better than `effect32_film` to
 justify a D_phi/R3 branch. I skipped reachability training and PPO for this
 candidate.
 
+## 2026-06-26 - Exported R3 hierarchy and fixed-seed protocol check
+
+I added a small utility to export an R3 direct-last-layer low-level checkpoint
+back into a normal learned-interface hierarchy checkpoint:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  export-direct-hierarchy \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --output artifacts/incremental/learned_interface/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_best_hierarchy.pt \
+  --force
+```
+
+I also extended `incremental learned-interface-eval` with `--checkpoint` so a
+specific hierarchy file can be evaluated without requiring a config candidate
+entry. A direct action-equivalence check showed the exported low-level policy
+and the R3 direct agent produce identical actions on identical low-level
+conditions:
+
+```text
+max_abs_action_diff = 0.0
+mean_abs_action_diff = 0.0
+```
+
+Then I evaluated the exported hierarchy on the same 200 fixed seeds used for
+the previous effect32 learned/oracle/shuffled screen:
+
+```bash
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_r3_best_export \
+  --checkpoint artifacts/incremental/learned_interface/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_best_hierarchy.pt \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_r3_best_export \
+  --checkpoint artifacts/incremental/learned_interface/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_best_hierarchy.pt \
+  --goal-source oracle \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_r3_best_export \
+  --checkpoint artifacts/incremental/learned_interface/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_best_hierarchy.pt \
+  --goal-source shuffled \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+```
+
+Exported hierarchy eval:
+
+| policy | goal source | success | max reward | final reward |
+| --- | --- | ---: | ---: | ---: |
+| frozen hierarchy | learned | 0.645 | 0.7420 | 0.7347 |
+| frozen hierarchy | oracle | 0.645 | 0.7464 | 0.7399 |
+| frozen hierarchy | shuffled | 0.280 | 0.4602 | 0.4255 |
+| exported R3 hierarchy | learned | 0.635 | 0.7393 | 0.7305 |
+| exported R3 hierarchy | oracle | 0.605 | 0.7166 | 0.7066 |
+| exported R3 hierarchy | shuffled | 0.265 | 0.4433 | 0.4065 |
+
+Because this contradicted the earlier low-level vector eval result, I ran an
+exact fixed-seed low-level serial check on the first 100 seeds of the same
+window:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial100_seed3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Fixed-seed low-level serial result:
+
+| policy | success | max reward | raw reduction | selected reduction | goal reach | action delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen serial100 | 0.600 | 0.7085 | 0.3993 | 0.0845 | 0.7190 | 0.000000 |
+| R3 serial100 | 0.670 | 0.7618 | 0.4213 | 0.0824 | 0.7300 | 0.000981 |
+
+Paired exact-seed comparison:
+
+| episodes | improvements | regressions | net | success delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | 14 | 7 | +7 | +0.070 |
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_best_hierarchy.pt`
+- `results/incremental/learned_interface/effect32_film_r3_best_export/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_r3_best_export/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_r3_best_export/seed0/shuffled_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_serial100_seed3500000/paired_vs_frozen_serial100_seed3500000.json`
+
+Interpretation:
+
+The export is technically correct at the low-policy level, but the
+learned-interface evaluator is not equivalent to the low-level RL evaluator for
+this checkpoint. The fixed-seed low-level serial check preserves the positive
+R3 sign on exact episode IDs (`+0.070` success, net `+7` paired episodes), while
+the exported hierarchy path regresses both learned and oracle goal sources.
+Therefore the current low-level R3 result should still be judged with
+`low-level-rl eval-serial`/`eval`, not by exporting into the learned-interface
+closed-loop evaluator. The oracle-goal separation remains unresolved until the
+two evaluator protocols are reconciled or oracle goals are implemented directly
+inside the low-level RL rollout path.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:

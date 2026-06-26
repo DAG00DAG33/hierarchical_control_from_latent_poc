@@ -106,6 +106,7 @@ from hcl_poc.low_level_rl import (
     compare_serial_low_level_segments,
     evaluate_residual_rl,
     evaluate_residual_rl_serial,
+    export_direct_low_as_hierarchy,
     fit_serial_initial_selector,
     fit_serial_segment_selector,
     record_low_level_rl_videos,
@@ -270,6 +271,18 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 if args.validation_candidate_json
                 else None,
                 ridge=args.ridge,
+                force=args.force,
+            )
+        )
+    elif args.low_level_rl_command == "export-direct-hierarchy":
+        console.print(
+            export_direct_low_as_hierarchy(
+                config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                candidate=args.candidate,
+                checkpoint_path=Path(args.checkpoint),
+                output_path=Path(args.output) if args.output else None,
                 force=args.force,
             )
         )
@@ -1899,6 +1912,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             episodes=args.episodes,
             eval_seed_start=args.eval_seed_start,
+            checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
             force=args.force,
         )
     elif args.incremental_command == "learned-interface-run":
@@ -2013,6 +2027,16 @@ def build_parser() -> argparse.ArgumentParser:
     fit_serial_segment_selector_parser.add_argument("--ridge", type=float, default=1.0)
     fit_serial_segment_selector_parser.add_argument("--force", action="store_true")
     fit_serial_segment_selector_parser.set_defaults(func=low_level_rl_cmd)
+    export_direct_hierarchy = low_level_rl_sub.add_parser("export-direct-hierarchy")
+    export_direct_hierarchy.add_argument(
+        "--n-demo", type=int, choices=[500, 1000], required=True
+    )
+    export_direct_hierarchy.add_argument("--candidate", default="vae512_w2048_b1e6")
+    export_direct_hierarchy.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
+    export_direct_hierarchy.add_argument("--checkpoint", required=True)
+    export_direct_hierarchy.add_argument("--output")
+    export_direct_hierarchy.add_argument("--force", action="store_true")
+    export_direct_hierarchy.set_defaults(func=low_level_rl_cmd)
     train_r1 = low_level_rl_sub.add_parser("train-r1")
     train_r1.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
     train_r1.add_argument("--candidate", default="vae512_w2048_b1e6")
@@ -3350,6 +3374,8 @@ def build_parser() -> argparse.ArgumentParser:
             "learned-interface-record",
         }:
             learned_interface.add_argument("--episodes", type=int)
+        if command == "learned-interface-eval":
+            learned_interface.add_argument("--checkpoint")
         if command in {"learned-interface-eval", "learned-interface-record"}:
             learned_interface.add_argument(
                 "--goal-source",

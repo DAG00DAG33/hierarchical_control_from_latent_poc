@@ -2277,6 +2277,7 @@ def evaluate_learned_interface_hierarchy(
     seed: int = 0,
     episodes: int | None = None,
     eval_seed_start: int | None = None,
+    checkpoint_path: Path | None = None,
     force: bool = False,
 ) -> Path:
     if goal_source not in {"learned", "oracle", "shuffled"}:
@@ -2303,9 +2304,13 @@ def evaluate_learned_interface_hierarchy(
     if output_path.exists() and not force:
         console.print(f"Learned-interface evaluation exists: {output_path}")
         return output_path
-    hierarchy_path = train_learned_interface_hierarchy(
-        config, candidate, seed, force=False
+    hierarchy_path = (
+        checkpoint_path
+        if checkpoint_path is not None
+        else train_learned_interface_hierarchy(config, candidate, seed, force=False)
     )
+    if not hierarchy_path.exists():
+        raise FileNotFoundError(f"Hierarchy checkpoint not found: {hierarchy_path}")
     checkpoint = torch.load(
         hierarchy_path, map_location="cpu", weights_only=False
     )
@@ -2597,6 +2602,7 @@ def evaluate_learned_interface_hierarchy(
         "goal_source": goal_source,
         "seed": seed,
         "checkpoint": str(hierarchy_path),
+        "checkpoint_candidate": checkpoint.get("candidate"),
         "episodes": eval_episodes,
         "seed_start": seed_start,
         "success": success,

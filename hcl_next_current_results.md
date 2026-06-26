@@ -54,6 +54,22 @@ The original 500-episode fresh check looked promising:
 This is still the best observed real-compatible RL checkpoint, but it did not
 remain stable under broader validation.
 
+A fixed-seed serial replay check on the first 100 seeds of that same window
+kept the positive sign:
+
+| policy | seed start | episodes | success | paired improvements | paired regressions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32_film | 3500000 | 100 | 0.600 | - | - |
+| R3 terminal-only 40k bc10 | 3500000 | 100 | 0.670 | 14 | 7 |
+
+I added an export path that converts an R3 direct-low checkpoint back into a
+normal learned-interface hierarchy checkpoint. The exported low policy is
+action-identical to the direct agent on identical conditions, but evaluating it
+through `learned-interface-eval` on 200 fixed seeds regressed learned and oracle
+success (`0.645 -> 0.635` learned, `0.645 -> 0.605` oracle). Treat that as an
+evaluator-protocol caveat rather than a low-policy weight mismatch: the low-level
+serial evaluator still shows a paired positive result on exact seeds.
+
 ### Residual-L2 gate reduces some damage
 
 A simple eval-time gate executes the frozen base action whenever the tuned

@@ -1218,6 +1218,64 @@ def _load_direct(
     return agent, checkpoint
 
 
+def export_direct_low_as_hierarchy(
+    config: Config,
+    n_demo: int,
+    seed: int,
+    candidate: str,
+    checkpoint_path: Path,
+    output_path: Path | None = None,
+    force: bool = False,
+) -> Path:
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Direct low-level checkpoint not found: {checkpoint_path}"
+        )
+    base_hierarchy_path = train_learned_interface_hierarchy(
+        config, candidate, seed, force=False
+    )
+    if output_path is None:
+        output_path = (
+            base_hierarchy_path.parent
+            / f"{checkpoint_path.parent.name}_{checkpoint_path.stem}_hierarchy.pt"
+        )
+    if output_path.exists() and not force:
+        return output_path
+    raw_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    recipe = raw_checkpoint.get("recipe", {})
+    method = str(recipe.get("method", ""))
+    if method != "r3_direct_last_layer":
+        raise ValueError(
+            "Only r3_direct_last_layer checkpoints can be exported as a hierarchy, "
+            f"got {method or '<missing>'}"
+        )
+    device = default_device()
+    frozen = _load_frozen(config, n_demo, seed, device, candidate)
+    direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
+    hierarchy = torch.load(base_hierarchy_path, map_location="cpu", weights_only=False)
+    hierarchy["low_model"] = {
+        key: value.detach().cpu()
+        for key, value in direct_agent.low_model.state_dict().items()
+    }
+    hierarchy["exported_low_level_rl"] = {
+        "source_hierarchy": str(base_hierarchy_path),
+        "source_checkpoint": str(checkpoint_path),
+        "source_method": method,
+        "source_global_step": int(checkpoint["global_step"]),
+        "n_demo": int(n_demo),
+        "candidate": candidate,
+        "seed": int(seed),
+    }
+    metadata = dict(hierarchy.get("metadata", {}))
+    metadata["exported_low_level_rl_checkpoint"] = str(checkpoint_path)
+    metadata["exported_low_level_rl_method"] = method
+    metadata["exported_low_level_rl_global_step"] = int(checkpoint["global_step"])
+    hierarchy["metadata"] = metadata
+    ensure_dir(output_path.parent)
+    torch.save(hierarchy, output_path)
+    return output_path
+
+
 @torch.inference_mode()
 def evaluate_residual_rl(
     config: Config,
