@@ -1927,14 +1927,17 @@ def evaluate_residual_rl_serial(
     segment_selector_threshold: float | None = None,
     goal_source: str = "learned",
     goal_projection: str = "none",
+    goal_projection_topk: int = 32,
     force: bool = False,
 ) -> Path:
     if goal_source not in {"learned", "oracle"}:
         raise ValueError(f"Unknown low-level serial goal source: {goal_source}")
-    if goal_projection not in {"none", "nearest_train"}:
+    if goal_projection not in {"none", "nearest_train", "nearest_train_dphi"}:
         raise ValueError(f"Unknown low-level serial goal projection: {goal_projection}")
     if goal_projection != "none" and goal_source != "learned":
         raise ValueError("Goal projection is only supported for learned goal source")
+    if goal_projection_topk <= 0:
+        raise ValueError("goal_projection_topk must be positive")
     if residual_l2_gate_max is not None and residual_l2_gate_max < 0.0:
         raise ValueError("residual_l2_gate_max must be non-negative")
     if selected_distance_gate_max is not None and selected_distance_gate_max < 0.0:
@@ -1976,7 +1979,7 @@ def evaluate_residual_rl_serial(
     frozen = _load_frozen(config, n_demo, seed, device, candidate)
     goal_prototypes: np.ndarray | None = None
     goal_prototype_norms: np.ndarray | None = None
-    if goal_projection == "nearest_train":
+    if goal_projection in {"nearest_train", "nearest_train_dphi"}:
         goal_prototypes = _load_normalized_goal_prototypes(config, frozen, candidate, seed)
         goal_prototype_norms = np.sum(np.square(goal_prototypes), axis=1)
     residual_agent: ResidualActorCritic | None = None
@@ -2007,7 +2010,17 @@ def evaluate_residual_rl_serial(
 
     reachability_model: ReachabilityDistance | None = None
     reachability_goal_norm: Standardizer | None = None
-    if distance_metric == "reachability":
+    if (
+        goal_projection == "nearest_train_dphi"
+        and reachability_checkpoint_path is None
+    ):
+        reachability_checkpoint_path = (
+            _default_reachability_checkpoint(config, n_demo, seed)
+            if candidate == VAE_CANDIDATE
+            else _candidate_reachability_checkpoint(config, candidate, seed)
+        )
+
+    if distance_metric == "reachability" or goal_projection == "nearest_train_dphi":
         if reachability_checkpoint_path is None:
             raise ValueError("reachability distance metric requires a checkpoint")
         reachability_model, reachability_goal_norm, _checkpoint = load_reachability_distance(
@@ -2081,6 +2094,7 @@ def evaluate_residual_rl_serial(
     serial_segment_selector_use_tuned: list[float] = []
     goal_prediction_l2: list[float] = []
     projected_goal_l2: list[float] = []
+    projected_goal_dphi: list[float] = []
     replay_state_error_max: list[float] = []
     reached: list[float] = []
     selected_metric_terminal_scores: list[float] = []
@@ -2145,7 +2159,7 @@ def evaluate_residual_rl_serial(
                         .numpy()
                     )
                     held_goal = predicted_goal
-                    if goal_projection == "nearest_train":
+                    if goal_projection in {"nearest_train", "nearest_train_dphi"}:
                         if goal_prototypes is None or goal_prototype_norms is None:
                             raise RuntimeError("Goal prototype bank was not initialized")
                         predicted_row = predicted_goal[0].astype(np.float32)
@@ -2154,7 +2168,32 @@ def evaluate_residual_rl_serial(
                             - 2.0 * (goal_prototypes @ predicted_row)
                             + float(np.sum(np.square(predicted_row)))
                         )
-                        nearest_index = int(np.argmin(distances))
+                        if goal_projection == "nearest_train":
+                            nearest_index = int(np.argmin(distances))
+                        else:
+                            if reachability_model is None or reachability_goal_norm is None:
+                                raise RuntimeError(
+                                    "Reachability model was not initialized for D_phi projection"
+                                )
+                            topk = min(int(goal_projection_topk), len(goal_prototypes))
+                            candidate_indices = np.argpartition(distances, topk - 1)[:topk]
+                            candidate_goals = goal_prototypes[candidate_indices]
+                            current_batch = np.repeat(
+                                current_latent.astype(np.float32),
+                                topk,
+                                axis=0,
+                            )
+                            candidate_dphi = _reachability_distance_values(
+                                reachability_model,
+                                reachability_goal_norm,
+                                frozen,
+                                current_batch,
+                                candidate_goals,
+                                device,
+                            )
+                            best_slot = int(np.argmin(candidate_dphi))
+                            nearest_index = int(candidate_indices[best_slot])
+                            projected_goal_dphi.append(float(candidate_dphi[best_slot]))
                         held_goal = goal_prototypes[nearest_index : nearest_index + 1].copy()
                         projected_goal_l2.append(
                             float(np.sqrt(max(float(distances[nearest_index]), 0.0)))
@@ -2483,11 +2522,17 @@ def evaluate_residual_rl_serial(
         else None,
         "goal_source": goal_source,
         "goal_projection": goal_projection,
+        "goal_projection_topk": int(goal_projection_topk)
+        if goal_projection == "nearest_train_dphi"
+        else None,
         "goal_projection_prototypes": int(len(goal_prototypes))
         if goal_prototypes is not None
         else None,
         "normalized_goal_projection_l2": float(np.mean(projected_goal_l2))
         if projected_goal_l2
+        else None,
+        "goal_projection_dphi": float(np.mean(projected_goal_dphi))
+        if projected_goal_dphi
         else None,
         "normalized_goal_prediction_l2": float(np.mean(goal_prediction_l2))
         if goal_prediction_l2

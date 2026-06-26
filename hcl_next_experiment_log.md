@@ -16105,3 +16105,136 @@ future-goal swaps are numerically indistinguishable from frozen. This closes the
 strongest task-hard local objective as a goal-identifiability fix: it can shape
 small terminal task-reward deltas on selected local starts, but it does not
 teach a materially more goal-conditioned low-level correction.
+
+## 2026-06-26 - D_phi-ranked nearest goal projection smoke
+
+### Hypothesis
+
+Raw nearest-training-goal projection keeps high-level goals on the replay
+manifold, but it chooses prototypes by latent L2 to the predicted goal. A more
+control-aligned projection is to use raw L2 only to get a small candidate set,
+then choose the candidate with lowest learned reachability distance
+`D_phi(current, candidate_goal)`.
+
+### Implementation
+
+Added a serial eval-only projection mode:
+
+```text
+--goal-projection nearest_train_dphi
+--goal-projection-topk 32
+```
+
+The evaluator loads the same normalized training-goal prototype bank used by
+`nearest_train`, selects the top-k raw-L2 nearest prototypes to the high-level
+prediction, then ranks those candidates with the configured reachability
+checkpoint.
+
+### Commands
+
+R3 residual, two 20-episode prefixes:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10 \
+  --episodes 20 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/latest.pt \
+  --goal-projection nearest_train_dphi \
+  --goal-projection-topk 32 \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10 \
+  --episodes 20 \
+  --seed-start 3600000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/latest.pt \
+  --goal-projection nearest_train_dphi \
+  --goal-projection-topk 32 \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Frozen, matched two 20-episode prefixes:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_dphi_proto_serial20_seed3500000 \
+  --episodes 20 \
+  --seed-start 3500000 \
+  --goal-projection nearest_train_dphi \
+  --goal-projection-topk 32 \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl --config configs/pusht_incremental.yaml eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_dphi_proto_serial20_seed3600000 \
+  --episodes 20 \
+  --seed-start 3600000 \
+  --goal-projection nearest_train_dphi \
+  --goal-projection-topk 32 \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+I also attempted the 100-episode R3 `seed_start=3500000` run first, but
+interrupted it after several minutes and switched to 20-episode matched smokes.
+
+### Results
+
+The table compares the new D_phi-ranked projection against the first 20 episodes
+of existing no-projection and raw nearest-train 100-episode serial files on the
+same two seed windows.
+
+| policy | projection | episodes | success | final reward | max reward |
+| --- | --- | ---: | ---: | ---: | ---: |
+| frozen | none | 40 | 0.700 | 0.6791 | 0.7852 |
+| frozen | nearest_train | 40 | 0.600 | 0.6292 | 0.7136 |
+| frozen | nearest_train_dphi | 40 | 0.675 | 0.7353 | 0.7679 |
+| R3 | none | 40 | 0.625 | 0.6301 | 0.7383 |
+| R3 | nearest_train | 40 | 0.600 | 0.6018 | 0.7150 |
+| R3 | nearest_train_dphi | 40 | 0.650 | 0.6106 | 0.7425 |
+
+Projection diagnostics:
+
+| policy | projection L2 | projection D_phi |
+| --- | ---: | ---: |
+| frozen nearest_train_dphi | 2.1398 | 0.5536 |
+| R3 nearest_train_dphi | 2.1101 | 0.5780 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_dphi_proto_serial20_seed3500000/serial_eval_20_seed3500000_nearest_train_dphi.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_dphi_proto_serial20_seed3600000/serial_eval_20_seed3600000_nearest_train_dphi.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/serial_eval_20_seed3500000_nearest_train_dphi.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/serial_eval_20_seed3600000_nearest_train_dphi.json`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/low_level_rl.py src/hcl_poc/cli.py
+python3 -m json.tool <each new serial eval JSON>
+```
+
+### Interpretation
+
+`D_phi` ranking is better than raw nearest-goal projection, especially for
+avoiding the reward/success loss from naive prototype snapping. It is not a
+promotion path yet: over the matched 40-episode smoke it does not beat the
+no-projection frozen success and only gives a small mixed R3 signal. This
+supports the narrower conclusion that reachability-aware goal projection is a
+useful high-level diagnostic, but high-level on-manifold projection alone does
+not solve the low-level/R3 reliability problem.

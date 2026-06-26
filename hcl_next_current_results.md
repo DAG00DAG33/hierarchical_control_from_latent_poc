@@ -105,6 +105,27 @@ The projection is therefore a useful high-level diagnostic, not a strong policy
 fix. It closes only a small fraction of the learned-vs-oracle gap for the frozen
 policy and hurts the current R3 aggregate.
 
+I then added a more plan-I-style eval-only variant, `nearest_train_dphi`: first
+take the top-k nearest training goals by raw latent L2, then select the one with
+lowest learned reachability distance `D_phi(current, goal)`. On two matched
+20-episode prefixes of the existing serial seed windows (`3500000`, `3600000`,
+top-k `32`), this beat raw nearest-goal projection but still did not clearly
+beat no projection:
+
+| policy | projection | episodes | success | final reward | max reward |
+| --- | --- | ---: | ---: | ---: | ---: |
+| frozen | none | 40 | 0.700 | 0.6791 | 0.7852 |
+| frozen | nearest_train | 40 | 0.600 | 0.6292 | 0.7136 |
+| frozen | nearest_train_dphi | 40 | 0.675 | 0.7353 | 0.7679 |
+| R3 | none | 40 | 0.625 | 0.6301 | 0.7383 |
+| R3 | nearest_train | 40 | 0.600 | 0.6018 | 0.7150 |
+| R3 | nearest_train_dphi | 40 | 0.650 | 0.6106 | 0.7425 |
+
+This is a better projection diagnostic than raw nearest-neighbor snapping, but
+not a promotion path yet. It suggests `D_phi` can choose less harmful
+on-manifold goals than raw nearest L2, while also confirming that high-level
+goal projection alone is not enough to make the R3 residual reliable.
+
 ### Residual-L2 gate reduces some damage
 
 A simple eval-time gate executes the frozen base action whenever the tuned

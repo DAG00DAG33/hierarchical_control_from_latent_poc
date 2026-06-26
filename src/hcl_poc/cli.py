@@ -371,6 +371,7 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 segment_selector_threshold=args.segment_selector_threshold,
                 goal_source=args.goal_source,
                 goal_projection=args.goal_projection,
+                goal_projection_topk=args.goal_projection_topk,
                 force=args.force,
             )
         )
@@ -2260,9 +2261,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     low_eval_serial.add_argument(
         "--goal-projection",
-        choices=["none", "nearest_train"],
+        choices=["none", "nearest_train", "nearest_train_dphi"],
         default="none",
     )
+    low_eval_serial.add_argument("--goal-projection-topk", type=int, default=32)
     low_eval_serial.add_argument(
         "--distance-metric",
         choices=["raw_l2", "reachability"],
