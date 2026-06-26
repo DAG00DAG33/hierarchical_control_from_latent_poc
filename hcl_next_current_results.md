@@ -764,6 +764,26 @@ So the current learned linear selector is not a useful online controller. The
 selector path should now move beyond episode-level outcome fitting: either train
 a policy/selector directly online, or change the RL objective first.
 
+As an upper-bound selector diagnostic, I added `--oracle-segment-selector` to
+the closed-loop eval. At each high-level replan it copies the simulator state,
+rolls frozen and tuned for one held-goal segment, and executes the branch whose
+counterfactual final latent is closer to the current held goal. This is not
+real-compatible, but it tests whether perfect local same-state branch selection
+would help.
+
+Matched 20-seed slices:
+
+| seed | frozen | ungated residual | oracle segment selector | selector residual rate |
+| ---: | ---: | ---: | ---: | ---: |
+| 4600000 | 0.350 | 0.400 | 0.350 | 0.572 |
+| 4700000 | 0.100 | 0.150 | 0.200 | 0.537 |
+
+The two-slice aggregate ties ungated residual (`0.275`) and remains only above
+frozen (`0.225`). Even a privileged one-segment latent-distance oracle is not a
+robust selector for task success here. This points back to the objective: the
+tuned branch needs to create a larger, more task-aligned effect, not merely be
+selected by a sharper local latent-distance heuristic.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -801,7 +821,9 @@ The next useful directions are:
    full-episode summary selector was strong. Further gate work should therefore
    use online step/recurrent context or train a selector/policy directly in the
    closed-loop distribution; offline local segment deltas and initial switches
-   are not enough.
+   are not enough. A sim-privileged one-segment oracle selector also tied
+   ungated residual on two matched slices, so local latent-distance branch
+   choice alone is unlikely to be the missing ingredient.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not

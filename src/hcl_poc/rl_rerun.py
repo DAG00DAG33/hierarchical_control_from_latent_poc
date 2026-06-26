@@ -3927,6 +3927,12 @@ def _closed_loop_step_selector_scores(
     return normalized @ selector["weights"] + selector["bias"]
 
 
+def _copy_env_state(source: Any, target: Any) -> None:
+    from hcl_poc.incremental import _clone_mani_state_dict
+
+    target.unwrapped.set_state_dict(_clone_mani_state_dict(source.unwrapped.get_state_dict()))
+
+
 @torch.inference_mode()
 def evaluate_rl_rerun_closed_loop_r1(
     config: Config,
@@ -3942,6 +3948,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
+    oracle_segment_selector: bool = False,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -3964,6 +3971,8 @@ def evaluate_rl_rerun_closed_loop_r1(
         raise ValueError("action_delta_gate_min must be non-negative")
     if goal_l2_gate_min is not None and goal_l2_gate_min < 0.0:
         raise ValueError("goal_l2_gate_min must be non-negative")
+    if oracle_segment_selector and (step_selector_path is not None):
+        raise ValueError("oracle_segment_selector and step_selector_path cannot both be set")
     need_oracle_branch = goal_source == "oracle" or diagnose_oracle_goals
     step_selector = (
         _load_closed_loop_step_selector(step_selector_path)
@@ -4050,6 +4059,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         episode_action_delta_gate_rate: list[float] = []
         episode_goal_l2_gate_rate: list[float] = []
         episode_step_selector_residual_rate: list[float] = []
+        episode_oracle_segment_selector_residual_rate: list[float] = []
         episode_goal_l2_initial: list[float] = []
         episode_goal_l2_mean: list[float] = []
         episode_predicted_oracle_goal_l2_initial: list[float] = []
@@ -4068,6 +4078,10 @@ def evaluate_rl_rerun_closed_loop_r1(
         gated_actions = 0
         goal_l2_gated_actions = 0
         step_selector_base_actions = 0
+        oracle_segment_selector_base_actions = 0
+        oracle_segment_selector_residual_decisions = 0
+        oracle_segment_selector_decisions = 0
+        oracle_segment_selector_delta_l2: list[float] = []
         high_decisions = 0
 
         for batch_start in range(0, episodes, num_envs):
@@ -4098,6 +4112,20 @@ def evaluate_rl_rerun_closed_loop_r1(
                     reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
                 )
                 if need_oracle_branch
+                else None
+            )
+            selector_env = (
+                gym.make(
+                    config.get("env_id"),
+                    obs_mode="rgb+state",
+                    control_mode=config.get("control_mode"),
+                    reward_mode="normalized_dense",
+                    render_mode=None,
+                    sim_backend=_rl_backend(config),
+                    num_envs=batch_envs,
+                    reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+                )
+                if oracle_segment_selector and use_residual
                 else None
             )
             action_low = torch.as_tensor(
@@ -4144,6 +4172,12 @@ def evaluate_rl_rerun_closed_loop_r1(
             current_action_delta_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_step_selector_residual_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_oracle_segment_selector_residual_sum = np.zeros(
+                batch_envs, dtype=np.float32
+            )
+            current_oracle_segment_selector_use_residual = np.zeros(
+                batch_envs, dtype=np.bool_
+            )
             current_action_count = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_initial = np.full(batch_envs, np.nan, dtype=np.float32)
             current_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
@@ -4166,6 +4200,126 @@ def evaluate_rl_rerun_closed_loop_r1(
                 obs, _info = env.reset(seed=reset_seeds)
                 if branch_env is not None and oracle_copy_mode == "state_dict":
                     branch_env.reset(seed=reset_seeds)
+                if selector_env is not None:
+                    selector_env.reset(seed=reset_seeds)
+
+                def branch_segment_final_distance(
+                    *,
+                    start_obs: dict[str, Any],
+                    start_previous_action: np.ndarray,
+                    goal: np.ndarray,
+                    use_tuned_policy: bool,
+                ) -> np.ndarray:
+                    if selector_env is None:
+                        raise RuntimeError("Oracle segment selector env was not initialized")
+                    _copy_env_state(env, selector_env)
+                    branch_obs = start_obs
+                    branch_previous_action = start_previous_action.copy()
+                    for branch_step in range(frozen.update_period):
+                        branch_frames = _phase4_frame_inputs(
+                            branch_obs,
+                            dino,
+                            int(config.get("dino.batch_size", 64)),
+                        )
+                        branch_normalized = frozen.frame_norm.transform(branch_frames)
+                        if frozen.conditioning in {"delta", "relation"} or (
+                            use_tuned_policy
+                            and not is_direct
+                            and residual_condition_mode != "full"
+                        ):
+                            branch_current_z = _encode_rerun_frames(
+                                frozen,
+                                branch_frames,
+                                device,
+                            )
+                        else:
+                            branch_current_z = np.empty_like(goal)
+                        branch_remaining = np.full(
+                            (batch_envs, 1),
+                            (frozen.update_period - branch_step) / frozen.horizon_steps,
+                            dtype=np.float32,
+                        )
+                        branch_condition_np = _low_condition_array(
+                            branch_normalized,
+                            branch_current_z,
+                            goal,
+                            branch_previous_action,
+                            branch_remaining,
+                            frozen.conditioning,
+                        )
+                        branch_condition = torch.from_numpy(branch_condition_np).to(
+                            device
+                        ).float()
+                        if base_policy == "deterministic":
+                            branch_normalized_base = frozen.low_model(branch_condition)
+                            branch_base_action = torch.from_numpy(
+                                frozen.action_norm.inverse(
+                                    branch_normalized_base.cpu().numpy().astype(np.float32)
+                                )
+                            ).to(device)
+                        else:
+                            if flow_model is None or flow_checkpoint is None:
+                                raise RuntimeError("R2 flow base was not loaded")
+                            branch_base_action = _low_flow_base_action(
+                                flow_model,
+                                flow_checkpoint,
+                                branch_condition,
+                                frozen,
+                            )
+                        if use_tuned_policy and is_direct:
+                            branch_unclipped = agent.get_action_and_value(
+                                branch_condition,
+                                deterministic=True,
+                            )[0]
+                        elif use_tuned_policy:
+                            branch_residual_condition_np = _residual_condition_array(
+                                mode=residual_condition_mode,
+                                full_condition=branch_condition_np,
+                                current_z=branch_current_z,
+                                goal_z=goal,
+                                previous_action=branch_previous_action,
+                                remaining=branch_remaining,
+                            )
+                            branch_residual_condition = torch.from_numpy(
+                                branch_residual_condition_np
+                            ).to(device).float()
+                            branch_raw_residual = agent.get_action_and_value(
+                                branch_residual_condition,
+                                deterministic=True,
+                            )[0]
+                            _branch_residual, branch_unclipped, _branch_action = (
+                                _residual_action_from_raw(
+                                    branch_base_action,
+                                    branch_raw_residual,
+                                    alpha,
+                                    action_low,
+                                    action_high,
+                                    residual_action_mode,
+                                )
+                            )
+                        else:
+                            branch_unclipped = branch_base_action
+                        branch_action = torch.clamp(branch_unclipped, action_low, action_high)
+                        branch_obs, _reward, branch_term, branch_trunc, _info = (
+                            selector_env.step(branch_action)
+                        )
+                        branch_previous_action = frozen.action_norm.transform(
+                            branch_action.cpu().numpy().astype(np.float32)
+                        )
+                        if bool(torch.all(torch.logical_or(branch_term, branch_trunc))):
+                            break
+                    branch_final_frames = _phase4_frame_inputs(
+                        branch_obs,
+                        dino,
+                        int(config.get("dino.batch_size", 64)),
+                    )
+                    branch_final_z = _encode_rerun_frames(
+                        frozen,
+                        branch_final_frames,
+                        device,
+                    )
+                    return np.linalg.norm(branch_final_z - goal, axis=-1).astype(np.float32)
+
                 for step_index in range(max_steps):
                     if not np.any(active):
                         break
@@ -4298,6 +4452,44 @@ def evaluate_rl_rerun_closed_loop_r1(
                         current_goal_l2_initial[
                             replan_indices[missing_initial]
                         ] = goal_l2[missing_initial]
+                        if selector_env is not None:
+                            if oracle_copy_mode != "state_dict" and need_oracle_branch:
+                                raise ValueError(
+                                    "oracle_segment_selector with oracle diagnostics "
+                                    "requires --oracle-copy-mode state_dict"
+                                )
+                            branch_start_obs = env.unwrapped.get_obs()
+                            branch_base_distance = branch_segment_final_distance(
+                                start_obs=branch_start_obs,
+                                start_previous_action=previous_action,
+                                goal=held_goal,
+                                use_tuned_policy=False,
+                            )
+                            branch_tuned_distance = branch_segment_final_distance(
+                                start_obs=branch_start_obs,
+                                start_previous_action=previous_action,
+                                goal=held_goal,
+                                use_tuned_policy=True,
+                            )
+                            choose_residual = (
+                                branch_tuned_distance[replan_indices]
+                                < branch_base_distance[replan_indices]
+                            )
+                            oracle_segment_selector_delta_l2.extend(
+                                (
+                                    branch_base_distance[replan_indices]
+                                    - branch_tuned_distance[replan_indices]
+                                )
+                                .astype(float)
+                                .tolist()
+                            )
+                            oracle_segment_selector_decisions += int(len(replan_indices))
+                            oracle_segment_selector_residual_decisions += int(
+                                choose_residual.sum()
+                            )
+                            current_oracle_segment_selector_use_residual[
+                                replan_indices
+                            ] = choose_residual
 
                     if frozen.conditioning in {"delta", "relation"} or (
                         use_residual and not is_direct and residual_condition_mode != "full"
@@ -4444,6 +4636,25 @@ def evaluate_rl_rerun_closed_loop_r1(
                         current_step_selector_residual_sum[
                             selector_to_residual_np
                         ] += 1.0
+                    if use_residual and oracle_segment_selector:
+                        oracle_selector_to_base_np = active & (
+                            ~current_oracle_segment_selector_use_residual
+                        )
+                        if bool(np.any(oracle_selector_to_base_np)):
+                            oracle_selector_to_base = torch.from_numpy(
+                                oracle_selector_to_base_np
+                            ).to(device)
+                            unclipped = torch.where(
+                                oracle_selector_to_base[:, None],
+                                base_action,
+                                unclipped,
+                            )
+                            oracle_segment_selector_base_actions += int(
+                                oracle_selector_to_base_np.sum()
+                            )
+                        current_oracle_segment_selector_residual_sum[
+                            active & current_oracle_segment_selector_use_residual
+                        ] += 1.0
                     current_action_delta_sum[active] += action_delta_np[active]
                     missing_action_delta_initial = active & np.isnan(
                         current_action_delta_initial
@@ -4545,6 +4756,8 @@ def evaluate_rl_rerun_closed_loop_r1(
                 env.close()
                 if branch_env is not None:
                     branch_env.close()
+                if selector_env is not None:
+                    selector_env.close()
             successes.extend(success_once.astype(float).tolist())
             final_rewards.extend(batch_final.astype(float).tolist())
             max_rewards.extend(batch_max.astype(float).tolist())
@@ -4581,6 +4794,11 @@ def evaluate_rl_rerun_closed_loop_r1(
             )
             episode_step_selector_residual_rate.extend(
                 (current_step_selector_residual_sum / action_denominator)
+                .astype(float)
+                .tolist()
+            )
+            episode_oracle_segment_selector_residual_rate.extend(
+                (current_oracle_segment_selector_residual_sum / action_denominator)
                 .astype(float)
                 .tolist()
             )
@@ -4636,6 +4854,22 @@ def evaluate_rl_rerun_closed_loop_r1(
             - (step_selector_base_actions / max(active_actions, 1))
             if use_residual and step_selector is not None
             else None,
+            "oracle_segment_selector": oracle_segment_selector if use_residual else False,
+            "oracle_segment_selector_residual_rate": 1.0
+            - (oracle_segment_selector_base_actions / max(active_actions, 1))
+            if use_residual and oracle_segment_selector
+            else None,
+            "oracle_segment_selector_decision_residual_rate": (
+                oracle_segment_selector_residual_decisions
+                / max(oracle_segment_selector_decisions, 1)
+            )
+            if use_residual and oracle_segment_selector
+            else None,
+            "oracle_segment_selector_distance_delta_l2_mean": (
+                float(np.mean(oracle_segment_selector_delta_l2))
+                if oracle_segment_selector_delta_l2
+                else None
+            ),
             "mean_residual_norm": (
                 float(np.mean(residual_norms)) if residual_norms else 0.0
             ),
@@ -4651,6 +4885,9 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_action_delta_gate_rate": episode_action_delta_gate_rate,
             "episode_goal_l2_gate_rate": episode_goal_l2_gate_rate,
             "episode_step_selector_residual_rate": episode_step_selector_residual_rate,
+            "episode_oracle_segment_selector_residual_rate": (
+                episode_oracle_segment_selector_residual_rate
+            ),
             "episode_goal_l2_initial": episode_goal_l2_initial,
             "episode_goal_l2_mean": episode_goal_l2_mean,
             "episode_predicted_oracle_goal_l2_initial": (
@@ -4719,6 +4956,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         "action_delta_gate_min": action_delta_gate_min,
         "goal_l2_gate_min": goal_l2_gate_min,
         "step_selector_path": str(step_selector_path) if step_selector_path else None,
+        "oracle_segment_selector": oracle_segment_selector,
         "diagnose_oracle_goals": diagnose_oracle_goals,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
@@ -4766,6 +5004,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
+    oracle_segment_selector: bool = False,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -4783,6 +5022,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         action_delta_gate_min=action_delta_gate_min,
         goal_l2_gate_min=goal_l2_gate_min,
         step_selector_path=step_selector_path,
+        oracle_segment_selector=oracle_segment_selector,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )
@@ -4803,6 +5043,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
+    oracle_segment_selector: bool = False,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -4820,6 +5061,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         action_delta_gate_min=action_delta_gate_min,
         goal_l2_gate_min=goal_l2_gate_min,
         step_selector_path=step_selector_path,
+        oracle_segment_selector=oracle_segment_selector,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )

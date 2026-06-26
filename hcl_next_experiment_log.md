@@ -11846,3 +11846,122 @@ threshold over these simple state/action features. A useful selector likely
 needs to be trained directly in closed loop, with temporal context and its own
 intervention consequences, or the next work should return to changing the
 training target so residual actions are useful more often.
+
+## 2026-06-26 - Oracle segment selector upper-bound check
+
+I added `--oracle-segment-selector` to `rl-rerun eval-closed-loop-r{1,2,3}`. This
+is a simulator-privileged diagnostic:
+
+1. At each high-level replan, copy the exact current simulator state.
+2. Roll the frozen low-level for one held-goal segment.
+3. Roll the tuned low-level for the same segment from the same state.
+4. Compare final latent L2 to the current held goal.
+5. Execute the tuned branch for the segment only if its counterfactual final
+   latent is closer than the frozen branch.
+
+This is not real-compatible because it uses exact simulator state copying and
+counterfactual branch rollouts, but it tests whether a near-perfect local
+same-state selector can turn the existing residual checkpoint into a task
+improvement.
+
+Smoke command:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 4 \
+  --eval-seed-start 4730000 \
+  --num-envs 4 \
+  --goal-source learned \
+  --oracle-segment-selector \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_smoke_4_seed4730000.json
+```
+
+The smoke completed and selected tuned segments about `0.45` of the time.
+
+Because vector batching can change exact Push-T outcomes, I ran matched
+20-episode no-selector and oracle-selector checks with the same `num-envs=10`:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 4600000 \
+  --num-envs 10 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_matched20_seed4600000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 4600000 \
+  --num-envs 10 \
+  --goal-source learned \
+  --oracle-segment-selector \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_20_seed4600000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 4700000 \
+  --num-envs 10 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_matched20_seed4700000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 4700000 \
+  --num-envs 10 \
+  --goal-source learned \
+  --oracle-segment-selector \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_20_seed4700000.json
+```
+
+Results:
+
+| seed | frozen | ungated residual | oracle segment selector | selector residual action rate | selector decision residual rate | selector latent-distance delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4600000 | 0.350 | 0.400 | 0.350 | 0.572 | 0.575 | 0.051 |
+| 4700000 | 0.100 | 0.150 | 0.200 | 0.537 | 0.537 | 0.285 |
+| aggregate | 0.225 | 0.275 | 0.275 | - | - | - |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_smoke_4_seed4730000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_matched20_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_20_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_matched20_seed4700000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_20_seed4700000.json`
+
+Interpretation:
+
+The oracle selector confirms that same-state counterfactual branch selection can
+identify local latent-distance improvements, but those choices do not translate
+to a robust task gain. It improves the weaker `4700000` slice but removes the
+ungated residual gain on `4600000`; aggregate success ties ungated residual.
+This is strong evidence against spending more time on selectors that optimize
+one-segment latent goal distance for this checkpoint. The next useful move is
+to change the objective/target so the tuned branch produces larger and more
+task-aligned improvements, or to train selection directly against full
+closed-loop outcomes rather than local latent endpoint distance.
