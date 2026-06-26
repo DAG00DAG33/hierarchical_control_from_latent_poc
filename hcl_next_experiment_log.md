@@ -12075,3 +12075,127 @@ one-segment terminal dense reward as the paired target is still too weak/noisy
 under the current local-R3 update. The next objective work should change the
 target regime more substantially, or train directly against closed-loop outcome
 rather than another one-segment local proxy.
+
+## 2026-06-26 - Online prefix-summary selector check
+
+### Hypothesis
+
+The offline full-episode summary selector was a strong non-deployable upper
+bound (`0.390` selector success versus `0.290` frozen/residual on validation),
+while the instantaneous online step selector was weak. A middle ground is to
+deploy the same summary-feature selector using cumulative prefix features that
+are available online:
+
+- action-delta mean so far;
+- action-delta max so far;
+- policy saturation rate so far;
+- goal-L2 initial/current;
+- goal-L2 mean so far;
+- high-level decisions so far.
+
+This tests whether online context, not only instantaneous features, is enough
+to recover part of the full-summary selector signal.
+
+### Implementation
+
+I extended `eval-closed-loop-r{1,2,3} --step-selector` support so selector
+features can include:
+
+```text
+episode_action_delta_l2_mean
+episode_action_delta_l2_max
+episode_policy_saturation_rate
+episode_goal_l2_mean
+episode_high_level_decisions
+```
+
+The previous initial-feature selector remains supported. The full-summary
+selector file can now be loaded and evaluated online using prefix values.
+
+Smoke:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 8 \
+  --eval-seed-start 4750000 \
+  --num-envs 4 \
+  --goal-source learned \
+  --step-selector results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_summary_selector_fit_train460_valid470.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_prefix_summary_selector_smoke_8_seed4750000.json
+```
+
+The smoke completed and used residual actions `0.782` of the time.
+
+### Matched 100-episode comparison
+
+Because the older selector runs used `num_envs=64` and Push-T vectorization
+changes exact outcomes, I reran matched `num_envs=20` baselines:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4600000 \
+  --num-envs 20 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_matched_numenv20_100_seed4600000.json
+```
+
+The same command was repeated for `4700000`, and for both selector files:
+
+- initial selector:
+  `closed_loop_initial_selector_fit_train460_valid470.json`
+- prefix-summary selector:
+  `closed_loop_summary_selector_fit_train460_valid470.json`
+
+Results:
+
+| seed | policy | frozen | policy success | success delta | max-reward delta | selector residual rate |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 4600000 | ungated residual | 0.310 | 0.320 | +0.010 | -0.0009 | 1.000 |
+| 4600000 | initial-step selector | 0.310 | 0.400 | +0.090 | +0.0612 | 0.824 |
+| 4600000 | prefix-summary selector | 0.310 | 0.320 | +0.010 | -0.0021 | 0.813 |
+| 4700000 | ungated residual | 0.340 | 0.340 | +0.000 | -0.0009 | 1.000 |
+| 4700000 | initial-step selector | 0.340 | 0.320 | -0.020 | -0.0145 | 0.838 |
+| 4700000 | prefix-summary selector | 0.340 | 0.350 | +0.010 | +0.0061 | 0.819 |
+
+Aggregates:
+
+| policy | frozen mean | policy mean | success delta | max-reward delta | residual action rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ungated residual | 0.325 | 0.330 | +0.005 | -0.0009 | 1.000 |
+| initial-step selector | 0.325 | 0.360 | +0.035 | +0.0233 | 0.831 |
+| prefix-summary selector | 0.325 | 0.335 | +0.010 | +0.0020 | 0.816 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_prefix_summary_selector_smoke_8_seed4750000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_matched_numenv20_100_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_matched_numenv20_100_seed4700000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initial_step_selector_numenv20_100_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initial_step_selector_numenv20_100_seed4700000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_prefix_summary_selector_100_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_prefix_summary_selector_100_seed4700000.json`
+
+### Interpretation
+
+The cumulative prefix-summary selector does not recover the strong offline
+full-summary upper bound. It is only slightly above frozen and ungated residual
+on this matched `num_envs=20` check.
+
+The initial-step selector looks better under `num_envs=20`, but that conflicts
+with the earlier `num_envs=64` validation where it was neutral in-sample and
+worse on the validation bank. This is useful as a vectorization-sensitivity
+warning, not as a robust selector result. A selector that is genuinely useful
+needs to be trained and evaluated in the closed-loop intervention distribution,
+not fit once from episode summaries and replayed as a simple linear online
+fallback.

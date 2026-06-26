@@ -813,6 +813,28 @@ a promotion candidate. It is useful mostly as infrastructure and evidence that
 one-segment terminal dense reward alone is still too weak/noisy under the
 current local-R3 update.
 
+I also tested whether the strong non-deployable full-episode summary selector
+could be made deployable by using online prefix approximations of its features
+(`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
+and high-level decisions so far). The evaluator now accepts these cumulative
+features in `--step-selector`.
+
+Matched `num_envs=20`, 100-episode windows:
+
+| seed | frozen | ungated residual | initial-step selector | prefix-summary selector |
+| ---: | ---: | ---: | ---: | ---: |
+| 4600000 | 0.310 | 0.320 | 0.400 | 0.320 |
+| 4700000 | 0.340 | 0.340 | 0.320 | 0.350 |
+| mean | 0.325 | 0.330 | 0.360 | 0.335 |
+
+The prefix-summary selector only gives `+0.010` over frozen and does not recover
+the offline full-summary upper bound. The initial-step selector looks better in
+this matched `num_envs=20` check, but the same selector was previously neutral
+or worse with `num_envs=64`. Treat that as vectorization-sensitive diagnostic
+evidence, not a robust online selector. The broader conclusion still holds:
+linear selectors over simple online features are not enough; a real selector
+would need to be trained/evaluated in the closed-loop intervention distribution.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:

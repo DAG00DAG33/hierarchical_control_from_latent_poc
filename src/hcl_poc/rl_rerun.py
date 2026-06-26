@@ -3760,8 +3760,13 @@ DEFAULT_CLOSED_LOOP_SELECTOR_FEATURES = [
 
 ONLINE_STEP_SELECTOR_FEATURES = {
     "episode_action_delta_l2_initial": "action_delta_l2",
+    "episode_action_delta_l2_mean": "action_delta_l2_prefix_mean",
+    "episode_action_delta_l2_max": "action_delta_l2_prefix_max",
     "episode_policy_saturation_initial": "policy_saturation",
+    "episode_policy_saturation_rate": "policy_saturation_prefix_rate",
     "episode_goal_l2_initial": "goal_l2",
+    "episode_goal_l2_mean": "goal_l2_prefix_mean",
+    "episode_high_level_decisions": "high_level_decisions",
 }
 
 
@@ -3956,21 +3961,14 @@ def _load_closed_loop_step_selector(path: Path) -> dict[str, Any]:
 
 def _closed_loop_step_selector_scores(
     selector: dict[str, Any],
-    action_delta_l2: np.ndarray,
-    policy_saturation: np.ndarray,
-    goal_l2: np.ndarray,
+    feature_values: dict[str, np.ndarray],
 ) -> np.ndarray:
     values: list[np.ndarray] = []
     for name in selector["feature_names"]:
         online_name = ONLINE_STEP_SELECTOR_FEATURES[name]
-        if online_name == "action_delta_l2":
-            values.append(action_delta_l2)
-        elif online_name == "policy_saturation":
-            values.append(policy_saturation)
-        elif online_name == "goal_l2":
-            values.append(goal_l2)
-        else:
+        if online_name not in feature_values:
             raise RuntimeError(f"Unhandled online selector feature: {online_name}")
+        values.append(feature_values[online_name])
     features = np.stack(values, axis=1).astype(np.float32)
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
     normalized = (features - selector["mean"]) / selector["std"]
@@ -4663,11 +4661,42 @@ def evaluate_rl_rerun_closed_loop_r1(
                             goal_l2_gated_actions += int(goal_l2_gate_to_base_np.sum())
                             current_goal_l2_gate_sum[goal_l2_gate_to_base_np] += 1.0
                     if use_residual and step_selector is not None:
+                        selector_action_denominator = np.maximum(
+                            current_action_count + 1.0,
+                            1.0,
+                        )
+                        selector_goal_denominator = np.maximum(
+                            current_goal_l2_count,
+                            1.0,
+                        )
+                        selector_goal_l2_mean = (
+                            current_goal_l2_sum / selector_goal_denominator
+                        ).astype(np.float32)
+                        selector_feature_values = {
+                            "action_delta_l2": action_delta_np,
+                            "action_delta_l2_prefix_mean": (
+                                (current_action_delta_sum + action_delta_np)
+                                / selector_action_denominator
+                            ).astype(np.float32),
+                            "action_delta_l2_prefix_max": np.maximum(
+                                current_action_delta_max,
+                                action_delta_np,
+                            ).astype(np.float32),
+                            "policy_saturation": policy_saturation_np,
+                            "policy_saturation_prefix_rate": (
+                                (
+                                    current_policy_saturation_sum
+                                    + policy_saturation_np
+                                )
+                                / selector_action_denominator
+                            ).astype(np.float32),
+                            "goal_l2": current_segment_goal_l2,
+                            "goal_l2_prefix_mean": selector_goal_l2_mean,
+                            "high_level_decisions": current_high_decisions,
+                        }
                         selector_scores = _closed_loop_step_selector_scores(
                             step_selector,
-                            action_delta_np,
-                            policy_saturation_np,
-                            current_segment_goal_l2,
+                            selector_feature_values,
                         )
                         selector_to_base_np = active & (
                             selector_scores < step_selector["threshold"]
