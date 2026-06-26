@@ -13818,3 +13818,71 @@ closes the current linear online-selector branch for the task-reward-debug R3
 checkpoint. A useful selector likely needs direct training in the closed-loop
 intervention distribution, or the objective needs to produce a larger
 task-aligned residual before selection is worth revisiting.
+
+## 2026-06-26: Task-hard residual oracle-goal transfer check
+
+The best task-hard local-R3 checkpoint (`bc=0.3`,
+`max_base_terminal_env_reward=0.45`) failed the learned-goal 500-episode
+closed-loop check. I ran oracle-goal closed-loop evals to separate high-level
+goal quality from low-level objective quality.
+
+Commands:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 200 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --goal-source oracle \
+  --oracle-copy-mode state_dict \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_oracle_200_seed4800000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --goal-source oracle \
+  --oracle-copy-mode state_dict \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_oracle_500_seed4800000.json
+```
+
+Results:
+
+| goal source | episodes | frozen success | residual success | success delta | final reward delta | max reward delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| learned | 500 | 0.312 | 0.304 | -0.008 | -0.0093 | -0.0029 |
+| oracle | 200 | 0.355 | 0.375 | +0.020 | +0.0185 | +0.0182 |
+| oracle | 500 | 0.372 | 0.372 | +0.000 | +0.0006 | +0.0019 |
+
+Additional 500-episode oracle diagnostics:
+
+```text
+mean residual norm: 0.000491
+action saturation: 0.0469
+```
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_oracle_200_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_oracle_500_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_500_seed4800000.json`
+
+Interpretation:
+
+Oracle goals raise the frozen ceiling and remove the learned-goal regression,
+but they do not turn this task-hard residual into a robust improvement. The
+200-episode oracle gain was another small-window false lead; the 500-episode
+result ties frozen success and only adds a tiny reward delta. This means the
+task-hard objective is not failing only because the learned high level emits bad
+goals. The low-level update itself is still too small or too weakly aligned with
+closed-loop task success.

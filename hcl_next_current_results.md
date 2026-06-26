@@ -1129,6 +1129,22 @@ The 100-episode improvement was therefore a small-window false lead. The
 task-hard local objective does shape its targeted local subset, but it still
 does not validate as a closed-loop policy improvement.
 
+I then ran the same task-hard checkpoint under oracle high-level goals. The
+first 200-episode oracle check was mildly positive, but the matched 500-episode
+window was neutral:
+
+| goal source | episodes | frozen success | residual success | success delta | final reward delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| learned | 500 | 0.312 | 0.304 | -0.008 | -0.0093 |
+| oracle | 200 | 0.355 | 0.375 | +0.020 | +0.0185 |
+| oracle | 500 | 0.372 | 0.372 | +0.000 | +0.0006 |
+
+So the task-hard residual is not simply blocked by learned high-level goal
+quality. Oracle goals raise the frozen ceiling and remove most of the damage,
+but the tuned low level still does not produce a robust improvement. This points
+back to the local objective/effect size rather than high-level prediction as the
+main blocker for this checkpoint.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
