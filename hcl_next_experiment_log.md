@@ -18551,3 +18551,48 @@ run the second 500-episode single-env window because each run takes roughly
 20 minutes and this first larger window already supports the current policy
 choice: keep `highact_strong` as the serial/RL base and treat `actiononly` as a
 vectorized learned-interface lead until the protocol difference is understood.
+
+## 2026-06-26 - Single-env learned-interface versus serial metric audit
+
+### Hypothesis
+
+The single-env learned-interface evaluator and `low-level-rl eval-serial` may
+be running the same trajectories but reporting different final-reward semantics.
+If so, per-episode success and max reward should match exactly, while
+`episode_final_reward` may differ on episodes that terminate early.
+
+### Inputs
+
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_actiononly/seed0/hcl_next_highact_actiononly_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json`
+
+### Results
+
+Per-episode array comparison:
+
+| candidate | success exact matches | max-reward exact matches | final-reward exact matches | final-reward mean diff |
+| --- | ---: | ---: | ---: | ---: |
+| highact_strong | 100 / 100 | 100 / 100 | 94 / 100 | +0.0400 |
+| actiononly | 100 / 100 | 100 / 100 | 80 / 100 | +0.1336 |
+
+The final-reward mismatches are success episodes. Example rows:
+
+| candidate | seed | serial steps | learned final | serial final | max reward |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| highact_strong | 3500014 | 100 | 1.000 | 0.3280 | 1.000 |
+| actiononly | 3500004 | 100 | 1.000 | 0.3364 | 1.000 |
+
+### Interpretation
+
+The single-env learned-interface evaluator and serial evaluator agree on the
+trajectory-level success and max-reward outcomes for this window. The
+`final_reward` discrepancy is a metric/protocol semantics issue: raw
+learned-interface evaluation stops when the environment terminates at success,
+whereas serial evaluation uses `ManiSkillVectorEnv(ignore_terminations=True)`
+and records the later reward at the 100-step horizon. Cross-protocol comparisons
+should therefore use success and max reward, not final reward. This explains
+the large serial final-reward penalty for `actiononly` without changing the
+conservative base choice, because success and max reward still do not show a
+single-env/serial advantage over `highact_strong`.

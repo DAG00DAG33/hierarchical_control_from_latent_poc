@@ -596,6 +596,16 @@ the current result already supports the conservative conclusion. Use
 `highact_strong` for serial/RL work; keep `actiononly` as a vectorized
 learned-interface lead until the evaluator protocol difference is resolved.
 
+I also audited the existing 100-episode `eval_num_envs=1` learned-interface JSONs
+against the matching `low-level-rl eval-serial` JSONs episode by episode. The
+single-env trajectories agree exactly on success and max reward for both
+`highact_strong` and `actiononly`; only `final_reward` differs. The mismatches
+are success episodes where learned-interface evaluation stops at terminal reward
+`1.0`, while the serial evaluator's `ManiSkillVectorEnv(ignore_terminations=True)`
+wrapper continues to the 100-step horizon and records the later dense reward.
+Therefore `final_reward` is not directly comparable across those two evaluator
+families; success and max reward are the safer cross-protocol metrics.
+
 I then tested a middle high-level objective,
 `effect32_film_gsens_ft_highact_goal01`, with the same frozen low policy and
 action-through-low loss but `high_goal_mse_weight=0.1`. On the first 100-seed
