@@ -363,6 +363,14 @@ learned high-level goals, the same low-level change does not transfer. The next
 representation/architecture attempt should couple high-level goal quality with
 low-level goal use, not optimize the low-level margin alone.
 
+I tested that coupling directly with `nearest_train_dphi` projection on two
+20-episode serial windows. Projection improved `effect32_film_gsens_ft` on
+aggregate (`0.625 -> 0.650` success, max reward `0.740 -> 0.754`), but the sign
+flipped across the two seed windows and the projected policy still did not beat
+the original no-projection `effect32_film` smoke (`0.700` success). So
+reachability-aware goal repair and low-level sensitivity can interact, but this
+combination is still a diagnostic rather than a promotable hierarchy.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

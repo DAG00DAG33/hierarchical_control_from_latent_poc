@@ -16370,3 +16370,81 @@ can help when the goal is good, but the current learned high-level goals do not
 support the same gain. The next representation work should treat high-level
 goal quality and low-level goal sensitivity as a coupled problem, not optimize
 the low-level margin alone.
+
+## 2026-06-26 - D_phi projection on goal-sensitivity fine-tune
+
+### Hypothesis
+
+The baseline-initialized goal-sensitivity fine-tune improved oracle-goal
+closed-loop success but hurt learned-goal success. If the issue is partly
+high-level goal quality, reachability-ranked goal projection might recover some
+of the learned-goal deployment loss for the more goal-sensitive low-level.
+
+### Commands
+
+Two matched 20-episode serial windows, with and without `nearest_train_dphi`
+projection:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft \
+  --seed 0 \
+  --run-name hcl_next_effect32_film_gsens_ft_serial20_seed3500000 \
+  --episodes 20 \
+  --seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft \
+  --seed 0 \
+  --run-name hcl_next_effect32_film_gsens_ft_serial20_seed3500000 \
+  --episodes 20 \
+  --seed-start 3500000 \
+  --goal-projection nearest_train_dphi \
+  --goal-projection-topk 32 \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+The same pair was repeated for `seed-start=3600000`.
+
+### Results
+
+| seed start | projection | success | final reward | max reward |
+| ---: | --- | ---: | ---: | ---: |
+| 3500000 | none | 0.550 | 0.5385 | 0.6822 |
+| 3500000 | nearest_train_dphi | 0.750 | 0.7726 | 0.8167 |
+| 3600000 | none | 0.700 | 0.6973 | 0.7982 |
+| 3600000 | nearest_train_dphi | 0.550 | 0.5854 | 0.6910 |
+| aggregate | none | 0.625 | 0.6179 | 0.7402 |
+| aggregate | nearest_train_dphi | 0.650 | 0.6790 | 0.7538 |
+
+Projection diagnostics:
+
+| projection | projection L2 | projection D_phi |
+| --- | ---: | ---: |
+| nearest_train_dphi aggregate | 2.0310 | 0.5787 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film_gsens_ft/seed0/hcl_next_effect32_film_gsens_ft_serial20_seed3500000/serial_eval_20_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft/seed0/hcl_next_effect32_film_gsens_ft_serial20_seed3500000/serial_eval_20_seed3500000_nearest_train_dphi.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft/seed0/hcl_next_effect32_film_gsens_ft_serial20_seed3600000/serial_eval_20_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft/seed0/hcl_next_effect32_film_gsens_ft_serial20_seed3600000/serial_eval_20_seed3600000_nearest_train_dphi.json`
+
+### Interpretation
+
+The coupled high/low diagnostic is directionally useful but not promotable.
+`D_phi` projection improves the aggregate `gsens_ft` serial smoke
+(`0.625 -> 0.650` success and better reward), but the effect flips sign between
+the two 20-episode windows. It also still fails to beat the original
+no-projection `effect32_film` smoke on the same prefixes (`0.700` success).
+This supports the same broader conclusion: reachability-aware high-level goal
+repair and low-level goal sensitivity can interact, but the current pieces do
+not yet combine into a robust learned-goal hierarchy.
