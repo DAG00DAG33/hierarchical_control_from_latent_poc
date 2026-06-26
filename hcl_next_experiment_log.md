@@ -11556,3 +11556,100 @@ because the fallback changes future states, goals, and intervention
 opportunities. The next meaningful work should stop adding hand-coded gates and
 instead change the training target or train a policy/selector directly in the
 closed-loop distribution.
+
+## 2026-06-26 - Nearest-training-goal projection for serial eval
+
+I added an eval-only learned-goal projection option to `low-level-rl
+eval-serial`:
+
+```text
+--goal-projection nearest_train
+```
+
+This option is only valid with `--goal-source learned`. At each high-level
+replan, it takes the predicted normalized goal and replaces it with the nearest
+normalized training-set goal from the learned-interface `encoded_episodes.pt`
+bank. For `effect32_film` seed 0, this yields 62,472 prototype goals after
+dropping the invalid effect-code prefix.
+
+Smoke command:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_proto_serial_smoke5_seed3500000 \
+  --episodes 5 \
+  --seed-start 3500000 \
+  --goal-source learned \
+  --goal-projection nearest_train \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+The smoke completed and reported:
+
+| episodes | success | prototypes | mean projection L2 |
+| ---: | ---: | ---: | ---: |
+| 5 | 0.400 | 62,472 | 1.918 |
+
+I then ran two 100-seed banks for the frozen policy:
+
+| seed start | learned baseline | nearest-train projection | oracle ceiling | projection vs learned |
+| ---: | ---: | ---: | ---: | ---: |
+| 3500000 | 0.600 | 0.640 | 0.680 | +0.040 |
+| 3600000 | 0.690 | 0.680 | 0.760 | -0.010 |
+| aggregate | 0.645 | 0.660 | 0.720 | +0.015 |
+
+Paired frozen projection outcomes against learned baseline:
+
+| seed start | improvements | regressions | net |
+| ---: | ---: | ---: | ---: |
+| 3500000 | 12 | 8 | +4 |
+| 3600000 | 11 | 12 | -1 |
+| aggregate | 23 | 20 | +3 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_proto_serial_smoke5_seed3500000/serial_eval_5_seed3500000_nearest_train.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_proto_serial100_seed3500000/serial_eval_100_seed3500000_nearest_train.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_proto_serial100_seed3600000/serial_eval_100_seed3600000_nearest_train.json`
+
+I also checked compatibility with the existing R3 checkpoint by evaluating the
+same `hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10` run with projected
+goals:
+
+| seed start | R3 learned baseline | R3 + projection | projection vs learned |
+| ---: | ---: | ---: | ---: |
+| 3500000 | 0.670 | 0.620 | -0.050 |
+| 3600000 | 0.710 | 0.720 | +0.010 |
+| aggregate | 0.690 | 0.670 | -0.020 |
+
+Paired R3 projection outcomes against learned baseline:
+
+| seed start | improvements | regressions | net |
+| ---: | ---: | ---: | ---: |
+| 3500000 | 14 | 19 | -5 |
+| 3600000 | 14 | 13 | +1 |
+| aggregate | 28 | 32 | -4 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/serial_eval_100_seed3500000_nearest_train.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/serial_eval_100_seed3600000_nearest_train.json`
+
+Interpretation:
+
+Nearest-training-goal projection is a useful diagnostic for the high-level
+interface, but it is not a strong fix. It gives the frozen policy only a tiny
+two-bank gain (`0.645 -> 0.660`) and remains well below the oracle frozen
+ceiling (`0.720`). It also does not combine reliably with the current R3
+low-level update (`0.690 -> 0.670`). This suggests the remaining learned-goal
+problem is not just an off-manifold high-level output that can be repaired with
+nearest-neighbor snapping; future work should either improve the high-level
+model/objective directly or train/evaluate low-level adaptation in the actual
+closed-loop learned-goal distribution.

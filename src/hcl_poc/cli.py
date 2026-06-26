@@ -359,6 +359,7 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 segment_selector_std=args.segment_selector_std,
                 segment_selector_threshold=args.segment_selector_threshold,
                 goal_source=args.goal_source,
+                goal_projection=args.goal_projection,
                 force=args.force,
             )
         )
@@ -2144,6 +2145,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--goal-source",
         choices=["learned", "oracle"],
         default="learned",
+    )
+    low_eval_serial.add_argument(
+        "--goal-projection",
+        choices=["none", "nearest_train"],
+        default="none",
     )
     low_eval_serial.add_argument(
         "--distance-metric",

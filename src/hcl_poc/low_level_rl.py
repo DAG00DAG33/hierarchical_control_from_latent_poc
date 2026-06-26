@@ -305,6 +305,46 @@ def _candidate_reachability_checkpoint(config: Config, candidate: str, seed: int
     )
 
 
+def _candidate_encoded_episodes_path(config: Config, candidate: str, seed: int) -> Path:
+    return (
+        config.path_value("paths.incremental_artifact_dir")
+        / "learned_interface"
+        / candidate
+        / f"seed{seed}"
+        / "encoded_episodes.pt"
+    )
+
+
+def _load_normalized_goal_prototypes(
+    config: Config,
+    frozen: FrozenHierarchy,
+    candidate: str,
+    seed: int,
+) -> np.ndarray:
+    encoded_path = _candidate_encoded_episodes_path(config, candidate, seed)
+    if not encoded_path.exists():
+        raise FileNotFoundError(f"Encoded episode goal bank not found: {encoded_path}")
+    payload = torch.load(encoded_path, map_location="cpu", weights_only=False)
+    if "train_goals" not in payload:
+        raise ValueError(f"Encoded episode payload is missing train_goals: {encoded_path}")
+    goal_rows: list[np.ndarray] = []
+    for goals in payload["train_goals"]:
+        goals_np = np.asarray(goals, dtype=np.float32)
+        if frozen.encoder_type == "effect":
+            goals_np = goals_np[frozen.horizon_steps :]
+        if len(goals_np) > 0:
+            goal_rows.append(goals_np)
+    if not goal_rows:
+        raise ValueError(f"No prototype goals found in encoded episode payload: {encoded_path}")
+    raw_goals = np.concatenate(goal_rows, axis=0).astype(np.float32)
+    if raw_goals.shape[1] != frozen.goal_dim:
+        raise ValueError(
+            f"Prototype goal dimension {raw_goals.shape[1]} does not match "
+            f"hierarchy goal dimension {frozen.goal_dim}"
+        )
+    return frozen.goal_norm.transform(raw_goals).astype(np.float32)
+
+
 def _condition_dim(frozen: FrozenHierarchy) -> int:
     if frozen.conditioning == "relation":
         return frozen.frame_dim + 2 * frozen.goal_dim + 4
@@ -1867,10 +1907,15 @@ def evaluate_residual_rl_serial(
     segment_selector_std: list[float] | None = None,
     segment_selector_threshold: float | None = None,
     goal_source: str = "learned",
+    goal_projection: str = "none",
     force: bool = False,
 ) -> Path:
     if goal_source not in {"learned", "oracle"}:
         raise ValueError(f"Unknown low-level serial goal source: {goal_source}")
+    if goal_projection not in {"none", "nearest_train"}:
+        raise ValueError(f"Unknown low-level serial goal projection: {goal_projection}")
+    if goal_projection != "none" and goal_source != "learned":
+        raise ValueError("Goal projection is only supported for learned goal source")
     if residual_l2_gate_max is not None and residual_l2_gate_max < 0.0:
         raise ValueError("residual_l2_gate_max must be non-negative")
     if selected_distance_gate_max is not None and selected_distance_gate_max < 0.0:
@@ -1901,12 +1946,20 @@ def evaluate_residual_rl_serial(
         raise ValueError("initial selector and segment selector cannot both be enabled")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     goal_suffix = "" if goal_source == "learned" else f"_{goal_source}_goals"
-    output = result / f"serial_eval_{episodes}_seed{seed_start}{goal_suffix}.json"
+    projection_suffix = "" if goal_projection == "none" else f"_{goal_projection}"
+    output = (
+        result / f"serial_eval_{episodes}_seed{seed_start}{goal_suffix}{projection_suffix}.json"
+    )
     if output.exists() and not force:
         return output
 
     device = default_device()
     frozen = _load_frozen(config, n_demo, seed, device, candidate)
+    goal_prototypes: np.ndarray | None = None
+    goal_prototype_norms: np.ndarray | None = None
+    if goal_projection == "nearest_train":
+        goal_prototypes = _load_normalized_goal_prototypes(config, frozen, candidate, seed)
+        goal_prototype_norms = np.sum(np.square(goal_prototypes), axis=1)
     residual_agent: ResidualActorCritic | None = None
     direct_agent: DirectLowActorCritic | None = None
     alpha = 0.0
@@ -2008,6 +2061,7 @@ def evaluate_residual_rl_serial(
     serial_segment_distance_gate_rate: list[float] = []
     serial_segment_selector_use_tuned: list[float] = []
     goal_prediction_l2: list[float] = []
+    projected_goal_l2: list[float] = []
     replay_state_error_max: list[float] = []
     reached: list[float] = []
     selected_metric_terminal_scores: list[float] = []
@@ -2072,6 +2126,20 @@ def evaluate_residual_rl_serial(
                         .numpy()
                     )
                     held_goal = predicted_goal
+                    if goal_projection == "nearest_train":
+                        if goal_prototypes is None or goal_prototype_norms is None:
+                            raise RuntimeError("Goal prototype bank was not initialized")
+                        predicted_row = predicted_goal[0].astype(np.float32)
+                        distances = (
+                            goal_prototype_norms
+                            - 2.0 * (goal_prototypes @ predicted_row)
+                            + float(np.sum(np.square(predicted_row)))
+                        )
+                        nearest_index = int(np.argmin(distances))
+                        held_goal = goal_prototypes[nearest_index : nearest_index + 1].copy()
+                        projected_goal_l2.append(
+                            float(np.sqrt(max(float(distances[nearest_index]), 0.0)))
+                        )
                     if goal_source == "oracle":
                         if branch_env is None or teacher is None:
                             raise RuntimeError("Oracle goal mode was not initialized")
@@ -2395,6 +2463,13 @@ def evaluate_residual_rl_serial(
         if reachability_checkpoint_path is not None
         else None,
         "goal_source": goal_source,
+        "goal_projection": goal_projection,
+        "goal_projection_prototypes": int(len(goal_prototypes))
+        if goal_prototypes is not None
+        else None,
+        "normalized_goal_projection_l2": float(np.mean(projected_goal_l2))
+        if projected_goal_l2
+        else None,
         "normalized_goal_prediction_l2": float(np.mean(goal_prediction_l2))
         if goal_prediction_l2
         else None,

@@ -85,6 +85,26 @@ under oracle goals; its apparent oracle-goal gain was a one-bank false lead.
 The remaining learned-goal R3 gain is small and should be treated as
 distribution-specific rather than a robust low-level improvement.
 
+I also tested an eval-only nearest-training-goal projection for learned serial
+goals. Each high-level prediction is snapped to the nearest normalized
+training-set goal from the learned-interface encoded replay bank. This produced
+62,472 effect32 prototypes and moved predicted goals by roughly `1.4-1.5`
+normalized L2 on average.
+
+Two exact-seed banks:
+
+| policy | seed starts | success | paired improvements | paired regressions | net |
+| --- | --- | ---: | ---: | ---: | ---: |
+| frozen learned-goal baseline | 3500000, 3600000 | 0.645 | - | - | - |
+| frozen + nearest-train projection | 3500000, 3600000 | 0.660 | 23 | 20 | +3 |
+| oracle frozen ceiling | 3500000, 3600000 | 0.720 | - | - | - |
+| R3 learned-goal baseline | 3500000, 3600000 | 0.690 | - | - | - |
+| R3 + nearest-train projection | 3500000, 3600000 | 0.670 | 28 | 32 | -4 |
+
+The projection is therefore a useful high-level diagnostic, not a strong policy
+fix. It closes only a small fraction of the learned-vs-oracle gap for the frozen
+policy and hurts the current R3 aggregate.
+
 ### Residual-L2 gate reduces some damage
 
 A simple eval-time gate executes the frozen base action whenever the tuned
@@ -768,7 +788,9 @@ The next useful directions are:
 3. Revisit horizon/representation only after the gate/objective question.
    The current effect32 interface is goal-dependent, so the main bottleneck is
    not simply "low level ignores the goal"; it is reliable improvement without
-   damaging already-good frozen behavior.
+   damaging already-good frozen behavior. Oracle serial goals and nearest-train
+   goal projection show that learned high-level goal quality matters, but simple
+   projection only gives a tiny frozen gain and does not combine well with R3.
 
 ## Key Artifacts
 
