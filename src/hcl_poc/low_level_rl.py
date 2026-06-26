@@ -19,6 +19,7 @@ from hcl_poc.incremental import (
     _clone_mani_state_dict,
     _phase4_dino_from_config,
     _phase4_frame_inputs,
+    _phase7_obs_state_tensor,
     _rl_backend,
 )
 from hcl_poc.learned_interface import (
@@ -33,7 +34,7 @@ from hcl_poc.reachability import (
     _load_reachability_latents,
     load_reachability_distance,
 )
-from hcl_poc.rl import layer_init
+from hcl_poc.rl import _rl_paths, layer_init, load_ppo_agent
 from hcl_poc.utils import Standardizer, Timer, default_device, ensure_dir, set_seed, write_json
 from hcl_poc.vae_scaling import VAE_CANDIDATE, vae_scaling_config
 
@@ -1865,8 +1866,11 @@ def evaluate_residual_rl_serial(
     segment_selector_mean: list[float] | None = None,
     segment_selector_std: list[float] | None = None,
     segment_selector_threshold: float | None = None,
+    goal_source: str = "learned",
     force: bool = False,
 ) -> Path:
+    if goal_source not in {"learned", "oracle"}:
+        raise ValueError(f"Unknown low-level serial goal source: {goal_source}")
     if residual_l2_gate_max is not None and residual_l2_gate_max < 0.0:
         raise ValueError("residual_l2_gate_max must be non-negative")
     if selected_distance_gate_max is not None and selected_distance_gate_max < 0.0:
@@ -1896,7 +1900,8 @@ def evaluate_residual_rl_serial(
     if has_initial_selector and has_segment_selector:
         raise ValueError("initial selector and segment selector cannot both be enabled")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
-    output = result / f"serial_eval_{episodes}_seed{seed_start}.json"
+    goal_suffix = "" if goal_source == "learned" else f"_{goal_source}_goals"
+    output = result / f"serial_eval_{episodes}_seed{seed_start}{goal_suffix}.json"
     if output.exists() and not force:
         return output
 
@@ -1955,6 +1960,8 @@ def evaluate_residual_rl_serial(
         )
 
     env = _visual_env(config, 1)
+    branch_env = _visual_env(config, 1) if goal_source == "oracle" else None
+    teacher = load_ppo_agent(_rl_paths(config).best, device) if goal_source == "oracle" else None
     action_low_np = np.asarray(env.single_action_space.low, dtype=np.float32)
     action_high_np = np.asarray(env.single_action_space.high, dtype=np.float32)
     action_low = torch.as_tensor(action_low_np, device=device)
@@ -2000,6 +2007,8 @@ def evaluate_residual_rl_serial(
     serial_segment_action_saturation_rate: list[float] = []
     serial_segment_distance_gate_rate: list[float] = []
     serial_segment_selector_use_tuned: list[float] = []
+    goal_prediction_l2: list[float] = []
+    replay_state_error_max: list[float] = []
     reached: list[float] = []
     selected_metric_terminal_scores: list[float] = []
     total_saturation = 0
@@ -2014,6 +2023,8 @@ def evaluate_residual_rl_serial(
         for episode_index in trange(episodes, desc=f"serial low RL {run_name}"):
             rollout_seed = seed_start + episode_index
             obs, _info = env.reset(seed=[rollout_seed])
+            if branch_env is not None:
+                branch_env.reset(seed=[rollout_seed])
             frames = _phase4_frame_inputs(obs, dino, int(config.get("dino.batch_size", 64)))
             normalized_frames = frozen.frame_norm.transform(frames)
             anchor_frames = frames.copy()
@@ -2053,13 +2064,49 @@ def evaluate_residual_rl_serial(
                     high_condition = np.concatenate(
                         [normalized_frames, previous_action], axis=-1
                     )
-                    held_goal = (
+                    predicted_goal = (
                         frozen.high_model(
                             torch.from_numpy(high_condition).to(device).float()
                         )
                         .cpu()
                         .numpy()
                     )
+                    held_goal = predicted_goal
+                    if goal_source == "oracle":
+                        if branch_env is None or teacher is None:
+                            raise RuntimeError("Oracle goal mode was not initialized")
+                        branch_env.unwrapped.set_state_dict(
+                            _clone_mani_state_dict(env.unwrapped.get_state_dict())
+                        )
+                        branch_obs = branch_env.unwrapped.get_obs()
+                        replay_error = torch.max(
+                            torch.abs(
+                                env.unwrapped.get_state()
+                                - branch_env.unwrapped.get_state()
+                            ),
+                            dim=1,
+                        ).values
+                        replay_state_error_max.append(float(replay_error.cpu().numpy()[0]))
+                        for _branch_step in range(frozen.horizon_steps):
+                            branch_state = _phase7_obs_state_tensor(branch_obs, device)
+                            branch_action = torch.clamp(
+                                teacher.actor_mean(branch_state), action_low, action_high
+                            )
+                            branch_obs, _reward, _terminated, _truncated, _info = (
+                                branch_env.step(branch_action)
+                            )
+                        branch_frames = _phase4_frame_inputs(
+                            branch_obs,
+                            dino,
+                            int(config.get("dino.batch_size", 64)),
+                        )
+                        oracle_goal = _encode_effect_progress(
+                            frozen, frames, branch_frames, device
+                        )
+                        goal_prediction_l2.append(
+                            float(np.linalg.norm(predicted_goal[0] - oracle_goal[0]))
+                        )
+                        held_goal = oracle_goal
                     anchor_frames = frames.copy()
                     current_latent = _encode_effect_progress(
                         frozen, anchor_frames, frames, device
@@ -2307,6 +2354,8 @@ def evaluate_residual_rl_serial(
                 )
     finally:
         env.close()
+        if branch_env is not None:
+            branch_env.close()
 
     initial_np = np.asarray(segment_initial_distances, dtype=np.float32)
     final_np = np.asarray(segment_final_distances, dtype=np.float32)
@@ -2344,6 +2393,13 @@ def evaluate_residual_rl_serial(
         "distance_metric": distance_metric,
         "reachability_checkpoint": str(reachability_checkpoint_path)
         if reachability_checkpoint_path is not None
+        else None,
+        "goal_source": goal_source,
+        "normalized_goal_prediction_l2": float(np.mean(goal_prediction_l2))
+        if goal_prediction_l2
+        else None,
+        "replay_current_state_error_max": float(np.max(replay_state_error_max))
+        if replay_state_error_max
         else None,
         "rl_steps": global_step,
         "episodes": episodes,

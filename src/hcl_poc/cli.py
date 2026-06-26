@@ -358,6 +358,7 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 segment_selector_mean=args.segment_selector_mean,
                 segment_selector_std=args.segment_selector_std,
                 segment_selector_threshold=args.segment_selector_threshold,
+                goal_source=args.goal_source,
                 force=args.force,
             )
         )
@@ -2139,6 +2140,11 @@ def build_parser() -> argparse.ArgumentParser:
     low_eval_serial.add_argument("--segment-selector-mean", nargs=5, type=float)
     low_eval_serial.add_argument("--segment-selector-std", nargs=5, type=float)
     low_eval_serial.add_argument("--segment-selector-threshold", type=float)
+    low_eval_serial.add_argument(
+        "--goal-source",
+        choices=["learned", "oracle"],
+        default="learned",
+    )
     low_eval_serial.add_argument(
         "--distance-metric",
         choices=["raw_l2", "reachability"],

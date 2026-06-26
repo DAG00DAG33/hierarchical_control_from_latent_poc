@@ -11177,6 +11177,127 @@ closed-loop evaluator. The oracle-goal separation remains unresolved until the
 two evaluator protocols are reconciled or oracle goals are implemented directly
 inside the low-level RL rollout path.
 
+## 2026-06-26 - Oracle-goal low-level serial R3 separation
+
+I added `--goal-source learned|oracle` to `low-level-rl eval-serial`. In oracle
+mode, the exact-seed serial evaluator:
+
+1. copies the current simulator state into a one-env branch at each low-level
+   replan;
+2. rolls the privileged PPO teacher forward for `horizon_steps`;
+3. encodes the branch endpoint as the held local goal;
+4. evaluates the frozen or tuned low-level policy with the same action path as
+   regular serial eval.
+
+The evaluator records:
+
+- `goal_source`
+- `normalized_goal_prediction_l2`
+- `replay_current_state_error_max`
+
+Smoke command:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_oracle_serial_smoke5_seed3500000 \
+  --episodes 5 \
+  --seed-start 3500000 \
+  --goal-source oracle \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Smoke result:
+
+| metric | value |
+| --- | ---: |
+| success | 0.800 |
+| max reward | 0.8490 |
+| raw reduction | 0.7758 |
+| segment goal reach | 0.820 |
+| predicted-vs-oracle goal L2 | 3.2654 |
+| replay state error max | 1.19e-07 |
+
+Then I ran the fixed 100-seed oracle-goal comparison:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_frozen_oracle_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --goal-source oracle \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_oracle_serial100_seed3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --goal-source oracle \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Result:
+
+| policy | goal source | success | max reward | raw reduction | selected reduction | goal reach | action delta L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | learned | 0.600 | 0.7085 | 0.3993 | 0.0845 | 0.7190 | 0.000000 |
+| R3 | learned | 0.670 | 0.7618 | 0.4213 | 0.0824 | 0.7300 | 0.000981 |
+| frozen | oracle | 0.680 | 0.7673 | 0.8155 | 0.1004 | 0.7780 | 0.000000 |
+| R3 | oracle | 0.710 | 0.7924 | 0.8118 | 0.1028 | 0.7630 | 0.000978 |
+
+Paired exact-seed comparison:
+
+| goal source | episodes | improvements | regressions | net | success delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| learned | 100 | 14 | 7 | +7 | +0.070 |
+| oracle | 100 | 11 | 8 | +3 | +0.030 |
+
+Oracle-goal diagnostic means:
+
+| policy | predicted-vs-oracle goal L2 | replay state error max |
+| --- | ---: | ---: |
+| frozen oracle | 3.5784 | 1.19e-07 |
+| R3 oracle | 3.6382 | 1.19e-07 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_oracle_serial_smoke5_seed3500000/serial_eval_5_seed3500000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_oracle_serial100_seed3500000/serial_eval_100_seed3500000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_oracle_serial100_seed3500000/serial_eval_100_seed3500000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_oracle_serial100_seed3500000/paired_vs_frozen_oracle_serial100_seed3500000.json`
+
+Interpretation:
+
+Oracle local goals are a real ceiling raiser: frozen effect32 improves from
+`0.600` learned-goal success to `0.680` oracle-goal success on the same exact
+100 seeds. The R3 low-level update remains positive under oracle goals, but the
+effect is smaller (`+0.030`, net `+3`) than under learned goals (`+0.070`, net
+`+7`). This means the current bottleneck is split: learned high-level goals
+leave significant performance on the table, but the low-level R3 update is not
+merely compensating for learned-goal error. It still adds a small benefit when
+given stronger local goals.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:

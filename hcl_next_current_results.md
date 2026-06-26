@@ -70,6 +70,19 @@ success (`0.645 -> 0.635` learned, `0.645 -> 0.605` oracle). Treat that as an
 evaluator-protocol caveat rather than a low-policy weight mismatch: the low-level
 serial evaluator still shows a paired positive result on exact seeds.
 
+I then added oracle-goal support directly to `low-level-rl eval-serial`. On the
+same 100 fixed seeds, oracle goals improved the frozen policy from `0.600` to
+`0.680`, and R3 still improved over the oracle-goal frozen baseline:
+
+| goal source | frozen | R3 | paired improvements | paired regressions | net |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| learned | 0.600 | 0.670 | 14 | 7 | +7 |
+| oracle | 0.680 | 0.710 | 11 | 8 | +3 |
+
+So the high-level learned goal is a real bottleneck, but it is not the whole
+story. The low-level R3 update has a small positive effect even under oracle
+local goals, while the oracle branch raises the absolute ceiling.
+
 ### Residual-L2 gate reduces some damage
 
 A simple eval-time gate executes the frozen base action whenever the tuned
