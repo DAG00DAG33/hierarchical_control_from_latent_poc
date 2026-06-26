@@ -11965,3 +11965,113 @@ one-segment latent goal distance for this checkpoint. The next useful move is
 to change the objective/target so the tuned branch produces larger and more
 task-aligned improvements, or to train selection directly against full
 closed-loop outcomes rather than local latent endpoint distance.
+
+## 2026-06-26 - Terminal task-paired local-R3 reward check
+
+After the oracle segment selector showed that one-segment latent-distance branch
+selection was not enough, I added a new `rl-rerun train-local-r3 --reward-mode
+task_paired` option. It reuses the cached frozen same-state rollout used by
+latent paired reward, but the terminal reward is the tuned segment's final
+ManiSkill dense reward minus the frozen segment's final ManiSkill dense reward:
+
+```text
+r_terminal = tuned_terminal_env_reward - frozen_terminal_env_reward
+```
+
+This keeps the prior `progress` and `paired` recipes unchanged and records
+task-paired metrics separately in history.
+
+Training smoke:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5 \
+  --steps 40960 \
+  --bc-weight 1 \
+  --terminal-weight 1 \
+  --dense-progress-weight 0 \
+  --task-reward-weight 0 \
+  --reward-mode task_paired \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --force
+```
+
+Training metrics after one update:
+
+| metric | value |
+| --- | ---: |
+| mean task-paired improvement | 0.00150 |
+| fraction task-paired improved | 0.398 |
+| terminal env reward | 0.4803 |
+| frozen terminal env reward | 0.4788 |
+| terminal latent distance | 0.6022 |
+| action delta L2 | 0.01085 |
+| task success diagnostic rate | 0.213 |
+
+Matched local validation on
+`results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json`:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+```
+
+| policy | initial distance | final distance | reduction | action delta L2 | task success-once |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 previous baseline | 1.0671 | 0.6020 | 0.4651 | - | - |
+| task-paired terminal | 1.0671 | 0.6036 | 0.4635 | 0.00042 | 0.331 |
+
+Because the local validation did not beat frozen, I only ran a small
+deployability smoke:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 8 \
+  --eval-seed-start 4740000 \
+  --num-envs 4 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/closed_loop_smoke_8_seed4740000.json
+```
+
+| policy | success | final reward | max reward | residual norm |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.625 | 0.6862 | 0.6997 | 0.00000 |
+| task-paired residual | 0.375 | 0.5536 | 0.5607 | 0.00039 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/closed_loop_smoke_8_seed4740000.json`
+
+Interpretation:
+
+The terminal task-paired objective is implemented and runnable, but this first
+diagnostic is not a promotion candidate. The training task-reward delta is
+barely positive, fewer than half of segments improve the terminal dense reward,
+matched local latent distance remains slightly worse than frozen, and the
+closed-loop smoke regresses. This adds useful negative evidence: using the
+one-segment terminal dense reward as the paired target is still too weak/noisy
+under the current local-R3 update. The next objective work should change the
+target regime more substantially, or train directly against closed-loop outcome
+rather than another one-segment local proxy.

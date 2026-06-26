@@ -2624,8 +2624,10 @@ def train_rl_rerun_local_r3(
         raise ValueError("dense_progress_weight must be non-negative")
     if task_reward_weight < 0.0:
         raise ValueError("task_reward_weight must be non-negative")
-    if reward_mode not in {"progress", "paired"}:
-        raise ValueError("reward_mode must be one of {'progress', 'paired'}")
+    if reward_mode not in {"progress", "paired", "task_paired"}:
+        raise ValueError(
+            "reward_mode must be one of {'progress', 'paired', 'task_paired'}"
+        )
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
@@ -2735,14 +2737,20 @@ def train_rl_rerun_local_r3(
         "actor_critic_depth": int(config.get("low_level_rl.residual_depth", 2)),
         "initial_logstd": resolved_initial_logstd,
         "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
-        "reward": (
-            "latent_progress_minus_terminal_distance_plus_bc_regularization_in_loss"
-            if reward_mode == "progress"
-            else (
-                "latent_progress_plus_cached_base_terminal_improvement"
-                "_plus_bc_regularization_in_loss"
-            )
-        ),
+        "reward": {
+            "progress": (
+                "latent_progress_minus_terminal_distance_plus_"
+                "bc_regularization_in_loss"
+            ),
+            "paired": (
+                "latent_progress_plus_cached_base_terminal_latent_improvement_"
+                "plus_bc_regularization_in_loss"
+            ),
+            "task_paired": (
+                "latent_progress_plus_cached_base_terminal_task_reward_improvement_"
+                "plus_bc_regularization_in_loss"
+            ),
+        }[reward_mode],
         "disallowed_training_signals": [
             "task_success",
             "object_pose",
@@ -2752,7 +2760,9 @@ def train_rl_rerun_local_r3(
     if task_reward_weight > 0.0:
         recipe["task_reward_weight"] = task_reward_weight
         recipe["reward"] = f"{recipe['reward']}_plus_mani_skill_dense_reward"
-        recipe["debug_training_signals"] = ["mani_skill_reward"]
+        recipe["debug_training_signals"] = ["mani_skill_dense_reward"]
+    elif reward_mode == "task_paired":
+        recipe["debug_training_signals"] = ["mani_skill_terminal_reward"]
     else:
         recipe["disallowed_training_signals"].insert(0, "mani_skill_reward")
     if goal_sensitivity_weight > 0:
@@ -2761,7 +2771,7 @@ def train_rl_rerun_local_r3(
         recipe["goal_sensitivity_loss"] = (
             "in-batch valid-goal swap hinge on deterministic mean action"
         )
-    if reward_mode == "paired":
+    if reward_mode != "progress":
         recipe["reward_mode"] = reward_mode
     if dense_progress_weight != 1.0:
         recipe["dense_progress_weight"] = dense_progress_weight
@@ -2784,8 +2794,8 @@ def train_rl_rerun_local_r3(
     current_z: np.ndarray
     goal_z: np.ndarray
     previous_action: np.ndarray
-    base_terminal_distance: np.ndarray
     base_terminal_distance = np.full(1, np.nan, dtype=np.float32)
+    base_terminal_env_reward = np.full(1, np.nan, dtype=np.float32)
     local_step = 0
 
     @torch.inference_mode()
@@ -2815,11 +2825,12 @@ def train_rl_rerun_local_r3(
         local_step = 0
 
     @torch.inference_mode()
-    def frozen_base_terminal_distance() -> np.ndarray:
+    def frozen_base_terminal_outcome() -> tuple[np.ndarray, np.ndarray]:
         base_obs = current_obs
         base_frames = current_frames
         base_z = current_z
         base_previous = previous_action.copy()
+        base_env_reward = np.full(num_envs, np.nan, dtype=np.float32)
         for base_step in range(horizon):
             remaining = np.full(
                 (num_envs, 1),
@@ -2842,7 +2853,8 @@ def train_rl_rerun_local_r3(
                 )
             ).to(device)
             action = torch.clamp(unclipped, action_low, action_high)
-            base_obs, _reward, _terminated, _truncated, _info = env.step(action)
+            base_obs, env_reward, _terminated, _truncated, _info = env.step(action)
+            base_env_reward = _to_numpy(env_reward).reshape(-1).astype(np.float32)
             base_frames = _phase4_frame_inputs(
                 base_obs,
                 dino,
@@ -2850,19 +2862,21 @@ def train_rl_rerun_local_r3(
             )
             base_z = _encode_rerun_frames(frozen, base_frames, device)
             base_previous = frozen.action_norm.transform(action.cpu().numpy())
-        return np.mean(np.square(base_z - goal_z), axis=-1).astype(np.float32)
+        base_distance = np.mean(np.square(base_z - goal_z), axis=-1).astype(np.float32)
+        return base_distance, base_env_reward
 
     @torch.inference_mode()
     def reset_local_episode() -> None:
-        nonlocal base_terminal_distance
+        nonlocal base_terminal_distance, base_terminal_env_reward
         group = h5[str(rng.choice(batch_keys))]
         current_t = int(rng.integers(0, max_steps - horizon + 1))
         load_local_start(group, current_t)
-        if reward_mode == "paired":
-            base_terminal_distance = frozen_base_terminal_distance()
+        if reward_mode in {"paired", "task_paired"}:
+            base_terminal_distance, base_terminal_env_reward = frozen_base_terminal_outcome()
             load_local_start(group, current_t)
         else:
             base_terminal_distance = np.full(num_envs, np.nan, dtype=np.float32)
+            base_terminal_env_reward = np.full(num_envs, np.nan, dtype=np.float32)
 
     @torch.inference_mode()
     def condition_and_bc() -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
@@ -2902,6 +2916,8 @@ def train_rl_rerun_local_r3(
         if segment_end:
             if reward_mode == "paired":
                 reward += terminal_weight * (base_terminal_distance - next_distance)
+            elif reward_mode == "task_paired":
+                reward += terminal_weight * (env_reward_np - base_terminal_env_reward)
             else:
                 reward -= terminal_weight * next_distance
         current_obs = next_obs
@@ -2913,7 +2929,10 @@ def train_rl_rerun_local_r3(
         metrics = {
             "next_distance": next_distance,
             "base_terminal_distance": base_terminal_distance.copy()
-            if segment_end and reward_mode == "paired"
+            if segment_end and reward_mode in {"paired", "task_paired"}
+            else None,
+            "base_terminal_env_reward": base_terminal_env_reward.copy()
+            if segment_end and reward_mode == "task_paired"
             else None,
             "segment_end": segment_end,
             "success": _to_numpy(info.get("success", np.zeros(num_envs, dtype=np.bool_)))
@@ -2945,6 +2964,9 @@ def train_rl_rerun_local_r3(
                 terminal_distances: list[float] = []
                 base_terminal_distances: list[float] = []
                 paired_improvements: list[float] = []
+                terminal_env_rewards: list[float] = []
+                base_terminal_env_rewards: list[float] = []
+                task_paired_improvements: list[float] = []
                 action_delta_values: list[float] = []
                 reward_values: list[float] = []
                 env_reward_values: list[float] = []
@@ -2983,6 +3005,16 @@ def train_rl_rerun_local_r3(
                             improvement = cached_base - metrics["next_distance"]
                             base_terminal_distances.extend(cached_base.tolist())
                             paired_improvements.extend(improvement.tolist())
+                        if reward_mode == "task_paired":
+                            cached_task_base = metrics["base_terminal_env_reward"]
+                            if cached_task_base is None:
+                                raise RuntimeError(
+                                    "Task-paired reward did not report base env reward"
+                                )
+                            terminal_env_rewards.extend(metrics["env_reward"].tolist())
+                            task_improvement = metrics["env_reward"] - cached_task_base
+                            base_terminal_env_rewards.extend(cached_task_base.tolist())
+                            task_paired_improvements.extend(task_improvement.tolist())
                     saturation_count += int(torch.any(raw_action != action, dim=-1).sum().cpu())
                     global_step += num_envs
                     progress.update(min(num_envs, total_steps - progress.n))
@@ -3128,6 +3160,24 @@ def train_rl_rerun_local_r3(
                     else None,
                     "mean_paired_improvement": float(np.mean(paired_improvements))
                     if paired_improvements
+                    else None,
+                    "mean_terminal_env_reward": float(np.mean(terminal_env_rewards))
+                    if terminal_env_rewards
+                    else None,
+                    "mean_base_terminal_env_reward": float(
+                        np.mean(base_terminal_env_rewards)
+                    )
+                    if base_terminal_env_rewards
+                    else None,
+                    "mean_task_paired_improvement": float(
+                        np.mean(task_paired_improvements)
+                    )
+                    if task_paired_improvements
+                    else None,
+                    "fraction_task_paired_improved": float(
+                        np.mean(np.asarray(task_paired_improvements) > 0.0)
+                    )
+                    if task_paired_improvements
                     else None,
                     "fraction_paired_improved": float(
                         np.mean(np.asarray(paired_improvements) > 0.0)

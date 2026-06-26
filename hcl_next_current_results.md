@@ -784,6 +784,35 @@ robust selector for task success here. This points back to the objective: the
 tuned branch needs to create a larger, more task-aligned effect, not merely be
 selected by a sharper local latent-distance heuristic.
 
+I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
+same-state rollout, but compares terminal ManiSkill dense reward instead of
+terminal latent distance:
+
+```text
+r_terminal = tuned_terminal_env_reward - frozen_terminal_env_reward
+```
+
+A one-update terminal-only diagnostic (`bc=1`, `lr=1e-5`, `logstd=-5`,
+`dense_progress_weight=0`) was runnable but weak:
+
+| metric | value |
+| --- | ---: |
+| train task-paired improvement | 0.00150 |
+| train fraction task-improved | 0.398 |
+| train terminal env reward | 0.4803 |
+| train frozen terminal env reward | 0.4788 |
+| matched local final distance | 0.6036 |
+| matched local action delta L2 | 0.00042 |
+| matched local task success-once fraction | 0.331 |
+
+The matched local final distance is still worse than frozen (`0.6020`) and only
+slightly better than the previous paired+sensitivity local result (`0.6047`).
+An 8-episode deployability smoke was negative: frozen success `0.625` versus
+task-paired residual `0.375`, with final reward `0.6862 -> 0.5536`. This is not
+a promotion candidate. It is useful mostly as infrastructure and evidence that
+one-segment terminal dense reward alone is still too weak/noisy under the
+current local-R3 update.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
@@ -838,7 +867,9 @@ The next useful directions are:
    action changes. A broader reset-bank validation changed the sign of the local
    mean effect but kept it near zero; task-reward diagnostics are also only
    weakly positive and the best local candidate failed a 500-episode closed-loop
-   transfer check. A direct task-reward debug upper bound also failed transfer.
+   transfer check. A direct task-reward debug upper bound also failed transfer,
+   and a terminal task-paired reward mode produced only tiny local action
+   changes with a negative 8-episode deployability smoke.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.

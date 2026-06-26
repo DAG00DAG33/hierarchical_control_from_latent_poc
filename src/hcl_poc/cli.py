@@ -2370,7 +2370,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_local_r3.add_argument("--task-reward-weight", type=float, default=0.0)
     train_local_r3.add_argument(
         "--reward-mode",
-        choices=["progress", "paired"],
+        choices=["progress", "paired", "task_paired"],
         default="progress",
     )
     train_local_r3.add_argument("--learning-rate", type=float)
