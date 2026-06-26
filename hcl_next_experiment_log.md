@@ -17907,3 +17907,120 @@ reward, and max reward all dropped. This is the same proxy-transfer failure as
 the absolute terminal-`D_phi` run, now under a paired objective. The immediate
 next lever should be a better checkpoint selector/local objective or a different
 counterfactual/evaluation formulation, not scaling this paired recipe.
+
+## 2026-06-26 - Oracle-goal diagnostic for paired high-action R3
+
+### Hypothesis
+
+The paired-R3 checkpoint may fail under learned goals because the high-level
+prediction distribution is bad, not because the low-level update is intrinsically
+unhelpful. Re-evaluating frozen and paired-R3 with oracle serial goals separates
+learned high-level quality from low-level/task-transfer behavior.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_frozen_oracle_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --goal-source oracle \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_oracle_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --goal-source oracle \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10/best_train_latent.pt \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_frozen_oracle_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --goal-source oracle \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_oracle_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --goal-source oracle \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10/best_train_latent.pt \
+  --force
+```
+
+### Results
+
+Matched comparison against the learned-goal serial windows:
+
+| seed start | goal source | policy | success | final reward | max reward | segment reach | segment final distance |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | learned | frozen | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.5225 |
+| 3500000 | learned | pairedsync R3 | 0.640 | 0.6469 | 0.7428 | 0.747 | 0.5974 |
+| 3500000 | oracle | frozen | 0.660 | 0.6215 | 0.7560 | 0.792 | 0.3380 |
+| 3500000 | oracle | pairedsync R3 | 0.650 | 0.5858 | 0.7482 | 0.793 | 0.6042 |
+| 3600000 | learned | frozen | 0.770 | 0.7199 | 0.8385 | 0.791 | 0.4565 |
+| 3600000 | learned | pairedsync R3 | 0.680 | 0.6704 | 0.7739 | 0.777 | 0.5888 |
+| 3600000 | oracle | frozen | 0.680 | 0.5994 | 0.7767 | 0.812 | 0.3322 |
+| 3600000 | oracle | pairedsync R3 | 0.700 | 0.6273 | 0.7926 | 0.833 | 0.5747 |
+
+Aggregate:
+
+| goal source | policy | episodes | success | final reward | max reward | segment reach | segment final distance |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| learned | frozen | 200 | 0.720 | 0.7146 | 0.7976 | 0.756 | 0.4895 |
+| learned | pairedsync R3 | 200 | 0.660 | 0.6587 | 0.7584 | 0.762 | 0.5931 |
+| oracle | frozen | 200 | 0.670 | 0.6105 | 0.7663 | 0.802 | 0.3351 |
+| oracle | pairedsync R3 | 200 | 0.675 | 0.6065 | 0.7704 | 0.813 | 0.5895 |
+
+Paired counts:
+
+| goal source | metric | wins | losses | ties |
+| --- | --- | ---: | ---: | ---: |
+| learned | final reward | 54 | 63 | 83 |
+| learned | max reward | 39 | 46 | 115 |
+| oracle | final reward | 66 | 75 | 59 |
+| oracle | max reward | 47 | 43 | 110 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_oracle_serial100_seed3500000/serial_eval_100_seed3500000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_oracle_serial100_seed3500000/serial_eval_100_seed3500000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_oracle_serial100_seed3600000/serial_eval_100_seed3600000_oracle_goals.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_oracle_serial100_seed3600000/serial_eval_100_seed3600000_oracle_goals.json`
+
+### Interpretation
+
+Oracle serial goals greatly improve local segment reach for the frozen
+high-action base (`0.756 -> 0.802`) but reduce task-level final reward and
+success (`0.720 -> 0.670`). For this candidate, oracle one-segment goals are not
+a better closed-loop task policy than the learned high-level goals.
+
+The paired-R3 checkpoint is only neutral under oracle goals: success changes
+from `0.670` to `0.675`, final reward is slightly lower, max reward is slightly
+higher, and paired final-reward counts are negative (`66` wins / `75` losses).
+This weakens the hypothesis that paired-R3 failed only because learned
+high-level goals were poor. The low-level update still improves local reach-like
+metrics without creating a reliable task-level gain.

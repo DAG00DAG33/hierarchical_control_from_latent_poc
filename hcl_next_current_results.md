@@ -619,6 +619,21 @@ full-task serial behavior. This reinforces the current main failure mode:
 better local reachability proxies are not enough unless they predict closed-loop
 task transfer.
 
+I then reran the same two windows with oracle serial goals to separate
+low-level damage from learned high-level goal quality:
+
+| goal source | policy | episodes | success | final reward | max reward | segment reach |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| learned | frozen highact_strong | 200 | 0.720 | 0.7146 | 0.7976 | 0.756 |
+| learned | pairedsync R3 | 200 | 0.660 | 0.6587 | 0.7584 | 0.762 |
+| oracle | frozen highact_strong | 200 | 0.670 | 0.6105 | 0.7663 | 0.802 |
+| oracle | pairedsync R3 | 200 | 0.675 | 0.6065 | 0.7704 | 0.813 |
+
+Oracle goals improve local segment reach but reduce task-level reward for this
+candidate, and the paired R3 checkpoint is only neutral under oracle goals. This
+argues against treating learned high-level goal quality as the sole explanation
+for the paired-R3 failure.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
