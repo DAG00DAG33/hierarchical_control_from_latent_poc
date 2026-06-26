@@ -18596,3 +18596,62 @@ should therefore use success and max reward, not final reward. This explains
 the large serial final-reward penalty for `actiononly` without changing the
 conservative base choice, because success and max reward still do not show a
 single-env/serial advantage over `highact_strong`.
+
+## 2026-06-26 - Learned-interface evaluator vectorization sweep
+
+### Hypothesis
+
+The action-only lead may depend on the learned-interface evaluator's default
+`num_envs=16`. If it is a robust deployment improvement, it should not flip
+erratically as the same evaluator is run with smaller vectorization levels.
+
+### Commands
+
+```bash
+for envs in 2 4 8; do
+  for candidate in \
+    effect32_film_gsens_ft_highact_strong \
+    effect32_film_gsens_ft_highact_actiononly; do
+    TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+      --config configs/pusht_incremental.yaml \
+      --candidate "${candidate}" \
+      --goal-source learned \
+      --episodes 100 \
+      --eval-seed-start 3500000 \
+      --eval-num-envs "${envs}" \
+      --force
+  done
+done
+```
+
+I compared these new results with the existing `eval_num_envs=1` and default
+`eval_num_envs=16` files.
+
+### Results
+
+| eval num envs | highact success | actiononly success | highact final | actiononly final | highact max | actiononly max |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.670 | 0.660 | 0.7492 | 0.7497 | 0.7566 | 0.7562 |
+| 2 | 0.650 | 0.650 | 0.7305 | 0.7370 | 0.7448 | 0.7473 |
+| 4 | 0.630 | 0.690 | 0.7227 | 0.7673 | 0.7342 | 0.7775 |
+| 8 | 0.640 | 0.600 | 0.7285 | 0.7065 | 0.7387 | 0.7156 |
+| 16 | 0.690 | 0.710 | 0.7661 | 0.7819 | 0.7734 | 0.7921 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs2.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs2.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs4.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs4.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs8.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs8.json`
+
+### Interpretation
+
+The evaluator-vectorization effect is not monotonic. `actiononly` wins at
+`eval_num_envs=4` and `16`, ties success at `2`, and loses at `1` and `8`.
+This makes the default vectorized lead too protocol-sensitive for RL-base
+promotion. The single-env/serial-compatible evidence remains the more
+conservative deployment criterion, so `highact_strong` stays the local-RL base
+despite `actiononly` being the best candidate under the default vectorized
+learned-interface evaluator.

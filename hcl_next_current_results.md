@@ -606,6 +606,22 @@ wrapper continues to the 100-step horizon and records the later dense reward.
 Therefore `final_reward` is not directly comparable across those two evaluator
 families; success and max reward are the safer cross-protocol metrics.
 
+I then swept the learned-interface evaluator's vectorization level on the same
+100-episode seed window. The ordering is not monotonic in `eval_num_envs`:
+
+| eval num envs | highact success | actiononly success | highact max reward | actiononly max reward |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.670 | 0.660 | 0.7566 | 0.7562 |
+| 2 | 0.650 | 0.650 | 0.7448 | 0.7473 |
+| 4 | 0.630 | 0.690 | 0.7342 | 0.7775 |
+| 8 | 0.640 | 0.600 | 0.7387 | 0.7156 |
+| 16 | 0.690 | 0.710 | 0.7734 | 0.7921 |
+
+This makes the default vectorized `actiononly` lead less convincing as a
+promotion signal. The candidate ranking is sensitive to evaluator vectorization
+rather than a stable property across protocols. For RL-base selection, continue
+to prefer single-env/serial evidence.
+
 I then tested a middle high-level objective,
 `effect32_film_gsens_ft_highact_goal01`, with the same frozen low policy and
 action-through-low loss but `high_goal_mse_weight=0.1`. On the first 100-seed
