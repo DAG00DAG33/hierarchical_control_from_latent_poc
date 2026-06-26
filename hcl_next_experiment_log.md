@@ -13552,3 +13552,97 @@ matched learned-goal eval. This closes the simple sensitivity-margin branch:
 goal-use needs to arise from a better representation/architecture or
 deployment-aligned training signal, not from a standalone action-difference
 margin.
+
+## 2026-06-26: Effect32 goal-residual low-level architecture
+
+I added a new learned-interface low-level conditioning mode,
+`goal_residual`, to test a base-plus-residual architecture:
+
+- the base policy sees only frame features, previous action, and remaining time;
+- the residual policy sees frame features, the absolute goal, previous action,
+  and remaining time;
+- the residual final layer is zero-initialized, so training starts from a clean
+  no-goal base path.
+
+Config:
+
+```yaml
+effect32_goal_residual:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: goal_residual
+  goal_residual_scale: 1.0
+  policy_epochs: 40
+```
+
+Commands:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_goal_residual \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_goal_residual \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_goal_residual/diagnostics.json
+```
+
+### Training Metrics
+
+Best hierarchy epoch was `39`:
+
+```text
+oracle_action_mae: 0.0421
+predicted_action_mae: 0.0423
+prediction_induced_action_l2: 0.0040
+normalized_goal_l2: 2.5864
+```
+
+### Goal-Use Screen
+
+| candidate | goal shuffle L2 | frame shuffle L2 | previous-action shuffle L2 | max horizon sensitivity L2 | gate status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| effect32_film | 0.0622 | 0.9503 | 0.1326 | 0.0368 | reject |
+| effect32_goal_residual | 0.0218 | 0.9705 | 0.1236 | 0.0154 | reject |
+
+20-episode smoke eval:
+
+| candidate | learned success | oracle success |
+| --- | ---: | ---: |
+| effect32_film | 0.750 | 0.750 |
+| effect32_goal_residual | 0.450 | 0.450 |
+
+After including this candidate, the aggregate goal-diagnostics report has:
+
+```text
+total: 14
+offline_goal_use_pass: 3
+reject_low_goal_use: 11
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_goal_residual/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_goal_residual/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_goal_residual/seed0/learned_hierarchy_eval_20.json`
+- `results/incremental/learned_interface/effect32_goal_residual/seed0/oracle_hierarchy_eval_20.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_goal_residual/diagnostics.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+
+### Interpretation
+
+This closes the simple base-plus-goal-residual branch. The architecture did not
+preserve effect32 imitation quality and did not increase goal dependence; it
+reduced goal-shuffle action change from `0.0622` to `0.0218`. I skipped the
+longer 200-episode cross-check because both the offline gate and the 20-episode
+deployment smoke were worse than the existing effect32 FiLM baseline.

@@ -1715,7 +1715,7 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
     ) -> None:
         if mode not in {"high", "low"}:
             raise ValueError(f"Unknown held-goal mode: {mode}")
-        if conditioning not in {"concat", "delta", "relation", "film"}:
+        if conditioning not in {"concat", "delta", "relation", "film", "goal_residual"}:
             raise ValueError(f"Unknown goal conditioning: {conditioning}")
         self.episodes = [
             episode
@@ -1815,7 +1815,7 @@ def _low_condition_array(
     remaining: np.ndarray,
     conditioning: str,
 ) -> np.ndarray:
-    if conditioning == "concat" or conditioning == "film":
+    if conditioning in {"concat", "film", "goal_residual"}:
         goal_features = future_goals
     elif conditioning == "delta":
         goal_features = future_goals - current_goals
@@ -1831,7 +1831,7 @@ def _low_condition_array(
 
 
 def _low_goal_feature_slice(frame_dim: int, goal_dim: int, conditioning: str) -> slice:
-    if conditioning in {"concat", "delta", "film"}:
+    if conditioning in {"concat", "delta", "film", "goal_residual"}:
         return slice(frame_dim, frame_dim + goal_dim)
     if conditioning == "relation":
         return slice(frame_dim, frame_dim + 2 * goal_dim)
@@ -1845,12 +1845,14 @@ class _GoalConditionedLowPolicy(nn.Module):
         goal_dim: int,
         hidden_dim: int,
         conditioning: str,
+        residual_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.frame_dim = frame_dim
         self.goal_dim = goal_dim
         self.hidden_dim = hidden_dim
         self.conditioning = conditioning
+        self.residual_scale = residual_scale
         if conditioning in {"concat", "delta"}:
             self.policy = MLP(
                 frame_dim + goal_dim + 4, 3, hidden_dim, depth=4
@@ -1874,6 +1876,16 @@ class _GoalConditionedLowPolicy(nn.Module):
             for modulator in self.modulators:
                 nn.init.zeros_(modulator.weight)
                 nn.init.zeros_(modulator.bias)
+        elif conditioning == "goal_residual":
+            self.base_policy = MLP(frame_dim + 4, 3, hidden_dim, depth=4)
+            self.residual_policy = MLP(
+                frame_dim + goal_dim + 4, 3, hidden_dim, depth=4
+            )
+            final_layer = self.residual_policy.net[-1]
+            if not isinstance(final_layer, nn.Linear):
+                raise TypeError("Expected residual policy to end with a linear layer")
+            nn.init.zeros_(final_layer.weight)
+            nn.init.zeros_(final_layer.bias)
         else:
             raise ValueError(f"Unknown goal conditioning: {conditioning}")
 
@@ -1896,6 +1908,11 @@ class _GoalConditionedLowPolicy(nn.Module):
         ]
         tail = x[:, self.frame_dim + self.goal_dim :]
         base = torch.cat([frame, tail], dim=-1)
+        if self.conditioning == "goal_residual":
+            residual_input = torch.cat([frame, goal, tail], dim=-1)
+            return self.base_policy(base) + self.residual_scale * self.residual_policy(
+                residual_input
+            )
         layers = [self.input_layer, *self.hidden_layers]
         h = base
         for layer, modulator in zip(layers, self.modulators, strict=True):
@@ -2159,8 +2176,13 @@ def train_learned_interface_hierarchy(
             )
         high_model.load_state_dict(source_checkpoint["high_model"])
         high_model.requires_grad_(False)
+    goal_residual_scale = float(spec.get("goal_residual_scale", 1.0))
     low_model = _GoalConditionedLowPolicy(
-        frame_dim, goal_dim, hidden_dim, conditioning
+        frame_dim,
+        goal_dim,
+        hidden_dim,
+        conditioning,
+        residual_scale=goal_residual_scale,
     ).to(device)
     learning_rate = float(
         spec.get("policy_lr", config.get("learned_interface.policy.lr", 3e-4))
@@ -2275,6 +2297,7 @@ def train_learned_interface_hierarchy(
         "hidden_dim": hidden_dim,
         "conditioning": conditioning,
         "high_level_candidate": high_level_candidate,
+        "goal_residual_scale": goal_residual_scale,
         "goal_sensitivity_weight": goal_sensitivity_weight,
         "goal_sensitivity_margin": goal_sensitivity_margin,
         "high_model": best_state["high_model"],
@@ -2324,6 +2347,7 @@ def _load_hierarchy(
         int(checkpoint["goal_dim"]),
         int(checkpoint["hidden_dim"]),
         str(checkpoint.get("conditioning", "concat")),
+        residual_scale=float(checkpoint.get("goal_residual_scale", 1.0)),
     ).to(device)
     high_model.load_state_dict(checkpoint["high_model"])
     low_state = checkpoint["low_model"]

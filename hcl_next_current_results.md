@@ -278,6 +278,23 @@ offline gate. A stronger margin passes the gate but loses `14.5` success points.
 The next representation/architecture attempt should preserve imitation quality
 more explicitly, not optimize goal sensitivity as an isolated objective.
 
+I then tested an effect32 "base + goal residual" low-level architecture,
+`effect32_goal_residual`, where a no-goal base policy predicts the action and a
+zero-initialized goal-conditioned residual can correct it. This preserved a
+clean base path but collapsed further toward ignoring the goal:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | 20-episode learned success | 20-episode oracle success |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.062 | 0.0368 | 0.750 | 0.750 |
+| effect32_goal_residual | 0.0218 | 0.0154 | 0.450 | 0.450 |
+
+The aggregate goal-use gate now has `3` pass / `11` reject / `14` total, and
+`effect32_goal_residual` is rejected for low goal use. I skipped the longer
+200-episode cross-check because both the offline diagnostic and the 20-episode
+screen were worse than the baseline. This closes the simple residual-addition
+architecture branch: separating a base path from a goal residual did not force
+useful goal-conditioned corrections.
+
 I added candidate-level `horizon_steps` / `update_period` overrides for learned
 interfaces and trained short-horizon aliases of the effect32 FiLM interface:
 
@@ -1274,6 +1291,11 @@ artifacts/incremental/learned_interface/effect32_film_gsens_light/seed0/hierarch
 results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_light/diagnostics.json
 results/incremental/learned_interface/effect32_film_gsens_light/seed0/learned_hierarchy_eval_200_seed3500000.json
 results/incremental/learned_interface/effect32_film_gsens_light/seed0/oracle_hierarchy_eval_200_seed3500000.json
+artifacts/incremental/learned_interface/effect32_goal_residual/seed0/hierarchy.pt
+artifacts/incremental/learned_interface/effect32_goal_residual/seed0/hierarchy_metrics.json
+results/incremental/learned_interface/effect32_goal_residual/seed0/learned_hierarchy_eval_20.json
+results/incremental/learned_interface/effect32_goal_residual/seed0/oracle_hierarchy_eval_20.json
+results/incremental/goal_diagnostics/n500/seed0/effect32_goal_residual/diagnostics.json
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json

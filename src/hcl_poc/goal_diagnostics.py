@@ -290,7 +290,7 @@ def _condition_blocks(
     start = 0
     blocks = {"frame": slice(start, start + frame_dim)}
     start += frame_dim
-    if conditioning in {"concat", "film"}:
+    if conditioning in {"concat", "film", "goal_residual"}:
         blocks["goal"] = slice(start, start + goal_dim)
         start += goal_dim
     elif conditioning == "delta":
@@ -325,8 +325,12 @@ def _build_conditions(
     representation_frame_norm: Standardizer | None = None,
     device: torch.device | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if encoder_type == "effect" and conditioning not in {"concat", "film"}:
-        raise ValueError("Effect-code diagnostics require concat or FiLM conditioning")
+    if encoder_type == "effect" and conditioning not in {
+        "concat",
+        "film",
+        "goal_residual",
+    }:
+        raise ValueError("Effect-code diagnostics require absolute-goal conditioning")
     frames = []
     current_latents = []
     goals = []
@@ -401,8 +405,12 @@ def _build_mixed_horizon_conditions(
     representation_frame_norm: Standardizer | None = None,
     device: torch.device | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if encoder_type == "effect" and conditioning not in {"concat", "film"}:
-        raise ValueError("Effect-code diagnostics require concat or FiLM conditioning")
+    if encoder_type == "effect" and conditioning not in {
+        "concat",
+        "film",
+        "goal_residual",
+    }:
+        raise ValueError("Effect-code diagnostics require absolute-goal conditioning")
     choices = rng.choice(np.asarray(horizons, dtype=np.int64), size=len(rows))
     frames = []
     current_latents = []

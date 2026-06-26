@@ -592,6 +592,13 @@ learned_interface:
       goal_sensitivity_weight: 0.01
       goal_sensitivity_margin: 0.1
       policy_epochs: 40
+    effect32_goal_residual:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32
+      conditioning: goal_residual
+      goal_residual_scale: 1.0
+      policy_epochs: 40
     effect32_film_h5:
       family: conditioning_ablation
       representation_candidate: effect32
