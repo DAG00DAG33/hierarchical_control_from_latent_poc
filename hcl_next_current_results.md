@@ -672,12 +672,20 @@ changes, but not useful closed-loop changes.
 
 I then extended the dense task-reward diagnostic from one held-goal segment to a
 50-step rollout with `segment_terminates_gae=False`, so credit spans several
-high-level replans. This improved over the one-segment task-reward update but
-still did not beat frozen on the first 100-seed window: roll50 task-reward
-success `0.640`, final reward `0.6171`, max reward `0.7436`, versus frozen
-`0.670 / 0.7092 / 0.7566`. Longer credit helps relative to the roll10
-task-reward failure (`0.580` success), but the current local direct-low update
-still does not produce a useful closed-loop task policy.
+high-level replans. After one update it improved over the one-segment
+task-reward failure (`0.640` vs `0.580` success on the first 100-seed window),
+and after a second update the first window briefly beat frozen on success/max
+reward (`0.680 / 0.7755` vs `0.670 / 0.7566`). The second matched window did not
+validate it, though: two-window roll50 task reward reached `0.680` success,
+`0.6329` final reward, and `0.7759` max reward versus frozen
+`0.720 / 0.7146 / 0.7976`. Longer credit helps relative to one-segment task
+reward and paired `D_phi`, but the current direct-low update still does not beat
+the frozen hierarchy.
+
+This continuation also exposed and fixed a checkpointing bug: resumed RL runs
+reset `best_score` to `-inf`, so the first resumed update could overwrite
+`best_train_latent.pt` even when worse than previous history. The trainers now
+restore `best_score` from loaded history before continuing.
 
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a

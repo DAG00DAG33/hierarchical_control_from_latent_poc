@@ -18345,6 +18345,34 @@ TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
   --force
 ```
 
+Continuation to a second update:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae \
+  --steps 204800 \
+  --num-envs 2048 \
+  --rollout-steps 50 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 1.0 \
+  --terminal-weight 0.0 \
+  --distance-progress-weight 0.0 \
+  --task-reward-weight 1.0 \
+  --task-progress-weight 0.0 \
+  --reward-mode absolute \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --no-segment-terminate-gae
+```
+
 Serial eval:
 
 ```bash
@@ -18361,6 +18389,35 @@ TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
   --force
 ```
 
+After the second update, I ran a distinct serial eval for the 204800-step
+`latest.pt` checkpoint:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_taskreward_roll50_204k_bc1_noseggae_latest_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/latest.pt \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_taskreward_roll50_204k_bc1_noseggae_latest_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/latest.pt \
+  --force
+```
+
 ### Training Metrics
 
 | run | step | mean reward | terminal D_phi | direct delta L2 | saturation | segment terminates GAE |
@@ -18368,6 +18425,10 @@ TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
 | roll10 task reward | 20480 | 0.1285 | 0.4029 | 0.2650 | 0.4062 | true |
 | roll10 task reward | 40960 | 0.1865 | 0.5885 | 0.2640 | 0.1956 | true |
 | roll50 task reward | 102400 | 0.2121 | 0.6198 | 0.2640 | 0.1438 | false |
+| roll50 task reward | 204800 | 0.2130 | 0.6238 | 0.2638 | 0.1461 | false |
+
+The second update barely changed the in-training mean reward, but its serial
+behavior was different enough to evaluate.
 
 ### Serial Result
 
@@ -18377,27 +18438,58 @@ First 100-seed learned-goal window, `seed_start=3500000`:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | frozen highact_strong | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.5225 | 0.00000 |
 | roll10 task reward | 0.580 | 0.6101 | 0.6976 | 0.693 | 0.6211 | 0.01051 |
-| roll50 task reward | 0.640 | 0.6171 | 0.7436 | 0.743 | 0.6095 | 0.00907 |
+| roll50 task reward, 102400 | 0.640 | 0.6171 | 0.7436 | 0.743 | 0.6095 | 0.00907 |
+| roll50 task reward, 204800 | 0.680 | 0.6556 | 0.7755 | 0.761 | 0.6077 | 0.01391 |
 
 Paired final-reward counts versus frozen:
 
 | candidate | wins | losses | ties |
 | --- | ---: | ---: | ---: |
 | roll10 task reward | 30 | 36 | 34 |
-| roll50 task reward | 26 | 40 | 34 |
+| roll50 task reward, 102400 | 26 | 40 | 34 |
+| roll50 task reward, 204800 | 30 | 32 | 38 |
+
+The first window looked positive on success and max reward at 204800 steps, so I
+ran the matched second seed window. Two-window aggregate:
+
+| policy | episodes | success | final reward | max reward | segment reach | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen highact_strong | 200 | 0.720 | 0.7146 | 0.7976 | 0.756 | 0.00000 |
+| pairedsync D_phi R3 | 200 | 0.660 | 0.6587 | 0.7584 | 0.762 | 0.00561 |
+| roll50 task reward, 204800 | 200 | 0.680 | 0.6329 | 0.7759 | 0.765 | 0.01366 |
+
+Two-window paired counts versus frozen:
+
+| candidate | metric | wins | losses | ties |
+| --- | --- | ---: | ---: | ---: |
+| roll50 task reward, 204800 | final reward | 58 | 71 | 71 |
+| roll50 task reward, 204800 | max reward | 42 | 40 | 118 |
 
 Artifacts:
 
 - `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/latest.pt`
+- `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/step_000102400.pt`
 - `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_roll50_102k_bc1_noseggae/train_metrics.json`
 - `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_roll50_102k_bc1_noseggae_latest_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_roll50_204k_bc1_noseggae_latest_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_roll50_204k_bc1_noseggae_latest_serial100_seed3600000/serial_eval_100_seed3600000.json`
+
+### Checkpointing Fix
+
+This continuation exposed a resume bug in both `train_residual_rl` and
+`train_direct_low_rl`: when resuming an existing run, `best_score` was reset to
+`-inf`, so the first resumed update could overwrite `best_train_latent.pt` even
+if it was worse than previous history. I fixed both trainers to restore
+`best_score` from loaded `history` before continuing, and restored this run's
+`best_train_latent.pt` to the true 102400-step best checkpoint.
 
 ### Interpretation
 
-Longer credit assignment helps compared with the one-segment task-reward
-diagnostic, but it is still below frozen. Success improves from `0.580` to
-`0.640`, max reward nearly recovers to the paired-Dphi level, and segment reach
-beats frozen, but final reward remains much worse and paired final-reward counts
-are negative. This is a useful direction signal: credit across several replans
-is better than segment-terminated task reward, but the current direct-low local
-update still does not solve closed-loop deployment.
+Longer credit assignment is the strongest local-RL direction in this high-action
+branch so far, but it is still below frozen over two windows. At 204800 steps it
+beats paired `D_phi` on success, max reward, and segment reach, and it briefly
+beats frozen on the first seed window. The second window rejects it as a robust
+policy improvement: aggregate success is `0.680` versus frozen `0.720`, and
+final reward is much worse. This suggests multi-replan credit is more promising
+than one-segment scalar reachability, but the current direct-low local update
+still does not solve closed-loop deployment.

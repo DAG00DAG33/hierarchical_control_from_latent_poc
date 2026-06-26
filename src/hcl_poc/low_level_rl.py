@@ -2861,6 +2861,10 @@ def train_residual_rl(
     global_step = 0
     history: list[dict[str, Any]] = []
     best_score = -math.inf
+
+    def row_score(row: dict[str, Any]) -> float:
+        return -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
+
     if latest.exists() and not force:
         checkpoint = torch.load(latest, map_location=device, weights_only=False)
         if checkpoint["recipe"] != recipe:
@@ -2869,6 +2873,8 @@ def train_residual_rl(
         optimizer.load_state_dict(checkpoint["optimizer"])
         global_step = int(checkpoint["global_step"])
         history = list(checkpoint["history"])
+        if history:
+            best_score = max(row_score(row) for row in history)
     if global_step >= total_steps:
         return latest
     num_envs = int(config.get("low_level_rl.num_envs", 32))
@@ -3032,7 +3038,7 @@ def train_residual_rl(
                 "elapsed_s": timer.elapsed(),
             }
             history.append(row)
-            score = -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
+            score = row_score(row)
             if score > best_score:
                 best_score = score
                 _save_checkpoint(
@@ -3155,6 +3161,12 @@ def train_direct_low_rl(
     global_step = 0
     history: list[dict[str, Any]] = []
     best_score = -math.inf
+
+    def row_score(row: dict[str, Any]) -> float:
+        if reward_mode == "paired":
+            return float(row["mean_paired_improvement"] or -math.inf)
+        return -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
+
     if latest.exists() and not force:
         checkpoint = torch.load(latest, map_location=device, weights_only=False)
         if checkpoint["recipe"] != recipe:
@@ -3163,6 +3175,8 @@ def train_direct_low_rl(
         optimizer.load_state_dict(checkpoint["optimizer"])
         global_step = int(checkpoint["global_step"])
         history = list(checkpoint["history"])
+        if history:
+            best_score = max(row_score(row) for row in history)
     if global_step >= total_steps:
         return latest
     num_envs = int(config.get("low_level_rl.num_envs", 32))
@@ -3417,10 +3431,7 @@ def train_direct_low_rl(
                 "elapsed_s": timer.elapsed(),
             }
             history.append(row)
-            if reward_mode == "paired":
-                score = float(row["mean_paired_improvement"] or -math.inf)
-            else:
-                score = -float(row["mean_terminal_distance"] or row["mean_latent_distance"])
+            score = row_score(row)
             if score > best_score:
                 best_score = score
                 _save_checkpoint(
