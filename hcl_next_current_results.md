@@ -1151,6 +1151,23 @@ evidence, not a robust online selector. The broader conclusion still holds:
 linear selectors over simple online features are not enough; a real selector
 would need to be trained/evaluated in the closed-loop intervention distribution.
 
+I then ran a larger fresh 500-episode validation at `seed_start=4800000` for
+the prefix-summary selector and a matched ungated eval. It rejected the small
+positive 100-episode signal:
+
+| policy | success | final reward | max reward | residual action rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.306 | 0.4642 | 0.4954 | 0.000 |
+| ungated task-reward residual | 0.298 | 0.4585 | 0.4871 | 1.000 |
+| prefix-summary step selector | 0.292 | 0.4538 | 0.4830 | 0.806 |
+
+So online prefix selection does not rescue this checkpoint. It uses the
+residual branch most of the time and is slightly worse than simply deploying the
+ungated residual on this fresh window. This closes the current linear
+online-selector branch for task-reward-debug R3; the next selector attempt needs
+training in the closed-loop intervention distribution, not another linear gate
+fit from retrospective outcome labels.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:

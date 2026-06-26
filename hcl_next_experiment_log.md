@@ -13746,3 +13746,75 @@ loses deployment quality (`0.645 -> 0.595` learned, `0.645 -> 0.535` oracle).
 This closes the simple "increase effect latent capacity" branch as a fix. Like
 the sensitivity-margin branch, it improves an offline goal-use number while
 making the hierarchy less useful as an RL base.
+
+## 2026-06-26: Fresh validation of prefix-summary online selector
+
+The current summary had a weakly positive 100-episode signal for the
+prefix-summary `--step-selector`, which uses online prefix approximations of the
+non-deployable full-episode selector features. I ran a larger fresh
+500-episode validation at `seed_start=4800000`, plus a matched ungated eval, to
+check whether this is a real online-selector direction.
+
+Commands:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --step-selector results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_summary_selector_fit_train460_valid470.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_prefix_summary_selector_500_seed4800000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_500_seed4800000.json
+```
+
+Results:
+
+| policy | success | final reward | max reward | residual action rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.306 | 0.4642 | 0.4954 | 0.000 |
+| ungated task-reward residual | 0.298 | 0.4585 | 0.4871 | 1.000 |
+| prefix-summary step selector | 0.292 | 0.4538 | 0.4830 | 0.806 |
+
+Selector details:
+
+```text
+features:
+  episode_action_delta_l2_mean
+  episode_action_delta_l2_max
+  episode_policy_saturation_rate
+  episode_goal_l2_initial
+  episode_goal_l2_mean
+  episode_high_level_decisions
+mean residual norm: 0.000490
+action saturation: 0.0456
+```
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_prefix_summary_selector_500_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_500_seed4800000.json`
+
+Interpretation:
+
+The larger fresh window rejects the small positive 100-episode prefix-selector
+signal. The selector still uses the residual branch most of the time and is
+slightly worse than ungated residual, which is itself worse than frozen. This
+closes the current linear online-selector branch for the task-reward-debug R3
+checkpoint. A useful selector likely needs direct training in the closed-loop
+intervention distribution, or the objective needs to produce a larger
+task-aligned residual before selection is worth revisiting.
