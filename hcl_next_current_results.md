@@ -645,6 +645,12 @@ though R3 improves it on this window. Stronger one-step goal sensitivity or
 clean D_phi temporal structure is not enough when the frozen closed-loop policy
 and local-to-task transfer are weaker.
 
+I also screened the existing `effect32_scene_film` checkpoint. Its offline
+goal-use was effectively the same as `effect32_film` (`goal-shuffle L2 0.063`,
+max goal sensitivity 0.035), but the learned closed-loop policy was weaker:
+`0.590` success learned, `0.655` oracle, and `0.280` shuffled over 200 episodes.
+That makes it a regression from `effect32_film`, so I skipped D_phi/R3 for it.
+
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.
 On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance

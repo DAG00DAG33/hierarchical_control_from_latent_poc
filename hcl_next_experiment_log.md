@@ -10961,6 +10961,82 @@ goal-use did not translate into a stronger deployment base. This leaves
 `effect32_film` as the best current real-compatible representation for low-level
 RL transfer despite its weaker temporal D_phi MSE.
 
+## 2026-06-26 - Effect32 scene FiLM supervised screen
+
+The repository already had an `effect32_scene_film` checkpoint with only
+20-episode learned/oracle checks. Because `effect32_film` remains the leading
+real-compatible representation, I ran the same supervised gate on the scene-only
+effect variant before spending D_phi/R3 compute.
+
+Commands:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --n-demo 1800 \
+  --candidate effect32_scene_film \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_scene_film \
+  --goal-source learned \
+  --episodes 200 \
+  --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_scene_film \
+  --goal-source oracle \
+  --episodes 200 \
+  --force
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_scene_film \
+  --goal-source shuffled \
+  --episodes 200 \
+  --force
+```
+
+Offline goal-use diagnostics:
+
+| candidate | goal-shuffle L2 | max goal sensitivity | frame-shuffle L2 | previous-action shuffle L2 |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_scene_film | 0.0630 | 0.0352 | 0.9551 | 0.1335 |
+| effect32_film | 0.0622 | 0.0368 | 0.9503 | 0.1326 |
+| ae256_film | 0.2506 | 0.0937 | 0.8645 | 0.1161 |
+| vae512_b1e6_film | 0.2783 | 0.1266 | 0.8213 | 0.1129 |
+
+Closed-loop check on the default learned-interface bank
+(`seed_start=2100000`, 200 episodes):
+
+| candidate | goal source | success | max reward | final reward | shuffled goal L2 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| effect32_scene_film | learned | 0.590 | 0.7064 | 0.6979 | - |
+| effect32_scene_film | oracle | 0.655 | 0.7551 | 0.7438 | - |
+| effect32_scene_film | shuffled | 0.280 | 0.4599 | 0.4269 | 6.1045 |
+
+Artifacts:
+
+- `results/incremental/goal_diagnostics/n1800/seed0/effect32_scene_film/diagnostics.json`
+- `results/incremental/learned_interface/effect32_scene_film/seed0/learned_hierarchy_eval_200.json`
+- `results/incremental/learned_interface/effect32_scene_film/seed0/oracle_hierarchy_eval_200.json`
+- `results/incremental/learned_interface/effect32_scene_film/seed0/shuffled_hierarchy_eval_200.json`
+
+Interpretation:
+
+`effect32_scene_film` is a supervised regression from `effect32_film`. Its
+offline goal-use is essentially identical to the lead effect32 FiLM checkpoint,
+but learned closed-loop success drops from `0.655` to `0.590` on the standard
+200-episode screen. Shuffled-goal success collapses to `0.280`, so the policy
+does use goals in closed loop, but not enough better than `effect32_film` to
+justify a D_phi/R3 branch. I skipped reachability training and PPO for this
+candidate.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:
