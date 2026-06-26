@@ -1980,9 +1980,12 @@ The next useful directions are:
    full-episode summary selector was strong. Further gate work should therefore
    use online step/recurrent context or train a selector/policy directly in the
    closed-loop distribution; offline local segment deltas and initial switches
-   are not enough. A sim-privileged one-segment oracle selector also tied
-   ungated residual on two matched slices, so local latent-distance branch
-   choice alone is unlikely to be the missing ingredient.
+   are not enough. On the high-action pairedsync branch, a richer segment-start
+   selector did recover some of the ungated R3 damage (`0.680 -> 0.710`
+   success on the `3600000` learned-goal window), but it still trailed frozen
+   (`0.770`) and kept using R3 on most segments. A sim-privileged one-segment
+   oracle selector also tied ungated residual on two matched slices, so local
+   latent-distance branch choice alone is unlikely to be the missing ingredient.
 
 2. Improve the objective so the tuned policy creates a larger effect.
    The current R3 updates are tiny. Reducing BC weight from 10 to 1 did not

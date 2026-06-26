@@ -19273,3 +19273,87 @@ This rejects the simple "same paired terminal objective, longer GAE horizon"
 branch for `effect32_film`. The next objective change should not be another
 rollout-length tweak of direct-low R3; it needs a different intervention
 distribution or a deployment-level training/selection loop.
+
+## 2026-06-27 - High-action paired R3 segment-selector audit
+
+The high-action pairedsync checkpoint is the one branch where the hindsight
+episode selector showed real complementarity, but the three-feature initial
+selector was not robust enough. I tested the existing five-feature segment-start
+selector on the learned-goal high-action exact serial windows.
+
+### Commands
+
+Fit on `3500000..3500099`, validate offline on `3600000..3600099`:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  fit-serial-segment-selector \
+  --base-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json \
+  --candidate-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3500000/serial_eval_100_seed3500000.json \
+  --validation-base-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3600000/serial_eval_100_seed3600000.json \
+  --validation-candidate-json results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3600000/serial_eval_100_seed3600000.json \
+  --output results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_segment_selector_learned_train3500000_valid3600000.json \
+  --force
+```
+
+Deploy the selector online on the validation window:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_segmentselector_train350_online_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10/best_train_latent.pt \
+  --segment-selector-weights -0.1537081748 -0.1537081748 0.1060052738 0.0405058116 -0.0682906508 \
+  --segment-selector-mean 0.9115276933 0.9115276933 0.4361685514 0.9485784769 45.0000000000 \
+  --segment-selector-std 0.8321719170 0.8321719170 0.4352999032 0.6072300076 28.7228145599 \
+  --segment-selector-threshold -0.0300638266 \
+  --force
+```
+
+### Results
+
+Offline segment-selector local metric:
+
+| split | segments | base raw reduction | R3 raw reduction | selector raw reduction | selector delta vs base | selector use R3 | AUC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| train 3500000 | 1000 | 0.3890 | 0.3963 | 0.4595 | +0.0705 | 0.651 | 0.603 |
+| validation 3600000 | 1000 | 0.3732 | 0.3879 | 0.4284 | +0.0552 | 0.717 | 0.615 |
+
+Online exact serial validation on `3600000..3600099`:
+
+| policy | success | final reward | max reward | raw local reduction | reach rate | residual L2 | selector use R3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.770 | 0.7199 | 0.8385 | 0.3732 | 0.791 | 0.000000 | - |
+| ungated pairedsync R3 | 0.680 | 0.6704 | 0.7739 | 0.3879 | 0.777 | 0.005424 | - |
+| segment selector | 0.710 | 0.6628 | 0.7937 | 0.3869 | 0.784 | 0.004284 | 0.793 |
+
+Paired counts:
+
+| comparison | improvements | regressions | net | success delta |
+| --- | ---: | ---: | ---: | ---: |
+| selector vs frozen | 7 | 13 | -6 | -0.060 |
+| selector vs ungated R3 | 5 | 2 | +3 | +0.030 |
+
+Artifacts:
+
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/highact_pairedsync_segment_selector_learned_train3500000_valid3600000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_segmentselector_train350_online_serial100_seed3600000/serial_eval_100_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_segmentselector_train350_online_serial100_seed3600000/paired_vs_frozen_serial100_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_segmentselector_train350_online_serial100_seed3600000/paired_vs_ungated_serial100_seed3600000.json`
+
+### Interpretation
+
+The richer segment-start selector partially rescues the high-action pairedsync
+checkpoint relative to ungated R3, but it still trails frozen by six net
+successes and lower final/max reward. The offline local gain again does not map
+cleanly to deployment success. This keeps the general selector diagnosis
+unchanged: retrospective local or segment-start linear selectors are not enough;
+the next selector attempt needs direct closed-loop/intervention training or a
+substantially richer online policy.
