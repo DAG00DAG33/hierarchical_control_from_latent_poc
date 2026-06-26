@@ -14796,3 +14796,50 @@ local distances, with only a tiny success edge. Raw L2 and D_phi have weak
 proxy value at best. This points away from selecting among these checkpoints
 with scalar local metrics and toward changing the objective or using richer
 deployment-aligned proxy features.
+
+## 2026-06-26 - Local proxy audit comparison command
+
+### Hypothesis
+
+The full-bank proxy audits should be comparable by a repeatable command rather
+than by manually stitching individual JSON summaries. This makes checkpoint
+promotion gates easier to audit as more local-R3 variants are added.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml compare-local-proxy-audits \
+  --audit-json \
+    results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+    results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --name task_reward_debug taskhard_bc03 \
+  --output results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_taskreward_vs_taskhard.json \
+  --force
+```
+
+### Results
+
+| checkpoint | final reward delta | max reward delta | success delta | raw success AUC | D_phi success AUC | positive task gate |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| task-reward debug | -0.0020 | -0.0008 | -0.0012 | 0.531 | 0.503 | false |
+| task-hard bc0.3 | -0.0024 | +0.0010 | +0.0015 | 0.562 | 0.526 | false |
+
+Rankings:
+
+- final reward delta: task-reward debug, task-hard bc0.3
+- max reward delta: task-hard bc0.3, task-reward debug
+- success delta: task-hard bc0.3, task-reward debug
+- best proxy success AUC: task-hard bc0.3, task-reward debug
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_taskreward_vs_taskhard.json`
+
+### Interpretation
+
+The comparison command preserves the same conclusion as the manual read. The
+task-hard `bc=0.3` checkpoint has the better success, max-reward, and proxy-AUC
+ranking, but neither checkpoint passes the positive task gate because both are
+negative on final dense reward. The current promotion rule should therefore
+reject both and move effort toward objective changes or richer deployment-aligned
+selector features instead of promoting either checkpoint.

@@ -143,6 +143,7 @@ from hcl_poc.rl_rerun import (
     audit_rl_rerun_vector_dataset,
     audit_rl_rerun_local_mode_a,
     audit_rl_rerun_local_sample_proxies,
+    compare_rl_rerun_local_proxy_audits,
     collect_rl_rerun_state_dataset,
     collect_rl_rerun_vector_dataset,
     create_rl_rerun_local_eval_manifest,
@@ -744,6 +745,15 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
             audit_rl_rerun_local_sample_proxies(
                 local_json_path=Path(args.local_json),
                 output_path=Path(args.output),
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "compare-local-proxy-audits":
+        console.print(
+            compare_rl_rerun_local_proxy_audits(
+                audit_paths=[Path(path) for path in args.audit_json],
+                output_path=Path(args.output),
+                names=args.name,
                 force=args.force,
             )
         )
@@ -2555,6 +2565,14 @@ def build_parser() -> argparse.ArgumentParser:
     audit_local_sample_proxies.add_argument("--output", required=True)
     audit_local_sample_proxies.add_argument("--force", action="store_true")
     audit_local_sample_proxies.set_defaults(func=rl_rerun_cmd)
+    compare_local_proxy_audits = rl_rerun_sub.add_parser(
+        "compare-local-proxy-audits"
+    )
+    compare_local_proxy_audits.add_argument("--audit-json", nargs="+", required=True)
+    compare_local_proxy_audits.add_argument("--name", nargs="+")
+    compare_local_proxy_audits.add_argument("--output", required=True)
+    compare_local_proxy_audits.add_argument("--force", action="store_true")
+    compare_local_proxy_audits.set_defaults(func=rl_rerun_cmd)
     record_rerun_videos = rl_rerun_sub.add_parser("record-videos")
     record_rerun_videos.add_argument("--checkpoint", required=True)
     record_rerun_videos.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)

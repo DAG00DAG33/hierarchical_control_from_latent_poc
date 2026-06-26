@@ -4431,6 +4431,115 @@ def audit_rl_rerun_local_sample_proxies(
     return output_path
 
 
+def compare_rl_rerun_local_proxy_audits(
+    audit_paths: list[Path],
+    output_path: Path,
+    names: list[str] | None = None,
+    force: bool = False,
+) -> Path:
+    if output_path.exists() and not force:
+        return output_path
+    if not audit_paths:
+        raise ValueError("At least one audit JSON is required")
+    if names is not None and len(names) != len(audit_paths):
+        raise ValueError("--name must be provided once per --audit-json")
+
+    rows: list[dict[str, Any]] = []
+    for index, audit_path in enumerate(audit_paths):
+        payload = json.loads(audit_path.read_text())
+        if payload.get("stage") != "local_sample_proxy_audit":
+            raise ValueError(f"Not a local sample proxy audit: {audit_path}")
+        aggregate = payload.get("aggregate")
+        proxies = payload.get("proxies")
+        if not isinstance(aggregate, dict) or not isinstance(proxies, dict):
+            raise ValueError(f"Audit JSON is missing aggregate/proxies: {audit_path}")
+        name = names[index] if names is not None else audit_path.parent.name
+        best_proxy_auc = None
+        best_proxy_name = None
+        for proxy_name, proxy_stats in proxies.items():
+            if not isinstance(proxy_stats, dict):
+                continue
+            auc = proxy_stats.get("success_delta_auc")
+            if auc is None:
+                continue
+            if best_proxy_auc is None or float(auc) > best_proxy_auc:
+                best_proxy_auc = float(auc)
+                best_proxy_name = proxy_name
+        rows.append(
+            {
+                "name": name,
+                "audit_json": str(audit_path),
+                "rows": payload.get("rows"),
+                "checkpoint": payload.get("checkpoint"),
+                "dataset": payload.get("dataset"),
+                "reachability_checkpoint": payload.get("reachability_checkpoint"),
+                "aggregate": {
+                    "final_reward_delta_mean": aggregate.get(
+                        "final_reward_delta_mean"
+                    ),
+                    "max_reward_delta_mean": aggregate.get("max_reward_delta_mean"),
+                    "success_delta_mean": aggregate.get("success_delta_mean"),
+                    "success_delta_counts": aggregate.get("success_delta_counts"),
+                },
+                "proxies": {
+                    proxy_name: {
+                        "mean": proxy_stats.get("mean"),
+                        "pearson_final_reward_delta": proxy_stats.get(
+                            "pearson_final_reward_delta"
+                        ),
+                        "pearson_max_reward_delta": proxy_stats.get(
+                            "pearson_max_reward_delta"
+                        ),
+                        "success_delta_auc": proxy_stats.get("success_delta_auc"),
+                    }
+                    for proxy_name, proxy_stats in proxies.items()
+                    if isinstance(proxy_stats, dict)
+                },
+                "best_proxy_success_delta_auc": best_proxy_auc,
+                "best_proxy_success_delta_auc_name": best_proxy_name,
+                "passes_positive_task_signal": (
+                    aggregate.get("final_reward_delta_mean", 0.0) > 0.0
+                    and aggregate.get("success_delta_mean", 0.0) >= 0.0
+                ),
+            }
+        )
+
+    def _rank(metric_path: tuple[str, ...]) -> list[str]:
+        def value(row: dict[str, Any]) -> float:
+            current: Any = row
+            for key in metric_path:
+                if not isinstance(current, dict):
+                    return float("-inf")
+                current = current.get(key)
+            if current is None:
+                return float("-inf")
+            return float(current)
+
+        return [
+            str(row["name"])
+            for row in sorted(rows, key=value, reverse=True)
+        ]
+
+    result = {
+        "stage": "local_sample_proxy_audit_comparison",
+        "audit_jsons": [str(path) for path in audit_paths],
+        "rows": rows,
+        "ranking": {
+            "by_final_reward_delta_mean": _rank(
+                ("aggregate", "final_reward_delta_mean")
+            ),
+            "by_max_reward_delta_mean": _rank(("aggregate", "max_reward_delta_mean")),
+            "by_success_delta_mean": _rank(("aggregate", "success_delta_mean")),
+            "by_best_proxy_success_delta_auc": _rank(
+                ("best_proxy_success_delta_auc",)
+            ),
+        },
+    }
+    ensure_dir(output_path.parent)
+    write_json(output_path, result)
+    return output_path
+
+
 def fit_rl_rerun_closed_loop_selector(
     train_json_path: Path,
     output_path: Path,

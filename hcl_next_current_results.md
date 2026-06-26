@@ -1108,7 +1108,12 @@ final reward delta `-0.0020`, max reward delta `-0.0008`, success delta
 `-0.0012`, raw distance delta `-0.0020`, and `D_phi` delta `+0.0005`. Raw and
 `D_phi` success AUCs were `0.531` and `0.503`. With both candidate checkpoints
 on the full bank, neither local raw L2 nor learned `D_phi` provides a reliable
-promotion signal.
+promotion signal. I added `rl-rerun compare-local-proxy-audits` to keep these
+comparisons reproducible; the first full-bank comparison ranks task-hard higher
+by success delta, max-reward delta, and best proxy AUC, but both candidates fail
+the positive final-task-signal gate because final dense reward is negative.
+The comparison artifact is
+`results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_taskreward_vs_taskhard.json`.
 
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
