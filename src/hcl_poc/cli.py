@@ -540,6 +540,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 goal_l2_gate_min=args.goal_l2_gate_min,
                 step_selector_path=Path(args.step_selector) if args.step_selector else None,
                 oracle_segment_selector=args.oracle_segment_selector,
+                oracle_segment_selector_metric=args.oracle_segment_selector_metric,
                 diagnose_oracle_goals=args.diagnose_oracle_goals,
                 output_path=Path(args.output) if args.output else None,
             )
@@ -607,6 +608,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 goal_l2_gate_min=args.goal_l2_gate_min,
                 step_selector_path=Path(args.step_selector) if args.step_selector else None,
                 oracle_segment_selector=args.oracle_segment_selector,
+                oracle_segment_selector_metric=args.oracle_segment_selector_metric,
                 diagnose_oracle_goals=args.diagnose_oracle_goals,
                 output_path=Path(args.output) if args.output else None,
             )
@@ -666,6 +668,7 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 goal_l2_gate_min=args.goal_l2_gate_min,
                 step_selector_path=Path(args.step_selector) if args.step_selector else None,
                 oracle_segment_selector=args.oracle_segment_selector,
+                oracle_segment_selector_metric=args.oracle_segment_selector_metric,
                 diagnose_oracle_goals=args.diagnose_oracle_goals,
                 output_path=Path(args.output) if args.output else None,
             )
@@ -2321,6 +2324,11 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r1.add_argument("--goal-l2-gate-min", type=float)
     eval_closed_loop_r1.add_argument("--step-selector")
     eval_closed_loop_r1.add_argument("--oracle-segment-selector", action="store_true")
+    eval_closed_loop_r1.add_argument(
+        "--oracle-segment-selector-metric",
+        choices=["latent_distance", "env_reward"],
+        default="latent_distance",
+    )
     eval_closed_loop_r1.add_argument("--diagnose-oracle-goals", action="store_true")
     eval_closed_loop_r1.add_argument("--output")
     eval_closed_loop_r1.set_defaults(func=rl_rerun_cmd)
@@ -2382,6 +2390,11 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r2.add_argument("--goal-l2-gate-min", type=float)
     eval_closed_loop_r2.add_argument("--step-selector")
     eval_closed_loop_r2.add_argument("--oracle-segment-selector", action="store_true")
+    eval_closed_loop_r2.add_argument(
+        "--oracle-segment-selector-metric",
+        choices=["latent_distance", "env_reward"],
+        default="latent_distance",
+    )
     eval_closed_loop_r2.add_argument("--diagnose-oracle-goals", action="store_true")
     eval_closed_loop_r2.add_argument("--output")
     eval_closed_loop_r2.set_defaults(func=rl_rerun_cmd)
@@ -2437,6 +2450,11 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r3.add_argument("--goal-l2-gate-min", type=float)
     eval_closed_loop_r3.add_argument("--step-selector")
     eval_closed_loop_r3.add_argument("--oracle-segment-selector", action="store_true")
+    eval_closed_loop_r3.add_argument(
+        "--oracle-segment-selector-metric",
+        choices=["latent_distance", "env_reward"],
+        default="latent_distance",
+    )
     eval_closed_loop_r3.add_argument("--diagnose-oracle-goals", action="store_true")
     eval_closed_loop_r3.add_argument("--output")
     eval_closed_loop_r3.set_defaults(func=rl_rerun_cmd)

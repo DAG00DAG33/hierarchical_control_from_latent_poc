@@ -4226,6 +4226,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
     oracle_segment_selector: bool = False,
+    oracle_segment_selector_metric: str = "latent_distance",
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -4250,6 +4251,10 @@ def evaluate_rl_rerun_closed_loop_r1(
         raise ValueError("goal_l2_gate_min must be non-negative")
     if oracle_segment_selector and (step_selector_path is not None):
         raise ValueError("oracle_segment_selector and step_selector_path cannot both be set")
+    if oracle_segment_selector_metric not in {"latent_distance", "env_reward"}:
+        raise ValueError(
+            "oracle_segment_selector_metric must be 'latent_distance' or 'env_reward'"
+        )
     need_oracle_branch = goal_source == "oracle" or diagnose_oracle_goals
     step_selector = (
         _load_closed_loop_step_selector(step_selector_path)
@@ -4358,7 +4363,8 @@ def evaluate_rl_rerun_closed_loop_r1(
         oracle_segment_selector_base_actions = 0
         oracle_segment_selector_residual_decisions = 0
         oracle_segment_selector_decisions = 0
-        oracle_segment_selector_delta_l2: list[float] = []
+        oracle_segment_selector_latent_delta_l2: list[float] = []
+        oracle_segment_selector_env_reward_delta: list[float] = []
         high_decisions = 0
 
         for batch_start in range(0, episodes, num_envs):
@@ -4480,18 +4486,19 @@ def evaluate_rl_rerun_closed_loop_r1(
                 if selector_env is not None:
                     selector_env.reset(seed=reset_seeds)
 
-                def branch_segment_final_distance(
+                def branch_segment_outcome(
                     *,
                     start_obs: dict[str, Any],
                     start_previous_action: np.ndarray,
                     goal: np.ndarray,
                     use_tuned_policy: bool,
-                ) -> np.ndarray:
+                ) -> dict[str, np.ndarray]:
                     if selector_env is None:
                         raise RuntimeError("Oracle segment selector env was not initialized")
                     _copy_env_state(env, selector_env)
                     branch_obs = start_obs
                     branch_previous_action = start_previous_action.copy()
+                    terminal_reward = np.zeros(batch_envs, dtype=np.float32)
                     for branch_step in range(frozen.update_period):
                         branch_frames = _phase4_frame_inputs(
                             branch_obs,
@@ -4577,8 +4584,11 @@ def evaluate_rl_rerun_closed_loop_r1(
                         else:
                             branch_unclipped = branch_base_action
                         branch_action = torch.clamp(branch_unclipped, action_low, action_high)
-                        branch_obs, _reward, branch_term, branch_trunc, _info = (
+                        branch_obs, branch_reward, branch_term, branch_trunc, _info = (
                             selector_env.step(branch_action)
+                        )
+                        terminal_reward = (
+                            branch_reward.detach().cpu().numpy().astype(np.float32)
                         )
                         branch_previous_action = frozen.action_norm.transform(
                             branch_action.cpu().numpy().astype(np.float32)
@@ -4595,7 +4605,12 @@ def evaluate_rl_rerun_closed_loop_r1(
                         branch_final_frames,
                         device,
                     )
-                    return np.linalg.norm(branch_final_z - goal, axis=-1).astype(np.float32)
+                    return {
+                        "latent_distance": np.linalg.norm(
+                            branch_final_z - goal, axis=-1
+                        ).astype(np.float32),
+                        "env_reward": terminal_reward,
+                    }
 
                 for step_index in range(max_steps):
                     if not np.any(active):
@@ -4736,26 +4751,40 @@ def evaluate_rl_rerun_closed_loop_r1(
                                     "requires --oracle-copy-mode state_dict"
                                 )
                             branch_start_obs = env.unwrapped.get_obs()
-                            branch_base_distance = branch_segment_final_distance(
+                            branch_base_outcome = branch_segment_outcome(
                                 start_obs=branch_start_obs,
                                 start_previous_action=previous_action,
                                 goal=held_goal,
                                 use_tuned_policy=False,
                             )
-                            branch_tuned_distance = branch_segment_final_distance(
+                            branch_tuned_outcome = branch_segment_outcome(
                                 start_obs=branch_start_obs,
                                 start_previous_action=previous_action,
                                 goal=held_goal,
                                 use_tuned_policy=True,
                             )
-                            choose_residual = (
-                                branch_tuned_distance[replan_indices]
-                                < branch_base_distance[replan_indices]
-                            )
-                            oracle_segment_selector_delta_l2.extend(
+                            if oracle_segment_selector_metric == "latent_distance":
+                                choose_residual = (
+                                    branch_tuned_outcome["latent_distance"][replan_indices]
+                                    < branch_base_outcome["latent_distance"][replan_indices]
+                                )
+                            else:
+                                choose_residual = (
+                                    branch_tuned_outcome["env_reward"][replan_indices]
+                                    > branch_base_outcome["env_reward"][replan_indices]
+                                )
+                            oracle_segment_selector_latent_delta_l2.extend(
                                 (
-                                    branch_base_distance[replan_indices]
-                                    - branch_tuned_distance[replan_indices]
+                                    branch_base_outcome["latent_distance"][replan_indices]
+                                    - branch_tuned_outcome["latent_distance"][replan_indices]
+                                )
+                                .astype(float)
+                                .tolist()
+                            )
+                            oracle_segment_selector_env_reward_delta.extend(
+                                (
+                                    branch_tuned_outcome["env_reward"][replan_indices]
+                                    - branch_base_outcome["env_reward"][replan_indices]
                                 )
                                 .astype(float)
                                 .tolist()
@@ -5163,6 +5192,11 @@ def evaluate_rl_rerun_closed_loop_r1(
             if use_residual and step_selector is not None
             else None,
             "oracle_segment_selector": oracle_segment_selector if use_residual else False,
+            "oracle_segment_selector_metric": (
+                oracle_segment_selector_metric
+                if use_residual and oracle_segment_selector
+                else None
+            ),
             "oracle_segment_selector_residual_rate": 1.0
             - (oracle_segment_selector_base_actions / max(active_actions, 1))
             if use_residual and oracle_segment_selector
@@ -5174,8 +5208,13 @@ def evaluate_rl_rerun_closed_loop_r1(
             if use_residual and oracle_segment_selector
             else None,
             "oracle_segment_selector_distance_delta_l2_mean": (
-                float(np.mean(oracle_segment_selector_delta_l2))
-                if oracle_segment_selector_delta_l2
+                float(np.mean(oracle_segment_selector_latent_delta_l2))
+                if oracle_segment_selector_latent_delta_l2
+                else None
+            ),
+            "oracle_segment_selector_env_reward_delta_mean": (
+                float(np.mean(oracle_segment_selector_env_reward_delta))
+                if oracle_segment_selector_env_reward_delta
                 else None
             ),
             "mean_residual_norm": (
@@ -5265,6 +5304,9 @@ def evaluate_rl_rerun_closed_loop_r1(
         "goal_l2_gate_min": goal_l2_gate_min,
         "step_selector_path": str(step_selector_path) if step_selector_path else None,
         "oracle_segment_selector": oracle_segment_selector,
+        "oracle_segment_selector_metric": (
+            oracle_segment_selector_metric if oracle_segment_selector else None
+        ),
         "diagnose_oracle_goals": diagnose_oracle_goals,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
@@ -5313,6 +5355,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
     oracle_segment_selector: bool = False,
+    oracle_segment_selector_metric: str = "latent_distance",
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -5331,6 +5374,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         goal_l2_gate_min=goal_l2_gate_min,
         step_selector_path=step_selector_path,
         oracle_segment_selector=oracle_segment_selector,
+        oracle_segment_selector_metric=oracle_segment_selector_metric,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )
@@ -5352,6 +5396,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
     oracle_segment_selector: bool = False,
+    oracle_segment_selector_metric: str = "latent_distance",
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -5370,6 +5415,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         goal_l2_gate_min=goal_l2_gate_min,
         step_selector_path=step_selector_path,
         oracle_segment_selector=oracle_segment_selector,
+        oracle_segment_selector_metric=oracle_segment_selector_metric,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )

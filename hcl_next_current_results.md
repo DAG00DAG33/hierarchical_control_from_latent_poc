@@ -987,6 +987,23 @@ robust selector for task success here. This points back to the objective: the
 tuned branch needs to create a larger, more task-aligned effect, not merely be
 selected by a sharper local latent-distance heuristic.
 
+I then extended the oracle segment selector with
+`--oracle-segment-selector-metric env_reward`, which chooses the tuned branch
+when its counterfactual one-segment terminal normalized dense reward exceeds
+the frozen branch. A matched 100-episode check at `seed_start=4800000` was
+again only a small-window diagnostic:
+
+| policy | success | final reward | max reward | residual action rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.230 | 0.4147 | 0.4376 | 0.000 |
+| ungated residual | 0.270 | 0.4177 | 0.4537 | 1.000 |
+| task-reward oracle selector | 0.250 | 0.4208 | 0.4505 | 0.493 |
+
+The task-reward oracle selector improves final reward versus ungated, but
+selects worse task success on this window. This suggests that even a
+non-deployable one-segment task-reward oracle is not a clean branch selector for
+full-task success. It is useful infrastructure, but not a promotion signal.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

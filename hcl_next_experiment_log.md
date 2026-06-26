@@ -13886,3 +13886,115 @@ result ties frozen success and only adds a tiny reward delta. This means the
 task-hard objective is not failing only because the learned high level emits bad
 goals. The low-level update itself is still too small or too weakly aligned with
 closed-loop task success.
+
+## 2026-06-26: Task-reward oracle segment selector diagnostic
+
+The existing `--oracle-segment-selector` chose between frozen and tuned
+branches by counterfactual one-segment terminal latent distance. I added:
+
+```text
+--oracle-segment-selector-metric latent_distance|env_reward
+```
+
+The new `env_reward` mode chooses the tuned branch when its counterfactual
+one-segment terminal normalized dense reward is higher than the frozen branch.
+This is still non-deployable, but it tests whether the previous oracle selector
+failed because latent distance was the wrong local branch-selection proxy.
+
+Commands:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 4600000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_20_seed4600000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 4700000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_20_seed4700000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4800000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_100_seed4800000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4800000 \
+  --num-envs 20 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_100_seed4800000.json
+```
+
+### Results
+
+20-episode smoke windows:
+
+| seed | frozen | task-reward oracle selector | success delta | residual action rate |
+| ---: | ---: | ---: | ---: | ---: |
+| 4600000 | 0.300 | 0.250 | -0.050 | 0.519 |
+| 4700000 | 0.300 | 0.350 | +0.050 | 0.581 |
+
+Matched 100-episode check:
+
+| policy | success | final reward | max reward | residual action rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.230 | 0.4147 | 0.4376 | 0.000 |
+| ungated residual | 0.270 | 0.4177 | 0.4537 | 1.000 |
+| task-reward oracle selector | 0.250 | 0.4208 | 0.4505 | 0.493 |
+
+The selector's counterfactual branch diagnostics on the 100-episode check were:
+
+```text
+mean terminal latent-distance improvement selected metric trace: -0.0099
+mean terminal env-reward improvement selected metric trace: -0.00019
+mean residual norm: 0.000481
+action saturation: 0.0404
+```
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_20_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_20_seed4700000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_100_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_100_seed4800000.json`
+
+### Interpretation
+
+Changing the oracle segment selector from latent distance to one-segment task
+reward does not make local branch selection reliable. The 20-episode windows
+split signs, and on the matched 100-episode check the task-reward selector
+improves final reward over ungated residual but loses task success. This
+suggests the selector proxy is still too local and myopic: even non-deployable
+same-state one-segment task reward is not a clean target for full-task success.
+The useful next objective direction should be more closed-loop/deployment
+aligned than selecting single held-goal segments by terminal local metrics.
