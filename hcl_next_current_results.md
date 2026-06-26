@@ -189,6 +189,28 @@ original hope:
 
 ### Shorter held-goal horizons were worse
 
+I exposed `rl-rerun goal-diagnostics` for named learned-interface candidates,
+not only the VAE512 scaling alias, and ran it on the current `effect32_film`
+hierarchy. This is a diagnostic for the shared
+`artifacts/incremental/learned_interface/effect32_film/seed0/hierarchy.pt`
+artifact; the non-VAE learned-interface path is not currently split into
+separate `N=500` and `N=1800` checkpoints.
+
+The goal-use gate remains weak:
+
+| metric | value |
+| --- | ---: |
+| frame shuffle action change L2 | 0.950 |
+| goal shuffle action change L2 | 0.062 |
+| previous-action shuffle action change L2 | 0.133 |
+| max same-state horizon sensitivity L2 | 0.0368 |
+| goal shuffle MAE gap | 0.0102 |
+
+So `effect32_film` is goal-dependent enough that shuffled goals hurt closed-loop
+performance, but the low-level action is still dominated by the current frame.
+This supports the current decision to avoid more expensive RL on candidates that
+do not pass a stronger goal-use gate.
+
 I added candidate-level `horizon_steps` / `update_period` overrides for learned
 interfaces and trained short-horizon aliases of the effect32 FiLM interface:
 
@@ -1153,6 +1175,7 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_p
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/segment_selector_fit_train4503000_valid4506000.json
+results/incremental/goal_diagnostics/n500/seed0/effect32_film/diagnostics.json
 artifacts/incremental/learned_interface/effect32_film_h5/seed0/hierarchy.pt
 results/incremental/learned_interface/effect32_film_h5/seed0/learned_hierarchy_eval_200_seed3500000.json
 results/incremental/learned_interface/effect32_film_h5/seed0/oracle_hierarchy_eval_200_seed3500000.json

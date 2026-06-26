@@ -984,8 +984,6 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
             )
         )
     elif args.rl_rerun_command == "goal-diagnostics":
-        if args.representation != "vae512":
-            raise ValueError("Only representation=vae512 is implemented for goal-diagnostics")
         horizons = tuple(int(value) for value in args.horizons.split(",") if value)
         console.print(
             learned_interface_goal_diagnostics(
@@ -2804,7 +2802,7 @@ def build_parser() -> argparse.ArgumentParser:
     goal_diag = rl_rerun_sub.add_parser("goal-diagnostics")
     goal_diag.add_argument(
         "--representation",
-        choices=["vae512"],
+        choices=["vae512", "learned_interface"],
         default="vae512",
     )
     goal_diag.add_argument("--candidate", default="vae512_w2048_b1e6")

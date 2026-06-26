@@ -13098,3 +13098,73 @@ selection and far below oracle best-of-8. This rejects the simplest
 branch-goal attempt would need to change the data/modeling setup more
 substantially: broader query coverage, different candidate generation, or a
 selector trained directly as an online intervention policy.
+
+## 2026-06-26: Goal diagnostics CLI for learned-interface candidates
+
+### Hypothesis
+
+The plan says expensive RL should be gated by goal-identifiability diagnostics.
+The reusable `learned_interface_goal_diagnostics` implementation already works
+for named learned-interface candidates, but the CLI only allowed
+`--representation vae512`. I removed that artificial restriction and ran the
+diagnostic on the current `effect32_film` hierarchy.
+
+### Code Change
+
+`rl-rerun goal-diagnostics` now accepts:
+
+```text
+--representation vae512|learned_interface
+```
+
+The `--candidate` argument selects the actual learned-interface artifact. For
+non-VAE candidates this uses the shared artifact path under
+`artifacts/incremental/learned_interface/<candidate>/seed0/`; those candidates
+are not currently retrained per `N` demo bucket.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film/diagnostics.json
+```
+
+### Result
+
+| metric | value |
+| --- | ---: |
+| frame shuffle action change L2 | 0.950 |
+| goal shuffle action change L2 | 0.062 |
+| previous-action shuffle action change L2 | 0.133 |
+| remaining-time shuffle action change L2 | 0.0014 |
+| max same-state horizon sensitivity L2 | 0.0368 |
+| goal shuffle MAE gap | 0.0102 |
+
+Same-state horizon sensitivity:
+
+| comparison | action change L2 |
+| --- | ---: |
+| 2 vs 5 | 0.0242 |
+| 2 vs 10 | 0.0368 |
+| 5 vs 10 | 0.0261 |
+
+Artifact:
+
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film/diagnostics.json`
+
+### Interpretation
+
+The `effect32_film` low level is not completely goal-blind, but action selection
+is still dominated by the current frame. Goal shuffle changes actions by only
+about `6.5%` of the frame-shuffle action change. This reinforces the hard-gate
+decision: do not spend serious PPO on a new candidate unless goal-use
+diagnostics are materially stronger than this or the experiment is explicitly a
+representation/objective diagnostic.
