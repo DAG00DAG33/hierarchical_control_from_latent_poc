@@ -14531,3 +14531,74 @@ under learned reachability on the same reset samples. Neither proxy correlates
 meaningfully with dense task-reward deltas on this smoke. This strengthens the
 case that the next objective work should use same-sample proxy audits before
 promoting a local metric to PPO reward or checkpoint selection.
+
+## 2026-06-26 - Local sample proxy audit command
+
+### Hypothesis
+
+The per-sample local eval exports should be audited through a repeatable command
+rather than ad hoc Python snippets, so raw L2, `D_phi`, action magnitude, and
+state-difficulty proxies can be compared consistently.
+
+### Implementation
+
+I added:
+
+```bash
+uv run hcl-poc rl-rerun audit-local-sample-proxies \
+  --local-json ... \
+  --output ...
+```
+
+The audit reports, for every available proxy:
+
+- mean and standard deviation
+- Pearson correlation with final dense-reward delta
+- Pearson correlation with max dense-reward delta
+- mean proxy value on success-improved and success-regressed samples
+- AUC for classifying positive versus negative success deltas
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-local-sample-proxies \
+  --local-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n512_dphi_1_seed0.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n512_dphi_proxy_audit.json \
+  --force
+```
+
+### Results
+
+Aggregate:
+
+| metric | value |
+| --- | ---: |
+| rows | 512 |
+| final dense-reward delta mean | +0.00794 |
+| max dense-reward delta mean | +0.00266 |
+| success delta mean | +0.00391 |
+| success delta counts | `-1: 11`, `0: 488`, `+1: 13` |
+
+Proxy audit:
+
+| proxy | mean | corr final reward delta | corr max reward delta | success-delta AUC |
+| --- | ---: | ---: | ---: | ---: |
+| raw-distance delta | +0.0135 | 0.052 | 0.0019 | 0.469 |
+| D_phi delta | -0.0091 | 0.0168 | -0.0157 | 0.483 |
+| mean action delta | 0.00037 | 0.0145 | 0.0572 | 0.636 |
+| initial raw distance | 0.863 | 0.0346 | 0.102 | 0.643 |
+| frozen final raw distance | 0.569 | 0.0217 | 0.0302 | 0.538 |
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n512_dphi_proxy_audit.json`
+
+### Interpretation
+
+This audit formalizes the proxy mismatch: on this smoke, raw and learned
+reachability deltas are both below chance for separating success improvements
+from success regressions among the discordant samples. Initial difficulty and
+action magnitude look more predictive, but the discordant subset is only 24
+samples, so this is a feature-design hint rather than a policy conclusion. The
+main practical gain is that future candidate checkpoints can now be screened
+with the same proxy audit before expensive closed-loop validation.

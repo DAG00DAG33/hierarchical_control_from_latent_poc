@@ -142,6 +142,7 @@ from hcl_poc.rl_rerun import (
     audit_rl_rerun_state_dataset,
     audit_rl_rerun_vector_dataset,
     audit_rl_rerun_local_mode_a,
+    audit_rl_rerun_local_sample_proxies,
     collect_rl_rerun_state_dataset,
     collect_rl_rerun_vector_dataset,
     create_rl_rerun_local_eval_manifest,
@@ -735,6 +736,14 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 output_path=Path(args.output),
                 feature_names=args.feature_names,
                 ridge=args.ridge,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "audit-local-sample-proxies":
+        console.print(
+            audit_rl_rerun_local_sample_proxies(
+                local_json_path=Path(args.local_json),
+                output_path=Path(args.output),
                 force=args.force,
             )
         )
@@ -2539,6 +2548,13 @@ def build_parser() -> argparse.ArgumentParser:
     fit_oracle_segment_selector.add_argument("--ridge", type=float, default=1.0)
     fit_oracle_segment_selector.add_argument("--force", action="store_true")
     fit_oracle_segment_selector.set_defaults(func=rl_rerun_cmd)
+    audit_local_sample_proxies = rl_rerun_sub.add_parser(
+        "audit-local-sample-proxies"
+    )
+    audit_local_sample_proxies.add_argument("--local-json", required=True)
+    audit_local_sample_proxies.add_argument("--output", required=True)
+    audit_local_sample_proxies.add_argument("--force", action="store_true")
+    audit_local_sample_proxies.set_defaults(func=rl_rerun_cmd)
     record_rerun_videos = rl_rerun_sub.add_parser("record-videos")
     record_rerun_videos.add_argument("--checkpoint", required=True)
     record_rerun_videos.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)

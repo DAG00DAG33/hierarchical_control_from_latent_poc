@@ -4328,6 +4328,109 @@ def _closed_loop_selector_metrics(
     }
 
 
+def _pearson_corr(x: np.ndarray, y: np.ndarray) -> float | None:
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if len(x) != len(y):
+        raise ValueError("Correlation arrays must have the same length")
+    if len(x) < 2 or float(np.std(x)) == 0.0 or float(np.std(y)) == 0.0:
+        return None
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _mean_by_mask(values: np.ndarray, mask: np.ndarray) -> float | None:
+    values = np.asarray(values, dtype=np.float64)
+    mask = np.asarray(mask, dtype=np.bool_)
+    if not np.any(mask):
+        return None
+    return float(np.mean(values[mask]))
+
+
+def audit_rl_rerun_local_sample_proxies(
+    local_json_path: Path,
+    output_path: Path,
+    force: bool = False,
+) -> Path:
+    if output_path.exists() and not force:
+        return output_path
+    payload = json.loads(local_json_path.read_text())
+    sample_metrics = payload.get("sample_metrics")
+    if not isinstance(sample_metrics, dict):
+        raise ValueError("Local eval JSON does not contain sample_metrics")
+    required = [
+        "final_env_reward_delta_vs_base",
+        "max_env_reward_delta_vs_base",
+        "success_once_delta_vs_base",
+    ]
+    missing = [name for name in required if name not in sample_metrics]
+    if missing:
+        raise ValueError(f"sample_metrics is missing required fields: {missing}")
+    final_reward_delta = np.asarray(
+        sample_metrics["final_env_reward_delta_vs_base"], dtype=np.float32
+    )
+    max_reward_delta = np.asarray(
+        sample_metrics["max_env_reward_delta_vs_base"], dtype=np.float32
+    )
+    success_delta = np.asarray(
+        sample_metrics["success_once_delta_vs_base"], dtype=np.float32
+    )
+    positive_success = success_delta > 0.0
+    negative_success = success_delta < 0.0
+    nonzero_success = success_delta != 0.0
+    proxy_fields = [
+        "distance_reduction_delta_vs_base",
+        "reachability_reduction_delta_vs_base",
+        "mean_action_delta_l2",
+        "initial_distance",
+        "base_final_distance",
+        "initial_reachability_distance",
+        "base_final_reachability_distance",
+    ]
+    proxies: dict[str, Any] = {}
+    for name in proxy_fields:
+        if name not in sample_metrics:
+            continue
+        values = np.asarray(sample_metrics[name], dtype=np.float32)
+        if len(values) != len(final_reward_delta):
+            raise ValueError(f"sample field has inconsistent length: {name}")
+        proxies[name] = {
+            "mean": float(np.mean(values)),
+            "std": float(np.std(values)),
+            "pearson_final_reward_delta": _pearson_corr(
+                values, final_reward_delta
+            ),
+            "pearson_max_reward_delta": _pearson_corr(values, max_reward_delta),
+            "mean_success_improved": _mean_by_mask(values, positive_success),
+            "mean_success_regressed": _mean_by_mask(values, negative_success),
+            "success_delta_auc": _binary_auc(values[nonzero_success], positive_success[nonzero_success])
+            if np.any(nonzero_success)
+            else None,
+        }
+    success_counts = {
+        str(int(value)): int(count)
+        for value, count in zip(*np.unique(success_delta.astype(np.int32), return_counts=True))
+    }
+    result = {
+        "stage": "local_sample_proxy_audit",
+        "local_json": str(local_json_path),
+        "rows": int(len(final_reward_delta)),
+        "checkpoint": payload.get("checkpoint"),
+        "dataset": payload.get("dataset"),
+        "reachability_checkpoint": payload.get("reachability_checkpoint"),
+        "sampled_local_episodes": payload.get("sampled_local_episodes"),
+        "aggregate": {
+            "final_reward_delta_mean": float(np.mean(final_reward_delta)),
+            "max_reward_delta_mean": float(np.mean(max_reward_delta)),
+            "success_delta_mean": float(np.mean(success_delta)),
+            "success_delta_counts": success_counts,
+        },
+        "proxies": proxies,
+    }
+    ensure_dir(output_path.parent)
+    write_json(output_path, result)
+    return output_path
+
+
 def fit_rl_rerun_closed_loop_selector(
     train_json_path: Path,
     output_path: Path,

@@ -1077,6 +1077,14 @@ distance (`0.052`) and `D_phi` (`0.017`), and raw-vs-`D_phi` improvement
 correlation was only `0.139`. This makes the local proxy mismatch directly
 measurable on identical reset samples.
 
+I added `rl-rerun audit-local-sample-proxies` to turn these sample exports into
+repeatable proxy audits. On the 512-sample D_phi smoke, raw-distance delta had
+success-improvement AUC `0.469` and `D_phi` delta had AUC `0.483`; both are
+below chance on the small discordant-success subset. Initial difficulty
+features were more predictive (`initial_distance` AUC `0.643`), suggesting that
+where an intervention is attempted may matter more than the current raw or
+learned local-distance delta.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:
