@@ -17757,3 +17757,153 @@ over action-only in serial mode, but not enough to beat `highact_strong`; succes
 is still lower and paired counts are slightly negative. This narrows the current
 candidate choice: use `highact_strong` for conservative local-RL work, and keep
 action-only only as a vectorized learned-interface lead.
+
+## 2026-06-26 - Paired terminal-D_phi R3 on high-action base
+
+### Hypothesis
+
+The absolute terminal-`D_phi` R3 update on
+`effect32_film_gsens_ft_highact_strong` improved the local training proxy but
+hurt serial deployment. A paired reward that directly scores tuned-vs-frozen
+terminal reachability might reduce proxy over-optimization and produce a safer
+low-level update.
+
+### Commands
+
+The first 4096-env paired run failed at reset with GPU camera allocation because
+paired mode creates a second synchronized rollout:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_paired_4096_terminal_40k_bc10 \
+  --steps 40960 \
+  --num-envs 4096 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --reward-mode paired \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+I reran the smoke with 2048 paired envs. The first 2048-env run exposed a
+paired-branch sync bug: the bootstrap value call can trigger a high-level replan
+on the tuned rollout after an update, but the frozen paired branch was not
+copied after that mutation. I patched `train_direct_low_rl` to copy the paired
+branch after bootstrap replans and reran under a fresh run name:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10 \
+  --steps 40960 \
+  --num-envs 2048 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --reward-mode paired \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Serial checks:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10/best_train_latent.pt \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10/best_train_latent.pt \
+  --force
+```
+
+### Training Metrics
+
+The fixed run stayed synchronized. The best checkpoint is still the
+intermediate paired-positive checkpoint at 20480 steps because the final row's
+mean paired improvement was much smaller.
+
+| global step | mean paired improvement | fraction paired improved | tuned terminal D_phi | base terminal D_phi | action saturation | paired desynced envs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20480 | 0.0907 | 0.5869 | 0.4029 | 0.4935 | 0.4062 | 0 |
+| 40960 | 0.0161 | 0.4854 | 0.5889 | 0.6049 | 0.1917 | 0 |
+
+### Serial Results
+
+Matched two-window serial comparison against the frozen high-action base:
+
+| seed start | policy | success | final reward | max reward | segment reach | segment final distance | raw segment reduction |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | frozen | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.5225 | 0.3890 |
+| 3500000 | pairedsync R3 | 0.640 | 0.6469 | 0.7428 | 0.747 | 0.5974 | 0.3963 |
+| 3600000 | frozen | 0.770 | 0.7199 | 0.8385 | 0.791 | 0.4565 | 0.3732 |
+| 3600000 | pairedsync R3 | 0.680 | 0.6704 | 0.7739 | 0.777 | 0.5888 | 0.3879 |
+
+Aggregate:
+
+| policy | episodes | success | final reward | max reward | segment reach |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen | 200 | 0.720 | 0.7146 | 0.7976 | 0.756 |
+| pairedsync R3 | 200 | 0.660 | 0.6587 | 0.7584 | 0.762 |
+
+Paired counts across both windows:
+
+| metric | wins | losses | ties |
+| --- | ---: | ---: | ---: |
+| final reward | 54 | 63 | 83 |
+| max reward | 39 | 46 | 115 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_pairedsync_2048_terminal_40k_bc10_serial100_seed3600000/serial_eval_100_seed3600000.json`
+
+### Interpretation
+
+Reject this paired R3 checkpoint. The paired local training objective found a
+checkpoint with positive tuned-vs-frozen `D_phi` improvement, and serial segment
+reach was slightly higher in aggregate, but full-task serial success, final
+reward, and max reward all dropped. This is the same proxy-transfer failure as
+the absolute terminal-`D_phi` run, now under a paired objective. The immediate
+next lever should be a better checkpoint selector/local objective or a different
+counterfactual/evaluation formulation, not scaling this paired recipe.

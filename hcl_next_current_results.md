@@ -595,6 +595,30 @@ single-env/serial screen it did not beat `highact_strong`:
 This rejects the simple interpolation between action-only and `highact_strong`.
 The conservative serial/RL base remains `effect32_film_gsens_ft_highact_strong`.
 
+I then tested paired terminal-`D_phi` R3 on the conservative high-action base.
+The intended 4096-env paired run failed GPU camera allocation because paired
+mode creates a second synchronized rollout, so I used 2048 paired envs. This
+also exposed a paired-branch sync bug at PPO bootstrap replans; after fixing it,
+the fixed run stayed synchronized and still selected the 20480-step checkpoint:
+
+| train step | mean paired improvement | fraction improved | tuned terminal D_phi | base terminal D_phi | desynced envs |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 20480 | 0.0907 | 0.587 | 0.4029 | 0.4935 | 0 |
+| 40960 | 0.0161 | 0.485 | 0.5889 | 0.6049 | 0 |
+
+But serial deployment rejected it on the same two 100-seed windows used for the
+frozen high-action base:
+
+| policy | episodes | success | final reward | max reward | segment reach |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen highact_strong | 200 | 0.720 | 0.7146 | 0.7976 | 0.756 |
+| pairedsync R3 2048 terminal | 200 | 0.660 | 0.6587 | 0.7584 | 0.762 |
+
+The paired reward improved or preserved the local segment metric but still hurt
+full-task serial behavior. This reinforces the current main failure mode:
+better local reachability proxies are not enough unless they predict closed-loop
+task transfer.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

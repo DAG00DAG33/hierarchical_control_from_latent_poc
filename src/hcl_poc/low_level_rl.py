@@ -3312,7 +3312,9 @@ def train_direct_low_rl(
                 global_step += num_envs
                 progress.update(min(num_envs, total_steps - progress.n))
             with torch.no_grad():
-                next_condition, _base, _distance, _replan = rollout.condition()
+                next_condition, _base, _distance, bootstrap_replan = rollout.condition()
+                if base_rollout is not None and np.any(bootstrap_replan):
+                    base_rollout.copy_branch_from(rollout)
                 next_value = agent.critic(next_condition).flatten()
                 advantages = torch.zeros_like(reward_buf)
                 last_gae = torch.zeros(num_envs, device=device)
