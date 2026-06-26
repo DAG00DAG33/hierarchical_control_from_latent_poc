@@ -255,14 +255,14 @@ or max_goal_sensitivity_l2 >= 0.1
 ```
 
 On the current archive plus the new dropout checks, the baseline-initialized
-goal-sensitivity fine-tune, and the action-aware high-level fine-tune, five of
-thirty-six
+goal-sensitivity fine-tune, and the action-aware high-level fine-tunes, five of
+thirty-seven
 diagnostics pass:
 
 | status | candidates |
 | --- | --- |
 | offline goal-use pass | `effect32_film_frame_drop25`, `effect32_film_gsens`, `effect32_film_scene_drop25`, `ae256_film`, `vae512_b1e6_film` |
-| reject low goal-use | all other archived hierarchy candidates checked so far, including `effect32_film_gsens_ft` and `effect32_film_gsens_ft_highact` |
+| reject low goal-use | all other archived hierarchy candidates checked so far, including `effect32_film_gsens_ft`, `effect32_film_gsens_ft_highact`, and `effect32_film_gsens_ft_highact_strong` |
 
 This formalizes the current decision rule. Effect32 remains the best observed
 deployment base, but it fails the strict offline goal-use gate; AE/VAE FiLM
@@ -388,6 +388,24 @@ This confirms that high-level action-aware tuning is directionally useful, but
 the mild high-only version is still below the original learned-goal baseline.
 It should be treated as evidence for coupled high/low training, not as a
 promotion candidate.
+
+I then strengthened that high-level-only objective by reducing the high goal-MSE
+weight, increasing the action-through-low loss, and training for 20 epochs. This
+is the best coupled learned-interface result so far:
+
+| candidate | learned success 500 | final reward 500 | max reward 500 | teacher MAE 500 |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.650 | 0.7410 | 0.7484 | 0.0996 |
+| ae256_film | 0.544 | 0.6572 | 0.6707 | 0.1184 |
+| vae512_b1e6_film | 0.438 | 0.5798 | 0.5952 | 0.1167 |
+| effect32_film_gsens_ft_highact_strong | 0.652 | 0.7455 | 0.7523 | 0.0895 |
+
+The margin is tiny, so this is not yet a robust improvement claim. But it is a
+real lead: a more goal-sensitive low-level can be made deployable again by
+training the high-level against the frozen low-level's induced action error.
+The next validation should use a fresh 500-episode learned-goal window before
+promoting it, and the next implementation step should consider joint high/low
+coupled training if the fresh window holds.
 
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
