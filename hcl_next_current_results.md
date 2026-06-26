@@ -187,6 +187,32 @@ original hope:
 4. Simple scalar gating can reduce harm, but not enough to establish a robust
    improvement over frozen imitation.
 
+### Shorter held-goal horizons were worse
+
+I added candidate-level `horizon_steps` / `update_period` overrides for learned
+interfaces and trained short-horizon aliases of the effect32 FiLM interface:
+
+```text
+effect32_film_h5: representation_candidate=effect32, high_level_candidate=effect32, horizon/update=5
+effect32_film_h2: representation_candidate=effect32, high_level_candidate=effect32, horizon/update=2
+```
+
+Matched closed-loop evaluations on `seed_start=3500000`, 200 episodes:
+
+| candidate | goal source | success | final reward | max reward | teacher MAE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| effect32_film k10 | learned | 0.645 | 0.735 | 0.742 | 0.107 |
+| effect32_film k10 | oracle | 0.645 | 0.740 | 0.746 | 0.089 |
+| effect32_film_h5 | learned | 0.520 | 0.649 | 0.658 | 0.103 |
+| effect32_film_h5 | oracle | 0.570 | 0.685 | 0.696 | 0.092 |
+| effect32_film_h2 | learned | 0.315 | 0.481 | 0.501 | 0.133 |
+
+The k=5 low policy is worse even with oracle goals, and k=2 is much worse
+despite frequent replanning. This rejects the simple "shorter hierarchy horizon"
+hypothesis for the current effect32 FiLM setup. The remaining issue is not just
+that k=10 goals are too far away; changing horizon without changing the
+objective/closed-loop training distribution degrades deployment.
+
 ### Initial state features are too weak for a one-shot gate
 
 I added pre-decision eval fields for state/goal distance, base action norm,
@@ -923,12 +949,15 @@ The next useful directions are:
    can still hurt closed-loop deployment, so checkpoint selection needs
    deployment evidence or a better local-to-task proxy.
 
-3. Revisit horizon/representation only after the gate/objective question.
+3. Revisit representation only after the gate/objective question.
    The current effect32 interface is goal-dependent, so the main bottleneck is
    not simply "low level ignores the goal"; it is reliable improvement without
    damaging already-good frozen behavior. Oracle serial goals and nearest-train
    goal projection show that learned high-level goal quality matters, but simple
    projection only gives a tiny frozen gain and does not combine well with R3.
+   A direct short-horizon check with k=5 and k=2 was worse than the current k=10
+   hierarchy, so horizon shortening is not the next lever unless paired with a
+   different training distribution or objective.
 
 ## Key Artifacts
 
@@ -983,6 +1012,11 @@ results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_p
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_frozen_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentselector_serial50_seed4506000/serial_eval_50_seed4506000.json
 results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10_segmentdetail_serial50_seed4503000/segment_selector_fit_train4503000_valid4506000.json
+artifacts/incremental/learned_interface/effect32_film_h5/seed0/hierarchy.pt
+results/incremental/learned_interface/effect32_film_h5/seed0/learned_hierarchy_eval_200_seed3500000.json
+results/incremental/learned_interface/effect32_film_h5/seed0/oracle_hierarchy_eval_200_seed3500000.json
+artifacts/incremental/learned_interface/effect32_film_h2/seed0/hierarchy.pt
+results/incremental/learned_interface/effect32_film_h2/seed0/learned_hierarchy_eval_200_seed3500000.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json

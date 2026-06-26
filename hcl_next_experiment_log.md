@@ -12341,3 +12341,90 @@ deployed selector changes subsequent states, high-level goals, and segment
 distributions. A larger linear segment-start selector is not the missing piece.
 Further selector work should be trained in the actual intervention distribution,
 or the candidate policy needs a larger and more consistently task-aligned effect.
+
+## 2026-06-26: Short-horizon learned-interface check
+
+After exhausting scalar gates and offline selectors, I tested the Experiment D
+horizon hypothesis directly on the current effect32 FiLM hierarchy. I added
+candidate-level `horizon_steps` and `update_period` overrides for learned
+interfaces, then created two aliases that reuse the trained effect32
+representation and high-level model while retraining only the low policy:
+
+```text
+effect32_film_h5: representation_candidate=effect32, high_level_candidate=effect32, horizon/update=5
+effect32_film_h2: representation_candidate=effect32, high_level_candidate=effect32, horizon/update=2
+```
+
+Commands:
+
+```bash
+uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_h5 \
+  --seed 0
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_h5 \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --seed 0
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_h5 \
+  --goal-source oracle \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --seed 0
+
+uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_h2 \
+  --seed 0
+
+uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_h2 \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --seed 0
+```
+
+Hierarchy validation:
+
+| candidate | horizon | update | best epoch | oracle action MAE | predicted action MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film_h5 | 5 | 5 | 55 | 0.0387 | 0.0415 |
+| effect32_film_h2 | 2 | 2 | 59 | 0.0375 | 0.0531 |
+
+Matched closed-loop evaluations on `seed_start=3500000`, 200 episodes:
+
+| candidate | goal source | success | final reward | max reward | teacher MAE | decisions/episode |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film k10 | learned | 0.645 | 0.735 | 0.742 | 0.107 | 7.045 |
+| effect32_film k10 | oracle | 0.645 | 0.740 | 0.746 | 0.089 | 6.960 |
+| effect32_film_h5 | learned | 0.520 | 0.649 | 0.658 | 0.103 | 14.785 |
+| effect32_film_h5 | oracle | 0.570 | 0.685 | 0.696 | 0.092 | 14.125 |
+| effect32_film_h2 | learned | 0.315 | 0.481 | 0.501 | 0.133 | 42.180 |
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_h5/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_h5/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_h5/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_h5/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `artifacts/incremental/learned_interface/effect32_film_h2/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_h2/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_h2/seed0/learned_hierarchy_eval_200_seed3500000.json`
+
+### Interpretation
+
+Shortening the hierarchy horizon did not help. k=5 is worse than k=10 even with
+oracle goals, so the regression is not only learned high-level goal error. k=2
+is much worse despite frequent replanning and has worse predicted-action
+validation. For the current effect32 FiLM setup, the next useful lever is not a
+plain shorter horizon; it should be a changed objective or a policy/selector
+trained in the closed-loop intervention distribution.
