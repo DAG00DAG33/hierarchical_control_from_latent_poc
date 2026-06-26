@@ -13953,6 +13953,30 @@ TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
   --eval-seed-start 4800000 \
   --num-envs 20 \
   --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_100_seed4800000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_500_seed4800000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 20 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_500_seed4800000.json
 ```
 
 ### Results
@@ -13972,6 +13996,14 @@ Matched 100-episode check:
 | ungated residual | 0.270 | 0.4177 | 0.4537 | 1.000 |
 | task-reward oracle selector | 0.250 | 0.4208 | 0.4505 | 0.493 |
 
+Matched 500-episode check:
+
+| policy | success | final reward | max reward | residual action rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.312 | 0.4727 | 0.4960 | 0.000 |
+| ungated residual | 0.298 | 0.4553 | 0.4850 | 1.000 |
+| task-reward oracle selector | 0.322 | 0.4753 | 0.5047 | 0.483 |
+
 The selector's counterfactual branch diagnostics on the 100-episode check were:
 
 ```text
@@ -13987,14 +14019,19 @@ Artifacts:
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_20_seed4700000.json`
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_100_seed4800000.json`
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_100_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_500_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_500_seed4800000.json`
 
 ### Interpretation
 
-Changing the oracle segment selector from latent distance to one-segment task
-reward does not make local branch selection reliable. The 20-episode windows
-split signs, and on the matched 100-episode check the task-reward selector
-improves final reward over ungated residual but loses task success. This
-suggests the selector proxy is still too local and myopic: even non-deployable
-same-state one-segment task reward is not a clean target for full-task success.
-The useful next objective direction should be more closed-loop/deployment
-aligned than selecting single held-goal segments by terminal local metrics.
+The 100-episode result was another small-window false signal: the selector
+looked worse than ungated on success despite better final reward. At 500
+episodes, however, the task-reward oracle selector is positive and beats both
+frozen and ungated residual. This suggests one-segment task reward is a better
+branch-selection proxy than one-segment latent distance for this checkpoint.
+
+This is still an upper-bound diagnostic, not a deployable policy: it requires
+counterfactual simulator rollouts of frozen and tuned branches at the current
+state. The useful next direction is to approximate this kind of task-aligned
+closed-loop branch decision with deployable online state/history features or to
+train the residual/selector directly in that intervention distribution.

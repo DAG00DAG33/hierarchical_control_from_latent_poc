@@ -990,8 +990,8 @@ selected by a sharper local latent-distance heuristic.
 I then extended the oracle segment selector with
 `--oracle-segment-selector-metric env_reward`, which chooses the tuned branch
 when its counterfactual one-segment terminal normalized dense reward exceeds
-the frozen branch. A matched 100-episode check at `seed_start=4800000` was
-again only a small-window diagnostic:
+the frozen branch. The first matched 100-episode check at `seed_start=4800000`
+was mixed:
 
 | policy | success | final reward | max reward | residual action rate |
 | --- | ---: | ---: | ---: | ---: |
@@ -999,10 +999,20 @@ again only a small-window diagnostic:
 | ungated residual | 0.270 | 0.4177 | 0.4537 | 1.000 |
 | task-reward oracle selector | 0.250 | 0.4208 | 0.4505 | 0.493 |
 
-The task-reward oracle selector improves final reward versus ungated, but
-selects worse task success on this window. This suggests that even a
-non-deployable one-segment task-reward oracle is not a clean branch selector for
-full-task success. It is useful infrastructure, but not a promotion signal.
+Scaling the same check to 500 matched episodes changed the sign:
+
+| policy | success | final reward | max reward | residual action rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.312 | 0.4727 | 0.4960 | 0.000 |
+| ungated residual | 0.298 | 0.4553 | 0.4850 | 1.000 |
+| task-reward oracle selector | 0.322 | 0.4753 | 0.5047 | 0.483 |
+
+So one-segment task reward is a better oracle branch selector than latent
+distance on this window, and it can recover a positive upper-bound signal where
+ungated residual is harmful. This is still not deployable: it requires
+counterfactual simulator rollouts from the current state. Treat it as evidence
+that closed-loop branch selection can help if the selector sees task-aligned
+counterfactual outcomes, not as a policy candidate.
 
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
