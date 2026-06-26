@@ -82,6 +82,26 @@ def learned_interface_candidate_spec(config: Config, candidate: str) -> dict[str
     return spec
 
 
+def _candidate_horizon_steps(config: Config, candidate: str) -> int:
+    spec = learned_interface_candidate_spec(config, candidate)
+    return int(
+        spec.get(
+            "horizon_steps",
+            config.get("learned_interface.horizon_steps", 10),
+        )
+    )
+
+
+def _candidate_update_period(config: Config, candidate: str) -> int:
+    spec = learned_interface_candidate_spec(config, candidate)
+    return int(
+        spec.get(
+            "update_period",
+            config.get("learned_interface.update_period", 10),
+        )
+    )
+
+
 def _artifact_dir(config: Config, candidate: str, seed: int) -> Path:
     return ensure_dir(
         config.path_value("paths.incremental_artifact_dir")
@@ -899,7 +919,7 @@ def _train_effect_representation(
     )
     effect_dim = int(spec["latent_dim"])
     width = int(spec["width"])
-    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
+    horizon_steps = _candidate_horizon_steps(config, candidate)
     device = default_device()
     auxiliary_teacher, teacher_checkpoint = (
         _train_effect_auxiliary_teacher(
@@ -1639,7 +1659,7 @@ def prepare_learned_interface_episodes(
     encoder, checkpoint = _load_representation(checkpoint_path, device)
     frame_norm = Standardizer.from_state_dict(checkpoint["frame_norm"])
     train, validation, data_metadata = _load_phase6_train_episodes(config)
-    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
+    horizon_steps = _candidate_horizon_steps(config, candidate)
 
     def convert(
         episodes: list[dict[str, np.ndarray]],
@@ -2039,7 +2059,7 @@ def train_learned_interface_hierarchy(
     frame_norm = Standardizer.from_state_dict(
         representation_checkpoint["frame_norm"]
     )
-    horizon_steps = int(config.get("learned_interface.horizon_steps", 10))
+    horizon_steps = _candidate_horizon_steps(config, candidate)
     goal_rows = (
         [
             episode["goals"][horizon_steps:]
@@ -2205,7 +2225,7 @@ def train_learned_interface_hierarchy(
         "candidate": candidate,
         "representation_checkpoint": encoded["representation_checkpoint"],
         "horizon_steps": horizon_steps,
-        "update_period": int(config.get("learned_interface.update_period", 10)),
+        "update_period": _candidate_update_period(config, candidate),
         "frame_dim": frame_dim,
         "goal_dim": goal_dim,
         "hidden_dim": hidden_dim,

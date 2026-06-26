@@ -576,6 +576,20 @@ learned_interface:
       representation_candidate: effect32
       high_level_candidate: effect32
       conditioning: film
+    effect32_film_h5:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32
+      conditioning: film
+      horizon_steps: 5
+      update_period: 5
+    effect32_film_h2:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32
+      conditioning: film
+      horizon_steps: 2
+      update_period: 2
     effect32_scene_film:
       family: effect_code
       encoder_type: effect
