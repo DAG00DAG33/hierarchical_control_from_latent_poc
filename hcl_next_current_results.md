@@ -1038,6 +1038,15 @@ residual action rate `0.454`. The trace artifact is:
 results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5000000.json
 ```
 
+I also added a deployable trace-fitted segment selector path:
+`fit-oracle-segment-selector` fits a linear selector from oracle trace labels,
+and `eval-closed-loop-r{1,2,3} --segment-selector` scores it once per replan
+using the same prefix features. A train-20/valid-20 smoke did not validate the
+simple prefix feature set: validation AUC was `0.507`, accuracy `0.505`, and
+selected one-segment reward was still below the oracle by `0.00123`. The
+20-episode closed-loop validation was noisy-positive (`0.15 -> 0.20` success),
+but this is not credible given the chance-level oracle-imitation metric.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

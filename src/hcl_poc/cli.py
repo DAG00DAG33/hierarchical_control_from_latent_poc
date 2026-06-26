@@ -154,6 +154,7 @@ from hcl_poc.rl_rerun import (
     evaluate_rl_rerun_local_r2,
     evaluate_rl_rerun_local_r3,
     fit_rl_rerun_closed_loop_selector,
+    fit_rl_rerun_oracle_segment_selector,
     run_rl_rerun_algorithm_audit,
     run_rl_rerun_local_reset_audit,
     run_rl_rerun_throughput_benchmark,
@@ -539,6 +540,9 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 action_delta_gate_min=args.action_delta_gate_min,
                 goal_l2_gate_min=args.goal_l2_gate_min,
                 step_selector_path=Path(args.step_selector) if args.step_selector else None,
+                segment_selector_path=Path(args.segment_selector)
+                if args.segment_selector
+                else None,
                 oracle_segment_selector=args.oracle_segment_selector,
                 oracle_segment_selector_metric=args.oracle_segment_selector_metric,
                 diagnose_oracle_goals=args.diagnose_oracle_goals,
@@ -607,6 +611,9 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 action_delta_gate_min=args.action_delta_gate_min,
                 goal_l2_gate_min=args.goal_l2_gate_min,
                 step_selector_path=Path(args.step_selector) if args.step_selector else None,
+                segment_selector_path=Path(args.segment_selector)
+                if args.segment_selector
+                else None,
                 oracle_segment_selector=args.oracle_segment_selector,
                 oracle_segment_selector_metric=args.oracle_segment_selector_metric,
                 diagnose_oracle_goals=args.diagnose_oracle_goals,
@@ -667,6 +674,9 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 action_delta_gate_min=args.action_delta_gate_min,
                 goal_l2_gate_min=args.goal_l2_gate_min,
                 step_selector_path=Path(args.step_selector) if args.step_selector else None,
+                segment_selector_path=Path(args.segment_selector)
+                if args.segment_selector
+                else None,
                 oracle_segment_selector=args.oracle_segment_selector,
                 oracle_segment_selector_metric=args.oracle_segment_selector_metric,
                 diagnose_oracle_goals=args.diagnose_oracle_goals,
@@ -689,6 +699,19 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
     elif args.rl_rerun_command == "fit-closed-loop-selector":
         console.print(
             fit_rl_rerun_closed_loop_selector(
+                train_json_path=Path(args.train_json),
+                validation_json_path=Path(args.validation_json)
+                if args.validation_json
+                else None,
+                output_path=Path(args.output),
+                feature_names=args.feature_names,
+                ridge=args.ridge,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "fit-oracle-segment-selector":
+        console.print(
+            fit_rl_rerun_oracle_segment_selector(
                 train_json_path=Path(args.train_json),
                 validation_json_path=Path(args.validation_json)
                 if args.validation_json
@@ -2323,6 +2346,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r1.add_argument("--action-delta-gate-min", type=float)
     eval_closed_loop_r1.add_argument("--goal-l2-gate-min", type=float)
     eval_closed_loop_r1.add_argument("--step-selector")
+    eval_closed_loop_r1.add_argument("--segment-selector")
     eval_closed_loop_r1.add_argument("--oracle-segment-selector", action="store_true")
     eval_closed_loop_r1.add_argument(
         "--oracle-segment-selector-metric",
@@ -2389,6 +2413,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r2.add_argument("--action-delta-gate-min", type=float)
     eval_closed_loop_r2.add_argument("--goal-l2-gate-min", type=float)
     eval_closed_loop_r2.add_argument("--step-selector")
+    eval_closed_loop_r2.add_argument("--segment-selector")
     eval_closed_loop_r2.add_argument("--oracle-segment-selector", action="store_true")
     eval_closed_loop_r2.add_argument(
         "--oracle-segment-selector-metric",
@@ -2449,6 +2474,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r3.add_argument("--action-delta-gate-min", type=float)
     eval_closed_loop_r3.add_argument("--goal-l2-gate-min", type=float)
     eval_closed_loop_r3.add_argument("--step-selector")
+    eval_closed_loop_r3.add_argument("--segment-selector")
     eval_closed_loop_r3.add_argument("--oracle-segment-selector", action="store_true")
     eval_closed_loop_r3.add_argument(
         "--oracle-segment-selector-metric",
@@ -2481,6 +2507,16 @@ def build_parser() -> argparse.ArgumentParser:
     fit_closed_loop_selector.add_argument("--ridge", type=float, default=1.0)
     fit_closed_loop_selector.add_argument("--force", action="store_true")
     fit_closed_loop_selector.set_defaults(func=rl_rerun_cmd)
+    fit_oracle_segment_selector = rl_rerun_sub.add_parser(
+        "fit-oracle-segment-selector"
+    )
+    fit_oracle_segment_selector.add_argument("--train-json", required=True)
+    fit_oracle_segment_selector.add_argument("--validation-json")
+    fit_oracle_segment_selector.add_argument("--output", required=True)
+    fit_oracle_segment_selector.add_argument("--feature-names", nargs="+")
+    fit_oracle_segment_selector.add_argument("--ridge", type=float, default=1.0)
+    fit_oracle_segment_selector.add_argument("--force", action="store_true")
+    fit_oracle_segment_selector.set_defaults(func=rl_rerun_cmd)
     record_rerun_videos = rl_rerun_sub.add_parser("record-videos")
     record_rerun_videos.add_argument("--checkpoint", required=True)
     record_rerun_videos.add_argument("--n-demo", type=int, choices=[500, 1000], default=500)

@@ -14159,3 +14159,122 @@ The smoke run validates the trace plumbing: decision count and trace length
 match exactly. This does not change the policy conclusion yet, but it creates
 the dataset shape needed to train or fit a deployable branch selector against
 the task-reward oracle labels.
+
+## 2026-06-26 - Trace-fitted deployable segment selector
+
+### Hypothesis
+
+If the task-reward oracle selector's branch decisions are predictable from
+online prefix features, a deployable segment selector should imitate those
+decisions well enough to reduce residual harm without simulator
+counterfactuals.
+
+### Implementation
+
+I added:
+
+- `hcl-poc rl-rerun fit-oracle-segment-selector`, which fits a linear ridge
+  selector from `oracle_segment_selector_trace` rows and writes the same
+  loadable selector JSON shape as the existing closed-loop selector.
+- `eval-closed-loop-r{1,2,3} --segment-selector`, which scores the selector
+  once at each high-level replan and holds the base/residual choice for the
+  segment. This matches the oracle trace decision timing better than
+  `--step-selector`, which gates each action after computing the candidate
+  residual action.
+
+Default fitted features:
+
+```text
+episode_action_delta_l2_mean
+episode_action_delta_l2_max
+episode_policy_saturation_rate
+episode_goal_l2_initial
+episode_goal_l2_mean
+episode_high_level_decisions
+```
+
+### Commands
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml fit-oracle-segment-selector \
+  --train-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5000000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_smoke20_seed5000000.json \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 5000000 \
+  --num-envs 20 \
+  --segment-selector results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_smoke20_seed5000000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_trace_segment_selector_smoke20_seed5000000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 5100000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5100000.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml fit-oracle-segment-selector \
+  --train-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5000000.json \
+  --validation-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5100000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_train20_5000000_valid20_5100000.json \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 5100000 \
+  --num-envs 20 \
+  --segment-selector results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_train20_5000000_valid20_5100000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_trace_segment_selector_train20_5000000_valid20_5100000.json
+```
+
+### Results
+
+Trace imitation:
+
+| split | decisions | oracle residual rate | selector residual rate | AUC | accuracy | selected reward gap vs oracle |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| train seed 5000000 | 162 | 0.444 | 0.179 | 0.637 | 0.611 | -0.00522 |
+| valid seed 5100000 | 194 | 0.557 | 0.299 | 0.507 | 0.505 | -0.00123 |
+
+Closed-loop segment-selector smokes:
+
+| eval seed | frozen success | segment-selector success | success delta | final reward delta | residual action rate |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5000000, train selector | 0.450 | 0.250 | -0.200 | -0.1435 | 0.185 |
+| 5100000, train5000000 selector | 0.150 | 0.200 | +0.050 | +0.0233 | 0.269 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_smoke20_seed5000000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_trace_segment_selector_smoke20_seed5000000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5100000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_train20_5000000_valid20_5100000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_trace_segment_selector_train20_5000000_valid20_5100000.json`
+
+### Interpretation
+
+The trace-fitted selector path works mechanically, but the simple deployable
+prefix features do not predict the task-reward oracle decisions on a fresh
+20-episode trace. Validation AUC is essentially chance (`0.507`), and the
+closed-loop smokes are too noisy to outweigh that. This weakens the idea that a
+linear selector over the current prefix features can recover the oracle
+task-reward branch decision for this checkpoint.
+
+The next selector attempt should either use richer deployable state features
+from the current observation/latent and goal, or train the residual in a way
+that makes the branch effect larger and easier to classify. A larger trace-only
+dataset may still be useful for feature probing, but it should not be promoted
+to long closed-loop evaluation unless validation AUC moves clearly above
+chance.

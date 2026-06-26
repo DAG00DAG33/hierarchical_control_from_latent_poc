@@ -3987,6 +3987,15 @@ DEFAULT_CLOSED_LOOP_SELECTOR_FEATURES = [
     "episode_goal_l2_initial",
 ]
 
+DEFAULT_ORACLE_SEGMENT_TRACE_SELECTOR_FEATURES = [
+    "episode_action_delta_l2_mean",
+    "episode_action_delta_l2_max",
+    "episode_policy_saturation_rate",
+    "episode_goal_l2_initial",
+    "episode_goal_l2_mean",
+    "episode_high_level_decisions",
+]
+
 ONLINE_STEP_SELECTOR_FEATURES = {
     "episode_action_delta_l2_initial": "action_delta_l2",
     "episode_action_delta_l2_mean": "action_delta_l2_prefix_mean",
@@ -4155,6 +4164,204 @@ def fit_rl_rerun_closed_loop_selector(
     return output_path
 
 
+def _oracle_segment_trace_arrays(
+    payload: dict[str, Any],
+    feature_names: list[str],
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    if payload.get("stage") != "closed_loop_residual_paired":
+        raise ValueError("Expected a closed_loop_residual_paired JSON payload")
+    trace = payload.get("residual", {}).get("oracle_segment_selector_trace")
+    if not isinstance(trace, dict):
+        raise ValueError("Residual result does not contain oracle_segment_selector_trace")
+    if "choose_residual" not in trace:
+        raise ValueError("Oracle segment selector trace is missing choose_residual")
+    labels = np.asarray(trace["choose_residual"], dtype=np.float32)
+    if labels.ndim != 1 or len(labels) == 0:
+        raise ValueError("Oracle segment selector trace has no decisions")
+    feature_columns: list[np.ndarray] = []
+    for name in feature_names:
+        if name not in ONLINE_STEP_SELECTOR_FEATURES:
+            raise ValueError(
+                f"Unsupported trace selector feature {name}. Supported features are "
+                f"{sorted(ONLINE_STEP_SELECTOR_FEATURES)}"
+            )
+        trace_name = ONLINE_STEP_SELECTOR_FEATURES[name]
+        if trace_name not in trace:
+            raise ValueError(
+                f"Trace is missing online feature {trace_name} for selector feature {name}"
+            )
+        values = np.asarray(trace[trace_name], dtype=np.float32)
+        if len(values) != len(labels):
+            raise ValueError(f"Trace feature has wrong length: {trace_name}")
+        values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+        feature_columns.append(values)
+    branch_values: dict[str, np.ndarray] = {}
+    for name in (
+        "base_env_reward",
+        "tuned_env_reward",
+        "base_latent_distance",
+        "tuned_latent_distance",
+    ):
+        if name in trace:
+            values = np.asarray(trace[name], dtype=np.float32)
+            if len(values) != len(labels):
+                raise ValueError(f"Trace branch field has wrong length: {name}")
+            branch_values[name] = values
+    return np.stack(feature_columns, axis=1), labels, branch_values
+
+
+def _oracle_segment_trace_selector_metrics(
+    *,
+    features: np.ndarray,
+    labels: np.ndarray,
+    branch_values: dict[str, np.ndarray],
+    mean: np.ndarray,
+    std: np.ndarray,
+    weights: np.ndarray,
+    bias: float,
+) -> dict[str, Any]:
+    normalized = (features - mean) / std
+    scores = normalized @ weights + bias
+    choose_residual = scores >= 0.0
+    oracle_choose_residual = labels.astype(bool)
+    result: dict[str, Any] = {
+        "decisions": int(len(labels)),
+        "oracle_residual_rate": float(oracle_choose_residual.mean()),
+        "selector_residual_rate": float(choose_residual.mean()),
+        "selector_decision_accuracy": float(
+            (choose_residual == oracle_choose_residual).mean()
+        ),
+        "selector_auc": _binary_auc(scores, labels),
+        "selector_false_residual": int(
+            (choose_residual & (~oracle_choose_residual)).sum()
+        ),
+        "selector_missed_residual": int(
+            ((~choose_residual) & oracle_choose_residual).sum()
+        ),
+    }
+    if "base_env_reward" in branch_values and "tuned_env_reward" in branch_values:
+        base_reward = branch_values["base_env_reward"]
+        tuned_reward = branch_values["tuned_env_reward"]
+        selector_reward = np.where(choose_residual, tuned_reward, base_reward)
+        oracle_reward = np.where(oracle_choose_residual, tuned_reward, base_reward)
+        result.update(
+            {
+                "base_env_reward_mean": float(base_reward.mean()),
+                "tuned_env_reward_mean": float(tuned_reward.mean()),
+                "oracle_selected_env_reward_mean": float(oracle_reward.mean()),
+                "selector_selected_env_reward_mean": float(selector_reward.mean()),
+                "selector_env_reward_gap_vs_oracle": float(
+                    selector_reward.mean() - oracle_reward.mean()
+                ),
+            }
+        )
+    if (
+        "base_latent_distance" in branch_values
+        and "tuned_latent_distance" in branch_values
+    ):
+        base_distance = branch_values["base_latent_distance"]
+        tuned_distance = branch_values["tuned_latent_distance"]
+        selector_distance = np.where(choose_residual, tuned_distance, base_distance)
+        oracle_distance = np.where(
+            oracle_choose_residual,
+            tuned_distance,
+            base_distance,
+        )
+        result.update(
+            {
+                "base_latent_distance_mean": float(base_distance.mean()),
+                "tuned_latent_distance_mean": float(tuned_distance.mean()),
+                "oracle_selected_latent_distance_mean": float(oracle_distance.mean()),
+                "selector_selected_latent_distance_mean": float(
+                    selector_distance.mean()
+                ),
+            }
+        )
+    return result
+
+
+def fit_rl_rerun_oracle_segment_selector(
+    train_json_path: Path,
+    output_path: Path,
+    validation_json_path: Path | None = None,
+    feature_names: list[str] | None = None,
+    ridge: float = 1.0,
+    force: bool = False,
+) -> Path:
+    if output_path.exists() and not force:
+        return output_path
+    if ridge < 0.0:
+        raise ValueError("ridge must be non-negative")
+    feature_names = feature_names or DEFAULT_ORACLE_SEGMENT_TRACE_SELECTOR_FEATURES
+    train_payload = json.loads(train_json_path.read_text())
+    train_x, train_labels, train_branch_values = _oracle_segment_trace_arrays(
+        train_payload,
+        feature_names,
+    )
+    if len(np.unique(train_labels)) < 2:
+        raise ValueError("Need both residual and base oracle decisions for fitting")
+    mean = train_x.mean(axis=0)
+    std = train_x.std(axis=0)
+    std = np.where(std > 1e-6, std, 1.0)
+    train_z = (train_x - mean) / std
+    design = np.concatenate(
+        [train_z, np.ones((len(train_z), 1), dtype=np.float32)],
+        axis=1,
+    )
+    labels = np.where(train_labels > 0.5, 1.0, -1.0).astype(np.float32)
+    penalty = np.eye(design.shape[1], dtype=np.float32) * ridge
+    penalty[-1, -1] = 0.0
+    solution = np.linalg.solve(design.T @ design + penalty, design.T @ labels)
+    weights = solution[:-1].astype(np.float32)
+    bias = float(solution[-1])
+    payload: dict[str, Any] = {
+        "stage": "closed_loop_outcome_selector_fit",
+        "selector_source": "oracle_segment_selector_trace",
+        "train_json": str(train_json_path),
+        "validation_json": str(validation_json_path) if validation_json_path else None,
+        "feature_names": feature_names,
+        "ridge": ridge,
+        "feature_mean": mean.astype(float).tolist(),
+        "feature_std": std.astype(float).tolist(),
+        "weights": weights.astype(float).tolist(),
+        "bias": bias,
+        "threshold": 0.0,
+        "selector_note": (
+            "Deployable online selector fit from non-deployable oracle segment "
+            "selector trace labels. Validation here measures imitation of oracle "
+            "branch decisions and selected one-segment branch reward, not full "
+            "closed-loop task improvement."
+        ),
+        "train": _oracle_segment_trace_selector_metrics(
+            features=train_x,
+            labels=train_labels,
+            branch_values=train_branch_values,
+            mean=mean,
+            std=std,
+            weights=weights,
+            bias=bias,
+        ),
+    }
+    if validation_json_path is not None:
+        validation_payload = json.loads(validation_json_path.read_text())
+        val_x, val_labels, val_branch_values = _oracle_segment_trace_arrays(
+            validation_payload,
+            feature_names,
+        )
+        payload["validation"] = _oracle_segment_trace_selector_metrics(
+            features=val_x,
+            labels=val_labels,
+            branch_values=val_branch_values,
+            mean=mean,
+            std=std,
+            weights=weights,
+            bias=bias,
+        )
+    ensure_dir(output_path.parent)
+    write_json(output_path, payload)
+    return output_path
+
+
 def _load_closed_loop_step_selector(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -4225,6 +4432,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
+    segment_selector_path: Path | None = None,
     oracle_segment_selector: bool = False,
     oracle_segment_selector_metric: str = "latent_distance",
     diagnose_oracle_goals: bool = False,
@@ -4249,8 +4457,18 @@ def evaluate_rl_rerun_closed_loop_r1(
         raise ValueError("action_delta_gate_min must be non-negative")
     if goal_l2_gate_min is not None and goal_l2_gate_min < 0.0:
         raise ValueError("goal_l2_gate_min must be non-negative")
-    if oracle_segment_selector and (step_selector_path is not None):
-        raise ValueError("oracle_segment_selector and step_selector_path cannot both be set")
+    selector_count = sum(
+        [
+            step_selector_path is not None,
+            segment_selector_path is not None,
+            oracle_segment_selector,
+        ]
+    )
+    if selector_count > 1:
+        raise ValueError(
+            "Use at most one of step_selector_path, segment_selector_path, "
+            "or oracle_segment_selector"
+        )
     if oracle_segment_selector_metric not in {"latent_distance", "env_reward"}:
         raise ValueError(
             "oracle_segment_selector_metric must be 'latent_distance' or 'env_reward'"
@@ -4259,6 +4477,11 @@ def evaluate_rl_rerun_closed_loop_r1(
     step_selector = (
         _load_closed_loop_step_selector(step_selector_path)
         if step_selector_path is not None
+        else None
+    )
+    segment_selector = (
+        _load_closed_loop_step_selector(segment_selector_path)
+        if segment_selector_path is not None
         else None
     )
 
@@ -4341,6 +4564,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         episode_action_delta_gate_rate: list[float] = []
         episode_goal_l2_gate_rate: list[float] = []
         episode_step_selector_residual_rate: list[float] = []
+        episode_segment_selector_residual_rate: list[float] = []
         episode_oracle_segment_selector_residual_rate: list[float] = []
         episode_goal_l2_initial: list[float] = []
         episode_goal_l2_mean: list[float] = []
@@ -4360,6 +4584,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         gated_actions = 0
         goal_l2_gated_actions = 0
         step_selector_base_actions = 0
+        segment_selector_base_actions = 0
         oracle_segment_selector_base_actions = 0
         oracle_segment_selector_residual_decisions = 0
         oracle_segment_selector_decisions = 0
@@ -4472,6 +4697,10 @@ def evaluate_rl_rerun_closed_loop_r1(
             current_action_delta_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_step_selector_residual_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_segment_selector_residual_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_segment_selector_use_residual = np.zeros(
+                batch_envs, dtype=np.bool_
+            )
             current_oracle_segment_selector_residual_sum = np.zeros(
                 batch_envs, dtype=np.float32
             )
@@ -4761,6 +4990,41 @@ def evaluate_rl_rerun_closed_loop_r1(
                         current_goal_l2_initial[
                             replan_indices[missing_initial]
                         ] = goal_l2[missing_initial]
+                        if segment_selector is not None:
+                            action_denominator = np.maximum(
+                                current_action_count[replan_indices], 1.0
+                            )
+                            goal_denominator = np.maximum(
+                                current_goal_l2_count[replan_indices], 1.0
+                            )
+                            selector_feature_values = {
+                                "action_delta_l2_prefix_mean": (
+                                    current_action_delta_sum[replan_indices]
+                                    / action_denominator
+                                ).astype(np.float32),
+                                "action_delta_l2_prefix_max": (
+                                    current_action_delta_max[replan_indices]
+                                ).astype(np.float32),
+                                "policy_saturation_prefix_rate": (
+                                    current_policy_saturation_sum[replan_indices]
+                                    / action_denominator
+                                ).astype(np.float32),
+                                "goal_l2": goal_l2,
+                                "goal_l2_prefix_mean": (
+                                    current_goal_l2_sum[replan_indices]
+                                    / goal_denominator
+                                ).astype(np.float32),
+                                "high_level_decisions": (
+                                    current_high_decisions[replan_indices]
+                                ).astype(np.float32),
+                            }
+                            selector_scores = _closed_loop_step_selector_scores(
+                                segment_selector,
+                                selector_feature_values,
+                            )
+                            current_segment_selector_use_residual[
+                                replan_indices
+                            ] = selector_scores >= segment_selector["threshold"]
                         if selector_env is not None:
                             if oracle_copy_mode != "state_dict" and need_oracle_branch:
                                 raise ValueError(
@@ -5076,6 +5340,28 @@ def evaluate_rl_rerun_closed_loop_r1(
                         current_step_selector_residual_sum[
                             selector_to_residual_np
                         ] += 1.0
+                    if use_residual and segment_selector is not None:
+                        segment_selector_to_base_np = active & (
+                            ~current_segment_selector_use_residual
+                        )
+                        if bool(np.any(segment_selector_to_base_np)):
+                            segment_selector_to_base = torch.from_numpy(
+                                segment_selector_to_base_np
+                            ).to(device)
+                            unclipped = torch.where(
+                                segment_selector_to_base[:, None],
+                                base_action,
+                                unclipped,
+                            )
+                            segment_selector_base_actions += int(
+                                segment_selector_to_base_np.sum()
+                            )
+                        segment_selector_to_residual_np = (
+                            active & current_segment_selector_use_residual
+                        )
+                        current_segment_selector_residual_sum[
+                            segment_selector_to_residual_np
+                        ] += 1.0
                     if use_residual and oracle_segment_selector:
                         oracle_selector_to_base_np = active & (
                             ~current_oracle_segment_selector_use_residual
@@ -5237,6 +5523,11 @@ def evaluate_rl_rerun_closed_loop_r1(
                 .astype(float)
                 .tolist()
             )
+            episode_segment_selector_residual_rate.extend(
+                (current_segment_selector_residual_sum / action_denominator)
+                .astype(float)
+                .tolist()
+            )
             episode_oracle_segment_selector_residual_rate.extend(
                 (current_oracle_segment_selector_residual_sum / action_denominator)
                 .astype(float)
@@ -5294,6 +5585,16 @@ def evaluate_rl_rerun_closed_loop_r1(
             - (step_selector_base_actions / max(active_actions, 1))
             if use_residual and step_selector is not None
             else None,
+            "segment_selector_path": segment_selector["path"]
+            if use_residual and segment_selector is not None
+            else None,
+            "segment_selector_feature_names": segment_selector["feature_names"]
+            if use_residual and segment_selector is not None
+            else None,
+            "segment_selector_residual_rate": 1.0
+            - (segment_selector_base_actions / max(active_actions, 1))
+            if use_residual and segment_selector is not None
+            else None,
             "oracle_segment_selector": oracle_segment_selector if use_residual else False,
             "oracle_segment_selector_metric": (
                 oracle_segment_selector_metric
@@ -5340,6 +5641,9 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_action_delta_gate_rate": episode_action_delta_gate_rate,
             "episode_goal_l2_gate_rate": episode_goal_l2_gate_rate,
             "episode_step_selector_residual_rate": episode_step_selector_residual_rate,
+            "episode_segment_selector_residual_rate": (
+                episode_segment_selector_residual_rate
+            ),
             "episode_oracle_segment_selector_residual_rate": (
                 episode_oracle_segment_selector_residual_rate
             ),
@@ -5413,6 +5717,9 @@ def evaluate_rl_rerun_closed_loop_r1(
         "action_delta_gate_min": action_delta_gate_min,
         "goal_l2_gate_min": goal_l2_gate_min,
         "step_selector_path": str(step_selector_path) if step_selector_path else None,
+        "segment_selector_path": (
+            str(segment_selector_path) if segment_selector_path else None
+        ),
         "oracle_segment_selector": oracle_segment_selector,
         "oracle_segment_selector_metric": (
             oracle_segment_selector_metric if oracle_segment_selector else None
@@ -5464,6 +5771,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
+    segment_selector_path: Path | None = None,
     oracle_segment_selector: bool = False,
     oracle_segment_selector_metric: str = "latent_distance",
     diagnose_oracle_goals: bool = False,
@@ -5483,6 +5791,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         action_delta_gate_min=action_delta_gate_min,
         goal_l2_gate_min=goal_l2_gate_min,
         step_selector_path=step_selector_path,
+        segment_selector_path=segment_selector_path,
         oracle_segment_selector=oracle_segment_selector,
         oracle_segment_selector_metric=oracle_segment_selector_metric,
         diagnose_oracle_goals=diagnose_oracle_goals,
@@ -5505,6 +5814,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
     step_selector_path: Path | None = None,
+    segment_selector_path: Path | None = None,
     oracle_segment_selector: bool = False,
     oracle_segment_selector_metric: str = "latent_distance",
     diagnose_oracle_goals: bool = False,
@@ -5524,6 +5834,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         action_delta_gate_min=action_delta_gate_min,
         goal_l2_gate_min=goal_l2_gate_min,
         step_selector_path=step_selector_path,
+        segment_selector_path=segment_selector_path,
         oracle_segment_selector=oracle_segment_selector,
         oracle_segment_selector_metric=oracle_segment_selector_metric,
         diagnose_oracle_goals=diagnose_oracle_goals,
