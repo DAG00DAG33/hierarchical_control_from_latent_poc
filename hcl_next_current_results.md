@@ -467,6 +467,24 @@ against no projection), so follow-up RL should start from the unprojected
 high-action candidate rather than trying to repair its goals with that
 projection layer.
 
+I then trained the matching terminal-only D_phi R3 recipe on this high-action
+candidate. The local training metric looked strong (`mean_terminal_distance`
+`0.4065`, versus `0.5757` in the old effect32 R3 recipe), but it did not
+transfer robustly to closed-loop serial evaluation:
+
+| policy | seed starts | episodes | success | final reward | max reward | paired R3 wins/losses |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| high-action frozen | 3500000, 3600000 | 200 | 0.720 | 0.7146 | 0.7976 | - |
+| high-action R3 40k bc10 | 3500000, 3600000 | 200 | 0.655 | 0.6537 | 0.7574 | 20 / 33 |
+
+The first 100-seed bank looked positive (`0.670 -> 0.700`), but the fresh
+`3600000` bank reversed it sharply (`0.770 -> 0.610`). This repeats the broader
+pattern from earlier R3 work: terminal D_phi can improve a local proxy while
+hurting deployment robustness. The current best path remains the frozen
+`effect32_film_gsens_ft_highact_strong` learned-interface candidate, and the
+next implementation work should move toward a deployment-coupled high/low
+objective rather than another scalar terminal-D_phi R3 residual.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

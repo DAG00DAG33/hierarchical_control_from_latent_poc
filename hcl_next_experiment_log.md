@@ -16935,3 +16935,144 @@ This makes the next RL step narrower: use
 `effect32_film_gsens_ft_highact_strong` as the base candidate for follow-up
 local-RL experiments, but do not add the old nearest-neighbor D_phi goal
 projection by default.
+
+## 2026-06-26 - R3 smoke on strong action-aware candidate
+
+### Hypothesis
+
+The high-action candidate already beats the original frozen effect32_film base
+in learned-interface and serial checks. If the old terminal-only D_phi R3 recipe
+was limited by a weak base candidate, applying the same R3 update to
+`effect32_film_gsens_ft_highact_strong` should improve serial closed-loop
+deployment more reliably.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10 \
+  --steps 40960 \
+  --num-envs 4096 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_frozen_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10_serial100_seed3600000 \
+  --episodes 100 \
+  --seed-start 3600000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt \
+  --force
+```
+
+### Training Result
+
+Final R3 training row:
+
+| metric | value |
+| --- | ---: |
+| global step | 40960 |
+| mean reward | -0.04065 |
+| mean latent distance | 0.6136 |
+| mean terminal distance | 0.4065 |
+| mean direct delta L2 | 0.2645 |
+| BC loss | 0.0000515 |
+| action saturation rate | 0.4028 |
+
+The local terminal-distance proxy improved substantially relative to the old
+effect32 R3 run (`0.4065` here vs `0.5757` in
+`hcl_next_effect32_dphi_r3_4096_terminal_smoke_40k_bc10`), but the action
+distribution moved much more during training.
+
+### Serial Results
+
+Same candidate, matched 100-episode serial windows:
+
+| seed start | policy | success | final reward | max reward | segment goal reach | action saturation |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 3500000 | frozen highact strong | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.0458 |
+| 3500000 | R3 highact strong | 0.700 | 0.6688 | 0.7874 | 0.755 | 0.0255 |
+| 3600000 | frozen highact strong | 0.770 | 0.7199 | 0.8385 | 0.791 | 0.0400 |
+| 3600000 | R3 highact strong | 0.610 | 0.6386 | 0.7273 | 0.744 | 0.0223 |
+
+Two-window aggregate:
+
+| policy | episodes | success | final reward | max reward | segment goal reach | action saturation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen highact strong | 200 | 0.720 | 0.7146 | 0.7976 | 0.7565 | 0.0429 |
+| R3 highact strong | 200 | 0.655 | 0.6537 | 0.7574 | 0.7495 | 0.0239 |
+
+Paired R3-vs-frozen success counts:
+
+| seed start | wins | losses | net |
+| ---: | ---: | ---: | ---: |
+| 3500000 | 13 | 10 | +3 |
+| 3600000 | 7 | 23 | -16 |
+| aggregate | 20 | 33 | -13 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10/best_train_latent.pt`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_frozen_serial100_seed3600000/serial_eval_100_seed3600000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_4096_terminal_smoke_40k_bc10_serial100_seed3600000/serial_eval_100_seed3600000.json`
+
+### Interpretation
+
+This is a negative R3 result. The first serial bank looked mildly positive, but
+the fresh bank was strongly negative and the two-window aggregate is worse than
+the frozen high-action candidate across success, final reward, max reward, and
+paired wins/losses.
+
+The important diagnostic is the mismatch between local and deployment metrics:
+the R3 objective found a much lower terminal D_phi distance during training, but
+that local proxy did not preserve closed-loop robustness. This is the same
+failure mode seen in earlier R3 branches, now reproduced on the stronger
+high-action base.
+
+Do not promote this R3 checkpoint. The current best deployable candidate remains
+the frozen `effect32_film_gsens_ft_highact_strong` learned-interface policy.
+The next useful implementation direction is deployment-coupled high/low
+training, not another scalar terminal-D_phi R3 residual.
