@@ -17337,3 +17337,154 @@ it does not fix the low-level goal-use gate. The next coupled objective should
 anchor deployment behavior more directly, for example by preserving oracle-goal
 closed-loop or serial-segment behavior while optimizing learned-goal
 action-through-low compatibility.
+
+## 2026-06-26 - Frozen-low action-only high-level fine-tune
+
+### Hypothesis
+
+The best successful branch so far freezes the goal-sensitive low policy and
+trains the high level through that frozen low policy. The previous strong
+candidate still included a high-level goal-MSE term. That term may be
+over-constraining the high level toward demonstration future-goal latents instead
+of the goals that make the frozen low policy match demonstration actions.
+
+### Configuration
+
+Added candidate:
+
+```yaml
+effect32_film_gsens_ft_highact_actiononly:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32_film_gsens_ft_highact_actiononly
+  conditioning: film
+  high_init_candidate: effect32
+  low_init_candidate: effect32_film_gsens_ft
+  freeze_low_policy: true
+  high_goal_mse_weight: 0.0
+  high_action_loss_weight: 300.0
+  policy_lr: 1.0e-5
+  policy_epochs: 20
+```
+
+This is identical to `effect32_film_gsens_ft_highact_strong` except that
+`high_goal_mse_weight` is zero instead of `0.3`. Because the low policy is the
+same frozen `effect32_film_gsens_ft` low policy, the oracle-goal low-level
+behavior and low-level goal-use diagnostics are inherited from
+`highact_strong`.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3600000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 1000 \
+  --eval-seed-start 3700000 \
+  --force
+```
+
+### Training Metrics
+
+Best epoch: `17`.
+
+| metric | action-only | highact-strong |
+| --- | ---: | ---: |
+| validation normalized goal L2 | 2.6673 | 2.5489 |
+| validation oracle action MAE | 0.0362 | 0.0362 |
+| validation predicted action MAE | 0.03645 | 0.03646 |
+| validation prediction-induced action L2 | 0.01299 | 0.01278 |
+
+The offline validation metrics are nearly tied. Action-only predicts goals a bit
+farther from the supervised future-goal target, as expected.
+
+### Results
+
+Initial 200-episode learned-goal screen:
+
+| candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.645 | 0.7347 | 0.7420 | 0.1073 |
+| effect32_film_gsens_ft_highact_strong | 0.640 | 0.7316 | 0.7403 | 0.0958 |
+| effect32_film_gsens_ft_highact_actiononly | 0.650 | 0.7383 | 0.7496 | 0.0936 |
+
+500-episode windows:
+
+| seed start | candidate | success | final reward | max reward | teacher MAE |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 3500000 | effect32_film | 0.650 | 0.7410 | 0.7484 | 0.0996 |
+| 3500000 | highact_strong | 0.652 | 0.7455 | 0.7523 | 0.0895 |
+| 3500000 | actiononly | 0.668 | 0.7550 | 0.7637 | 0.0915 |
+| 3600000 | effect32_film | 0.666 | 0.7524 | 0.7618 | 0.0965 |
+| 3600000 | highact_strong | 0.672 | 0.7620 | 0.7674 | 0.0834 |
+| 3600000 | actiononly | 0.670 | 0.7581 | 0.7648 | 0.0850 |
+
+1000-episode final-style window:
+
+| candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.635 | 0.7306 | 0.7399 | 0.0978 |
+| highact_strong | 0.645 | 0.7386 | 0.7463 | 0.0902 |
+| actiononly | 0.661 | 0.7481 | 0.7564 | 0.0958 |
+
+Aggregate over all three windows:
+
+| candidate | episodes | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 2000 | 0.6465 | 0.7386 | 0.7475 | 0.0980 |
+| highact_strong | 2000 | 0.6535 | 0.7462 | 0.7530 | 0.0883 |
+| actiononly | 2000 | 0.6650 | 0.7523 | 0.7603 | 0.0920 |
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_500_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_500_seed3600000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_1000_seed3700000.json`
+
+### Interpretation
+
+This is the new best learned-goal candidate in the current branch. Removing the
+explicit high-level goal-MSE term improves closed-loop success and rewards over
+the previous `highact_strong` candidate on the 2000-episode aggregate. The gain
+is not explained by lower aggregate teacher-action MAE, because `highact_strong`
+is still slightly better on that scalar. The important signal is that allowing
+the high level to choose action-compatible goals, unconstrained by direct
+future-goal MSE, improves deployment with the frozen goal-sensitive low policy.
+
+Treat `effect32_film_gsens_ft_highact_actiononly` as the current frozen-low base
+for the next serial/RL compatibility checks. It keeps the same low-level oracle
+behavior as `highact_strong`, but has better learned-goal closed-loop results.

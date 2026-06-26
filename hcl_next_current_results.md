@@ -525,6 +525,26 @@ needs a deployment-aligned anchor, not just an offline action anchor on training
 inputs: for example, explicitly preserve oracle-goal closed-loop behavior while
 optimizing high-level learned-goal compatibility.
 
+Returning to the successful frozen-low recipe, I tested an action-only high-level
+variant: same frozen `effect32_film_gsens_ft` low policy and same
+action-through-low weight as `highact_strong`, but with
+`high_goal_mse_weight=0.0`. This is now the best learned-goal result:
+
+| candidate | episodes | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 2000 | 0.6465 | 0.7386 | 0.7475 | 0.0980 |
+| effect32_film_gsens_ft_highact_strong | 2000 | 0.6535 | 0.7462 | 0.7530 | 0.0883 |
+| effect32_film_gsens_ft_highact_actiononly | 2000 | 0.6650 | 0.7523 | 0.7603 | 0.0920 |
+
+The 1000-episode `seed_start=3700000` window was also positive by itself:
+`0.661` success for action-only versus `0.645` for `highact_strong` and `0.635`
+for the original baseline. This suggests the explicit high-level goal-MSE term
+was constraining the action-compatible goal predictions too much. The teacher
+action MAE is slightly worse than `highact_strong` in aggregate, so the gain is
+not explained by that scalar alone. The next validation should treat
+`effect32_film_gsens_ft_highact_actiononly` as the current frozen-low base for
+serial/RL compatibility checks.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
