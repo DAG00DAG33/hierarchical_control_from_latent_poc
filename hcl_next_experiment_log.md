@@ -15791,3 +15791,123 @@ path raises goal-shuffle action change enough to pass the offline gate
 not a promotable base, and it suggests the next successful approach needs a
 counterfactual or deployment-aligned signal that teaches when the goal matters,
 not just a generic reduction in observation reliance.
+
+## 2026-06-26 - Effect32 FiLM scene-frame-dropout check
+
+### Hypothesis
+
+Full-frame dropout removes both scene/object features and proprio/current robot
+state. A more targeted shortcut test is to drop only the scene prefix while
+keeping the proprio tail. If the deployment regression came mostly from losing
+local robot state, scene-only dropout should preserve more imitation quality
+while retaining the goal-use gain.
+
+### Code Change
+
+Extended the low-frame-dropout hook with
+`low_frame_dropout_keep_tail_dim`. During dropout samples, the dataset zeros
+only `frame[:, :-keep_tail_dim]` and preserves the tail. The candidate uses
+`keep_tail_dim=21`, matching the configured Push-T proprio dimension.
+
+Candidate:
+
+```yaml
+effect32_film_scene_drop25:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  low_frame_dropout_prob: 0.25
+  low_frame_dropout_keep_tail_dim: 21
+  policy_epochs: 40
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_scene_drop25 \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_scene_drop25 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_scene_drop25/diagnostics.json \
+  --force
+
+for source in learned oracle; do
+  TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+    --config configs/pusht_incremental.yaml \
+    --candidate effect32_film_scene_drop25 \
+    --goal-source "${source}" \
+    --episodes 200 \
+    --eval-seed-start 3500000 \
+    --force
+done
+```
+
+### Results
+
+Training validation:
+
+| metric | value |
+| --- | ---: |
+| best epoch | 36 |
+| low frame dropout prob | 0.25 |
+| keep tail dim | 21 |
+| oracle action MAE | 0.0437 |
+| predicted action MAE | 0.0441 |
+| prediction-induced action L2 | 0.0191 |
+
+Goal-use/deployment:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.0622 | 0.0368 | 0.645 | 0.645 |
+| effect32_film_frame_drop25 | 0.1121 | 0.0615 | 0.490 | 0.465 |
+| effect32_film_scene_drop25 | 0.1141 | 0.0616 | 0.510 | 0.560 |
+
+The 20-episode smoke was learned `0.70`, oracle `0.55`; the longer fixed-seed
+check showed that this was optimistic.
+
+After adding this candidate, the aggregate gate report is:
+
+```text
+total: 33
+offline_goal_use_pass: 5
+reject_low_goal_use: 28
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_scene_drop25/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_scene_drop25/seed0/hierarchy_metrics.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_scene_drop25/diagnostics.json`
+- `results/incremental/learned_interface/effect32_film_scene_drop25/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_scene_drop25/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py
+```
+
+### Interpretation
+
+Scene-only dropout is directionally better than full-frame dropout, especially
+for oracle goals (`0.560` vs `0.465`), but it still fails the central
+requirement: learned-goal deployment remains far below baseline effect32 FiLM
+(`0.510` vs `0.645`). The observation shortcut diagnosis is now stronger, but
+generic dropout is not enough. The next attempt should use counterfactual
+same-state goals or closed-loop/intervention data so the policy learns a useful
+goal-conditioned correction rather than a weaker imitation policy.

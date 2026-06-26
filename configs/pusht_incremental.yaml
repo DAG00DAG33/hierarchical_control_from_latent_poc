@@ -604,6 +604,14 @@ learned_interface:
       conditioning: film
       low_frame_dropout_prob: 0.25
       policy_epochs: 40
+    effect32_film_scene_drop25:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32
+      conditioning: film
+      low_frame_dropout_prob: 0.25
+      low_frame_dropout_keep_tail_dim: 21
+      policy_epochs: 40
     effect32_goal_residual:
       family: conditioning_ablation
       representation_candidate: effect32

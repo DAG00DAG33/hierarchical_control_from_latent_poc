@@ -233,12 +233,12 @@ offline_goal_use_pass if goal_shuffle_action_change_l2 >= 0.1
 or max_goal_sensitivity_l2 >= 0.1
 ```
 
-On the current archive plus the new frame-dropout check, four of thirty-two
+On the current archive plus the new dropout checks, five of thirty-three
 diagnostics pass:
 
 | status | candidates |
 | --- | --- |
-| offline goal-use pass | `effect32_film_frame_drop25`, `effect32_film_gsens`, `ae256_film`, `vae512_b1e6_film` |
+| offline goal-use pass | `effect32_film_frame_drop25`, `effect32_film_gsens`, `effect32_film_scene_drop25`, `ae256_film`, `vae512_b1e6_film` |
 | reject low goal-use | all other archived hierarchy candidates checked so far |
 
 This formalizes the current decision rule. Effect32 remains the best observed
@@ -293,20 +293,23 @@ This makes the current archive search fairly complete: there is no hidden
 candidate that already combines strong low-level goal usage with effect32-level
 closed-loop quality.
 
-I then added an opt-in low-level frame-dropout training mode and trained
-`effect32_film_frame_drop25`, which zeros the normalized current-frame block for
-25% of low-level BC samples. This confirmed that suppressing the observation
-shortcut can force more goal use, but it also damages deployment:
+I then added opt-in low-level frame-dropout training modes. The first zeros the
+whole normalized current-frame block for 25% of low-level BC samples; the second
+zeros only the scene/current-object prefix and keeps the 21D proprio tail. Both
+confirm that suppressing the observation shortcut can force more goal use, but
+both still damage deployment:
 
 | candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
 | --- | ---: | ---: | ---: | ---: |
 | effect32_film | 0.0622 | 0.0368 | 0.645 | 0.645 |
 | effect32_film_frame_drop25 | 0.1121 | 0.0615 | 0.490 | 0.465 |
+| effect32_film_scene_drop25 | 0.1141 | 0.0616 | 0.510 | 0.560 |
 
 The result is useful diagnostically: goal ignoring is partly an observation
-shortcut problem. But naive frame dropout repeats the same bad tradeoff as the
+shortcut problem. Keeping proprio improves the result slightly over full-frame
+dropout, but the dropout family repeats the same bad tradeoff as the
 goal-sensitivity margin loss: it passes the offline gate by weakening the
-imitation policy.
+learned-goal imitation policy.
 
 I then added a direct low-level goal-sensitivity regularizer as an opt-in
 learned-interface policy loss and trained `effect32_film_gsens`, which reuses

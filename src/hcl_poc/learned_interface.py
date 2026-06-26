@@ -1713,6 +1713,7 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
         length: int,
         conditioning: str = "concat",
         frame_dropout_prob: float = 0.0,
+        frame_dropout_keep_tail_dim: int = 0,
     ) -> None:
         if mode not in {"high", "low"}:
             raise ValueError(f"Unknown held-goal mode: {mode}")
@@ -1720,6 +1721,8 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
             raise ValueError(f"Unknown goal conditioning: {conditioning}")
         if frame_dropout_prob < 0.0 or frame_dropout_prob > 1.0:
             raise ValueError("frame_dropout_prob must be in [0, 1]")
+        if frame_dropout_keep_tail_dim < 0:
+            raise ValueError("frame_dropout_keep_tail_dim must be non-negative")
         self.episodes = [
             episode
             for episode in episodes
@@ -1733,6 +1736,7 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
         self.length = length
         self.conditioning = conditioning
         self.frame_dropout_prob = frame_dropout_prob
+        self.frame_dropout_keep_tail_dim = frame_dropout_keep_tail_dim
         self.zero_action = action_norm.transform(
             np.zeros((1, 3), dtype=np.float32)
         )[0]
@@ -1783,7 +1787,15 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
                 self.frame_dropout_prob > 0.0
                 and np.random.random() < self.frame_dropout_prob
             ):
-                frame = np.zeros_like(frame)
+                if self.frame_dropout_keep_tail_dim == 0:
+                    frame = np.zeros_like(frame)
+                else:
+                    if self.frame_dropout_keep_tail_dim >= frame.shape[-1]:
+                        raise ValueError(
+                            "frame_dropout_keep_tail_dim must be smaller than frame_dim"
+                        )
+                    frame = frame.copy()
+                    frame[:, : -self.frame_dropout_keep_tail_dim] = 0.0
             current_goal = self.goal_norm.transform(
                 episode["goals"][current : current + 1]
             )
@@ -2148,6 +2160,9 @@ def train_learned_interface_hierarchy(
         batch_size * batches_per_epoch,
         conditioning,
         frame_dropout_prob=float(spec.get("low_frame_dropout_prob", 0.0)),
+        frame_dropout_keep_tail_dim=int(
+            spec.get("low_frame_dropout_keep_tail_dim", 0)
+        ),
     )
     high_loader = DataLoader(
         high_dataset,
@@ -2190,6 +2205,11 @@ def train_learned_interface_hierarchy(
     low_frame_dropout_prob = float(spec.get("low_frame_dropout_prob", 0.0))
     if low_frame_dropout_prob < 0.0 or low_frame_dropout_prob > 1.0:
         raise ValueError("low_frame_dropout_prob must be in [0, 1]")
+    low_frame_dropout_keep_tail_dim = int(
+        spec.get("low_frame_dropout_keep_tail_dim", 0)
+    )
+    if low_frame_dropout_keep_tail_dim < 0:
+        raise ValueError("low_frame_dropout_keep_tail_dim must be non-negative")
     low_model = _GoalConditionedLowPolicy(
         frame_dim,
         goal_dim,
@@ -2312,6 +2332,7 @@ def train_learned_interface_hierarchy(
         "high_level_candidate": high_level_candidate,
         "goal_residual_scale": goal_residual_scale,
         "low_frame_dropout_prob": low_frame_dropout_prob,
+        "low_frame_dropout_keep_tail_dim": low_frame_dropout_keep_tail_dim,
         "goal_sensitivity_weight": goal_sensitivity_weight,
         "goal_sensitivity_margin": goal_sensitivity_margin,
         "high_model": best_state["high_model"],
