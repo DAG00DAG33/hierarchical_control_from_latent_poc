@@ -15351,3 +15351,79 @@ closed-loop validation. This weakens the idea that simply changing the terminal
 reward from absolute D_phi to paired D_phi is enough; the next reward experiment
 should likely change horizon/deployment alignment more substantially rather than
 rerun the same one-segment local objective.
+
+## 2026-06-26 - D_phi reward goal-use diagnostics
+
+### Hypothesis
+
+The D_phi reward checkpoints improve some full-bank local scalar metrics but do
+not reliably improve learned-goal closed-loop deployment. If the core issue is
+still weak goal conditioning, the D_phi checkpoints should have nearly the same
+goal sensitivity as frozen.
+
+### Commands
+
+```bash
+uv run python scripts/rl_rerun_condition_block_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 4096 \
+  --batch-size 512 \
+  --horizon 10 \
+  --policy dphi_progress_1=artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --policy dphi_progress_3=artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/latest.pt \
+  --policy dphi_paired_1=artifacts/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_goal_diagnostics_condition_block_n4096.json
+
+uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 4096 \
+  --batch-size 512 \
+  --horizons 2,5,10,20 \
+  --reference-horizon 10 \
+  --policy dphi_progress_1=artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --policy dphi_progress_3=artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_3update_bc1_lr1e5_logstd5/latest.pt \
+  --policy dphi_paired_1=artifacts/rl_rerun/local_r3/n500/seed0/dphi_paired_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_goal_diagnostics_valid_goal_n4096.json
+```
+
+### Results
+
+Condition-block shuffle action L2:
+
+| policy | observation | goal | previous action | remaining |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.807 | 0.0467 | 0.0738 | 0.000 |
+| D_phi progress 1 update | 0.812 | 0.0461 | 0.0742 | 0.000 |
+| D_phi progress 3 updates | 0.807 | 0.0467 | 0.0725 | 0.000 |
+| paired D_phi 1 update | 0.814 | 0.0468 | 0.0716 | 0.000 |
+
+Same-state valid future-goal action L2:
+
+| policy | k2 vs k10 | k5 vs k10 | k20 vs k10 | k2 vs k20 |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.02316 | 0.01691 | 0.01862 | 0.02419 |
+| D_phi progress 1 update | 0.02316 | 0.01691 | 0.01862 | 0.02419 |
+| D_phi progress 3 updates | 0.02316 | 0.01690 | 0.01861 | 0.02418 |
+| paired D_phi 1 update | 0.02316 | 0.01691 | 0.01862 | 0.02419 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_goal_diagnostics_condition_block_n4096.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_goal_diagnostics_valid_goal_n4096.json`
+
+### Interpretation
+
+The D_phi reward checkpoints do not materially change goal usage. Observation
+shuffle remains about `17x` larger than goal shuffle, and valid same-state goal
+swaps are indistinguishable from frozen. This explains why the D_phi updates can
+move full-bank local scalar metrics but fail to produce reliable learned-goal
+closed-loop gains: the policy still mostly acts from current observation and
+previous action, not from the future goal. The next productive branch should
+return to representation/architecture or closed-loop intervention training,
+not more one-segment scalar reward tuning on this goal-insensitive low level.

@@ -1153,6 +1153,12 @@ gate: final reward delta `-0.0008` and D_phi delta `-0.0063`, even though max
 reward and success deltas were slightly positive. The training paired D_phi
 improvement was also negative (`-0.0037`, `48.8%` improved), so this checkpoint
 was not promoted to closed-loop validation.
+I also ran goal-use diagnostics across frozen, D_phi progress, and paired-D_phi
+checkpoints. They are effectively identical: goal-block shuffle changes actions
+by only `0.046-0.047` L2 while observation shuffle is about `0.81`, and valid
+same-state future-goal swaps remain around `0.023` L2 for `k=2` versus `k=10`.
+So D_phi reward changes local scalar outcomes without fixing the underlying
+goal-conditioning bottleneck.
 
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
