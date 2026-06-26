@@ -17652,3 +17652,108 @@ For follow-up RL, keep `highact_strong` as the conservative base because the
 R3/local-RL path uses serial evaluation. Future learned-interface validation
 tables should report `eval_num_envs`, and any promoted RL base should pass a
 single-env or serial check.
+
+## 2026-06-26 - Goal-MSE 0.1 high-action interpolation
+
+### Hypothesis
+
+Action-only (`high_goal_mse_weight=0.0`) is best under the default vectorized
+learned-interface evaluator but worse under single-env/serial evaluation.
+`highact_strong` (`high_goal_mse_weight=0.3`) remains better for serial/RL. A
+middle value may keep some action-compatible goal freedom while preserving the
+single-env behavior that matters for R3.
+
+### Configuration
+
+Added candidate:
+
+```yaml
+effect32_film_gsens_ft_highact_goal01:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32_film_gsens_ft_highact_goal01
+  conditioning: film
+  high_init_candidate: effect32
+  low_init_candidate: effect32_film_gsens_ft
+  freeze_low_policy: true
+  high_goal_mse_weight: 0.1
+  high_action_loss_weight: 300.0
+  policy_lr: 1.0e-5
+  policy_epochs: 20
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_goal01 \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_goal01 \
+  --goal-source learned \
+  --episodes 100 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_goal01 \
+  --seed 0 \
+  --run-name hcl_next_highact_goal01_frozen_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --force
+```
+
+### Training Metrics
+
+| candidate | goal MSE weight | best epoch | validation goal L2 | predicted action MAE | prediction-induced action L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| actiononly | 0.0 | 17 | 2.6673 | 0.03645 | 0.01299 |
+| goal01 | 0.1 | 17 | 2.5796 | 0.03646 | 0.01290 |
+| highact_strong | 0.3 | 20 | 2.5489 | 0.03646 | 0.01278 |
+
+The interpolation behaves as expected offline: goal L2 moves between action-only
+and `highact_strong`, while action-through-low metrics remain nearly tied.
+
+### Results
+
+First 100-seed screen, `seed_start=3500000`:
+
+| evaluator | candidate | success | final reward | max reward | teacher MAE / segment reach |
+| --- | --- | ---: | ---: | ---: | ---: |
+| learned-interface envs=1 | actiononly | 0.660 | 0.7497 | 0.7562 | 0.0893 |
+| learned-interface envs=1 | goal01 | 0.660 | 0.7479 | 0.7536 | 0.0840 |
+| learned-interface envs=1 | highact_strong | 0.670 | 0.7492 | 0.7566 | 0.0937 |
+| low-level-rl serial | actiononly | 0.660 | 0.6161 | 0.7562 | 0.742 |
+| low-level-rl serial | goal01 | 0.660 | 0.6742 | 0.7536 | 0.745 |
+| low-level-rl serial | highact_strong | 0.670 | 0.7092 | 0.7566 | 0.722 |
+
+Paired serial counts:
+
+| comparison | wins | losses | net |
+| --- | ---: | ---: | ---: |
+| goal01 vs highact_strong | 12 | 13 | -1 |
+| goal01 vs actiononly | 10 | 10 | 0 |
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_goal01/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_goal01/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_goal01/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_goal01/seed0/hcl_next_highact_goal01_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json`
+
+### Interpretation
+
+Reject this interpolation point as a serial/RL base. It improves final reward
+over action-only in serial mode, but not enough to beat `highact_strong`; success
+is still lower and paired counts are slightly negative. This narrows the current
+candidate choice: use `highact_strong` for conservative local-RL work, and keep
+action-only only as a vectorized learned-interface lead.

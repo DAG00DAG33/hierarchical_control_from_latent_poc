@@ -642,6 +642,18 @@ learned_interface:
       high_action_loss_weight: 300.0
       policy_lr: 1.0e-5
       policy_epochs: 20
+    effect32_film_gsens_ft_highact_goal01:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32_film_gsens_ft_highact_goal01
+      conditioning: film
+      high_init_candidate: effect32
+      low_init_candidate: effect32_film_gsens_ft
+      freeze_low_policy: true
+      high_goal_mse_weight: 0.1
+      high_action_loss_weight: 300.0
+      policy_lr: 1.0e-5
+      policy_epochs: 20
     effect32_film_gsens_ft_highact_joint:
       family: conditioning_ablation
       representation_candidate: effect32

@@ -580,6 +580,21 @@ the conservative RL base remains `effect32_film_gsens_ft_highact_strong`, while
 `actiononly` is only a vectorized learned-interface lead. Future promotion
 checks should report `eval_num_envs` explicitly.
 
+I then tested a middle high-level objective,
+`effect32_film_gsens_ft_highact_goal01`, with the same frozen low policy and
+action-through-low loss but `high_goal_mse_weight=0.1`. On the first 100-seed
+single-env/serial screen it did not beat `highact_strong`:
+
+| evaluator | candidate | success | final reward | max reward | paired wins/losses vs highact_strong |
+| --- | --- | ---: | ---: | ---: | ---: |
+| learned-interface envs=1 | highact_strong | 0.670 | 0.7492 | 0.7566 | - |
+| learned-interface envs=1 | highact_goal01 | 0.660 | 0.7479 | 0.7536 | - |
+| low-level-rl serial | highact_strong | 0.670 | 0.7092 | 0.7566 | - |
+| low-level-rl serial | highact_goal01 | 0.660 | 0.6742 | 0.7536 | 12 / 13 |
+
+This rejects the simple interpolation between action-only and `highact_strong`.
+The conservative serial/RL base remains `effect32_film_gsens_ft_highact_strong`.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
