@@ -12915,3 +12915,53 @@ the aggregate reward/success deltas become negative.
 This makes the next useful direction clearer: stop extending the same
 one-segment terminal reward target. Either make a larger policy change with an
 explicit preservation objective, or train against closed-loop outcome labels.
+
+## 2026-06-26: Task-hard one-update closed-loop transfer smoke
+
+### Hypothesis
+
+The task-hard `bc=0.3` one-update checkpoint has the best held-out local
+task-hard subset gain so far. This checks whether that small local gain transfers
+at all under learned-goal closed-loop execution.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4800000 \
+  --num-envs 20 \
+  --goal-source learned \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_100_seed4800000.json
+```
+
+### Result
+
+| branch | success | final reward | max reward | mean residual norm |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.230 | 0.4147 | 0.4376 | 0.000000 |
+| residual | 0.250 | 0.4240 | 0.4549 | 0.000484 |
+| delta | +0.020 | +0.0093 | +0.0172 | - |
+
+High-level decisions per episode were effectively matched (`8.83` frozen,
+`8.85` residual).
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_100_seed4800000.json`
+
+### Interpretation
+
+This is a mildly positive transfer smoke for the best task-hard local checkpoint:
+same-run residual improves success by `+0.020`, final reward by `+0.0093`, and
+max reward by `+0.0172`. The result is too small and too low-success to promote
+on its own, but it contradicts the earlier blanket conclusion that task-hard R3
+should skip all closed-loop deployment. The next check should be a larger
+matched closed-loop window for this exact checkpoint before changing the
+training objective again.

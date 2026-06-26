@@ -958,6 +958,22 @@ the target task-hard subset. This reinforces that repeatedly optimizing the same
 one-segment task-paired target changes the local tradeoff; it still does not
 produce a robust low-level improvement.
 
+I then ran a compact learned-goal closed-loop smoke for the best one-update
+task-hard checkpoint (`bc=0.3`, `max_base_terminal_env_reward=0.45`) on 100
+matched episodes from `seed_start=4800000`. The residual branch was mildly
+positive against its frozen branch in the same evaluator run:
+
+| branch | success | final reward | max reward |
+| --- | ---: | ---: | ---: |
+| frozen | 0.230 | 0.4147 | 0.4376 |
+| task-hard residual | 0.250 | 0.4240 | 0.4549 |
+| delta | +0.020 | +0.0093 | +0.0172 |
+
+This is the first task-hard local-R3 transfer smoke with a positive sign, but
+the sample is small and absolute success is low. It is a follow-up signal, not a
+promotion result. The next useful check is a larger matched closed-loop window
+for this checkpoint before spending more training runs on the same objective.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
@@ -1131,6 +1147,7 @@ results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1upd
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/closed_loop_learned_100_seed4800000.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
