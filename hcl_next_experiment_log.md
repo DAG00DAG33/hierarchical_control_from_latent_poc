@@ -13449,3 +13449,106 @@ closed-loop hierarchy regressed badly. This rejects the naive "increase
 goal-sensitivity by margin loss" fix. Future attempts should not optimize goal
 sensitivity in isolation; they need a preservation constraint or a
 closed-loop/deployment-aligned objective.
+
+## 2026-06-26: Light effect32 FiLM goal-sensitivity regularizer
+
+### Hypothesis
+
+The strong `effect32_film_gsens` regularizer crossed the offline goal-use gate
+but damaged closed-loop deployment. This run tests whether a much lighter
+regularizer finds a better tradeoff.
+
+### Candidate
+
+```yaml
+effect32_film_gsens_light:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  goal_sensitivity_weight: 0.01
+  goal_sensitivity_margin: 0.1
+  policy_epochs: 40
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_light \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_gsens_light \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_light/diagnostics.json
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_light \
+  --seed 0 \
+  --episodes 200 \
+  --goal-source learned \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_light \
+  --seed 0 \
+  --episodes 200 \
+  --goal-source oracle \
+  --eval-seed-start 3500000 \
+  --force
+```
+
+### Training Metrics
+
+Best hierarchy epoch was `40`:
+
+```text
+oracle_action_mae: 0.0405
+predicted_action_mae: 0.0408
+prediction_induced_action_l2: 0.0123
+```
+
+### Goal/Deployment Tradeoff
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | gate status | learned success | oracle success |
+| --- | ---: | ---: | --- | ---: | ---: |
+| effect32_film | 0.0622 | 0.0368 | reject | 0.645 | 0.645 |
+| effect32_film_gsens_light | 0.0736 | 0.0405 | reject | 0.570 | 0.570 |
+| effect32_film_gsens | 0.1149 | 0.0476 | pass | 0.500 | 0.515 |
+
+After including this candidate, the aggregate goal-diagnostics report has:
+
+```text
+total: 13
+offline_goal_use_pass: 3
+reject_low_goal_use: 10
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_light/seed0/hierarchy.pt`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_light/diagnostics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_light/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_light/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+
+### Interpretation
+
+The lighter regularizer gives a smoother version of the same bad tradeoff. It
+increases goal-shuffle action change only slightly (`0.0622 -> 0.0736`), does
+not pass the strict offline gate, and still costs `7.5` success points on the
+matched learned-goal eval. This closes the simple sensitivity-margin branch:
+goal-use needs to arise from a better representation/architecture or
+deployment-aligned training signal, not from a standalone action-difference
+margin.

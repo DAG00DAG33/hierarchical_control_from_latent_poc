@@ -268,13 +268,15 @@ offline gate but hurt deployment:
 | candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
 | --- | ---: | ---: | ---: | ---: |
 | effect32_film | 0.062 | 0.0368 | 0.645 | 0.645 |
+| effect32_film_gsens_light | 0.074 | 0.0405 | 0.570 | 0.570 |
 | effect32_film_gsens | 0.115 | 0.0476 | 0.500 | 0.515 |
 
 So the missing ingredient is not merely "make actions change when the goal is
-shuffled." A naive sensitivity margin creates goal dependence but damages the
-closed-loop controller. The next representation/architecture attempt should
-preserve imitation quality more explicitly, not optimize goal sensitivity as an
-isolated objective.
+shuffled." A lighter margin produces a smoother tradeoff, but still loses
+`7.5` success points for a small goal-use gain and does not pass the strict
+offline gate. A stronger margin passes the gate but loses `14.5` success points.
+The next representation/architecture attempt should preserve imitation quality
+more explicitly, not optimize goal sensitivity as an isolated objective.
 
 I added candidate-level `horizon_steps` / `update_period` overrides for learned
 interfaces and trained short-horizon aliases of the effect32 FiLM interface:
@@ -1268,6 +1270,10 @@ artifacts/incremental/learned_interface/effect32_film_gsens/seed0/hierarchy.pt
 results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens/diagnostics.json
 results/incremental/learned_interface/effect32_film_gsens/seed0/learned_hierarchy_eval_200_seed3500000.json
 results/incremental/learned_interface/effect32_film_gsens/seed0/oracle_hierarchy_eval_200_seed3500000.json
+artifacts/incremental/learned_interface/effect32_film_gsens_light/seed0/hierarchy.pt
+results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_light/diagnostics.json
+results/incremental/learned_interface/effect32_film_gsens_light/seed0/learned_hierarchy_eval_200_seed3500000.json
+results/incremental/learned_interface/effect32_film_gsens_light/seed0/oracle_hierarchy_eval_200_seed3500000.json
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
