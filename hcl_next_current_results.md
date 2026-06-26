@@ -426,6 +426,27 @@ This remains a small margin, but it is now replicated and aligned with reward
 and teacher-action metrics. The next useful step is a larger final-style
 validation window or joint high/low coupled training based on this signal.
 
+A fresh 1000-episode learned-goal validation at `seed_start=3700000` also held:
+
+| candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.635 | 0.7306 | 0.7399 | 0.0978 |
+| effect32_film_gsens_ft_highact_strong | 0.645 | 0.7386 | 0.7463 | 0.0902 |
+
+Across all three fixed learned-goal windows (`3500000`, `3600000`, `3700000`),
+the aggregate is now:
+
+| candidate | episodes | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 2000 | 0.6465 | 0.7386 | 0.7475 | 0.0980 |
+| effect32_film_gsens_ft_highact_strong | 2000 | 0.6535 | 0.7462 | 0.7530 | 0.0883 |
+
+This is the first real-compatible learned-interface candidate in this branch
+that retains the improved oracle-goal low-level behavior and beats the original
+effect32 FiLM learned-goal baseline on larger validation. It is not enough to
+declare the RL proof-of-concept solved, but it is strong enough to use as a
+follow-up RL base or as the template for joint high/low coupled training.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

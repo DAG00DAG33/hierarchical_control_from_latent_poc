@@ -16791,3 +16791,68 @@ goal-sensitive low-level while slightly improving over the original baseline.
 This is still not a final policy claim. The next useful step is either a larger
 final-style validation window or an implementation step toward joint high/low
 coupled training, using this result as the justification.
+
+## 2026-06-26 - 1000-episode validation for strong action-aware high-level tuning
+
+### Hypothesis
+
+The strong action-aware high-level candidate was positive on two 500-episode
+learned-goal windows, but the aggregate margin was still small. A fresh
+1000-episode same-window comparison should tell whether the lead survives a
+larger final-style validation.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film \
+  --goal-source learned \
+  --episodes 1000 \
+  --eval-seed-start 3700000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 1000 \
+  --eval-seed-start 3700000 \
+  --force
+```
+
+### Results
+
+Fresh 1000-episode learned-goal window:
+
+| candidate | success | final reward | max reward | teacher action MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.635 | 0.7306 | 0.7399 | 0.0978 |
+| effect32_film_gsens_ft_highact_strong | 0.645 | 0.7386 | 0.7463 | 0.0902 |
+
+Aggregate over `seed_start=3500000`, `3600000`, and `3700000`:
+
+| candidate | episodes | success | final reward | max reward | teacher action MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 2000 | 0.6465 | 0.7386 | 0.7475 | 0.0980 |
+| effect32_film_gsens_ft_highact_strong | 2000 | 0.6535 | 0.7462 | 0.7530 | 0.0883 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film/seed0/learned_hierarchy_eval_1000_seed3700000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_1000_seed3700000.json`
+
+### Interpretation
+
+The strong action-aware high-level candidate now has a replicated positive
+learned-goal signal over 2000 fixed-seed episodes. The success margin is still
+modest (`+0.007` absolute), but all task-quality proxies move in the same
+direction: final reward, max reward, and teacher-action MAE. This is the first
+real-compatible learned-interface candidate in the current branch that both
+retains the improved oracle-goal low-level behavior and beats the original
+effect32 FiLM learned-goal baseline on larger validation.
+
+The next useful work should either validate this candidate against the R3/local
+RL path or turn this high-only objective into a joint high/low coupled training
+recipe. It is now strong enough to be a candidate base for follow-up RL, but the
+margin is still too small to call the overall RL proof-of-concept solved.
