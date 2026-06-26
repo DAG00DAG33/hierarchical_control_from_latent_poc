@@ -14407,6 +14407,55 @@ success, final reward, and max reward. This closes the simple one-segment
 max-reward upper-bound selector path; the next objective/selector work needs a
 longer-horizon or directly closed-loop training signal.
 
+## 2026-06-26 - Full-window success oracle selector validation
+
+### Hypothesis
+
+The one-segment success selector was too sparse on the 20-episode smoke, but a
+500-episode validation can check whether sparse success deltas become useful at
+larger scale.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --oracle-copy-mode state_dict \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric success \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_success_500_seed4800000.json
+```
+
+### Results
+
+| metric | frozen | success oracle selector | delta |
+| --- | ---: | ---: | ---: |
+| success | 0.306 | 0.306 | 0.000 |
+| final dense reward | 0.4642 | 0.4642 | -0.00003 |
+| max dense reward | 0.4954 | 0.4954 | -0.00001 |
+
+Selector diagnostics:
+
+| residual action rate | decision residual rate | decisions | branch max-reward delta | branch reward delta | branch success-once delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.0036 | 0.0045 | 4266 | -0.0002 | -0.0007 | -0.0005 |
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_success_500_seed4800000.json`
+
+### Interpretation
+
+The success selector is a near no-op at full-window scale. It preserves frozen
+success because it almost never selects the residual branch, not because it
+finds useful interventions. Together with the max-reward validation, this closes
+the simple one-segment task-oracle selector metrics for this checkpoint.
+
 ## 2026-06-26 - Per-sample local eval export for proxy analysis
 
 ### Hypothesis

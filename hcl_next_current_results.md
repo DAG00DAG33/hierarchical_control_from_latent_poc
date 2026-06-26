@@ -1061,7 +1061,10 @@ the selector reached `0.294` success versus frozen `0.306`, with final reward
 delta `-0.0087` and max reward delta `-0.0095`, despite positive one-segment
 counterfactual deltas inside the selector trace. Optimizing one-segment max
 reward is therefore not a stronger upper-bound branch selector for this
-checkpoint.
+checkpoint. A matching 500-episode `success` selector was essentially inactive
+(`0.36%` residual action rate), tying frozen success at `0.306` with negligible
+negative reward deltas. The sparse success branch signal also does not provide
+a useful upper bound.
 
 To make local-to-task proxy checks less indirect, I added
 `eval-local-r{1,2,3} --include-samples`, which exports per-sample local
