@@ -1373,6 +1373,18 @@ but the tuned low level still does not produce a robust improvement. This points
 back to the local objective/effect size rather than high-level prediction as the
 main blocker for this checkpoint.
 
+I then checked whether the task-hard target at least fixed the low-level
+goal-conditioning bottleneck. It did not. On the same 4096-sample diagnostic
+used for the D_phi checkpoints, the task-hard residual's condition-block
+sensitivity was essentially unchanged from frozen: observation shuffle action
+L2 was `0.8363`, goal shuffle was `0.0450`, previous-action shuffle was
+`0.0729`, and remaining-time shuffle was `0.0000`. Valid same-state future-goal
+swaps were also unchanged: `k=2` versus `k=10` action L2 was `0.020706` for
+task-hard versus `0.020705` for frozen, despite mean latent goal separation
+`25.32`. This closes the strongest task-hard local objective as a
+goal-identifiability fix. It can shape small terminal task-reward deltas, but
+it does not make the deployed low-level policy materially more goal-sensitive.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,

@@ -16038,3 +16038,70 @@ fixed by generic masked reconstruction-style auxiliary BC. The missing signal is
 not just "act well when observation is partially hidden"; it must teach which
 goal-conditioned correction improves the closed-loop outcome from the same
 state.
+
+## 2026-06-26 - Task-hard R3 goal-use diagnostic
+
+### Hypothesis
+
+The task-hard local R3 checkpoint gave the strongest targeted local task-reward
+signal among the recent real-compatible R3 variants. If that target regime is
+meaningfully different from the D_phi progress/paired variants, it might also
+increase the low-level policy's dependence on the future goal.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run python scripts/rl_rerun_condition_block_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 4096 \
+  --batch-size 512 \
+  --horizon 10 \
+  --policy taskhard_bc03=artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/goal_diagnostics_condition_block_n4096.json
+
+TQDM_DISABLE=1 uv run python scripts/rl_rerun_valid_goal_sensitivity.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 4096 \
+  --batch-size 512 \
+  --horizons 2,10 \
+  --policy taskhard_bc03=artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/goal_diagnostics_valid_goal_n4096.json
+```
+
+### Results
+
+Condition-block shuffle action L2:
+
+| policy | observation | goal | previous action | remaining |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.8357 | 0.0444 | 0.0726 | 0.0000 |
+| task-hard bc0.3 | 0.8363 | 0.0450 | 0.0729 | 0.0000 |
+
+Valid same-state future-goal action L2:
+
+| policy | k=2 vs k=10 action L2 | action L2 / goal L2 |
+| --- | ---: | ---: |
+| frozen | 0.020705 | 0.000734 |
+| task-hard bc0.3 | 0.020706 | 0.000734 |
+
+The mean latent goal separation for the valid-goal swap was `25.32`.
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/goal_diagnostics_condition_block_n4096.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/goal_diagnostics_valid_goal_n4096.json`
+
+### Interpretation
+
+The task-hard objective does not fix goal use. Its action response to goal
+shuffling is still about `5%` of the observation-shuffle response, and valid
+future-goal swaps are numerically indistinguishable from frozen. This closes the
+strongest task-hard local objective as a goal-identifiability fix: it can shape
+small terminal task-reward deltas on selected local starts, but it does not
+teach a materially more goal-conditioned low-level correction.

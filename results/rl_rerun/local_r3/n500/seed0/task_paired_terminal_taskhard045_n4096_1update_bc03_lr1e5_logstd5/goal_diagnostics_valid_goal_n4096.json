@@ -1,0 +1,59 @@
+{
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5",
+  "goal_l2": {
+    "k2_vs_k10": {
+      "max": 58.97550964355469,
+      "mean": 25.316922198282555,
+      "median": 25.206375122070312,
+      "p90": 35.94463348388672
+    }
+  },
+  "horizons": [
+    2,
+    10
+  ],
+  "interpretation": "Compares deterministic one-step actions for the same current state under same-trajectory future goals at nearby horizons.",
+  "method": "rl_rerun_valid_goal_sensitivity",
+  "n_demo": 500,
+  "policies": {
+    "frozen": {
+      "k2_vs_k10": {
+        "action_l2": {
+          "max": 0.5507787466049194,
+          "mean": 0.020704849730996955,
+          "median": 0.010458743199706078,
+          "p90": 0.04375745169818401
+        },
+        "action_l2_per_goal_l2": {
+          "max": 0.014805369079113007,
+          "mean": 0.0007337045220245919,
+          "median": 0.00046400443534366786,
+          "p90": 0.0014297147281467915
+        }
+      }
+    },
+    "taskhard_bc03": {
+      "k2_vs_k10": {
+        "action_l2": {
+          "max": 0.5508935451507568,
+          "mean": 0.020705848072509525,
+          "median": 0.010468737687915564,
+          "p90": 0.04373308643698692
+        },
+        "action_l2_per_goal_l2": {
+          "max": 0.014808244071900845,
+          "mean": 0.000733769264829931,
+          "median": 0.0004638684185920283,
+          "p90": 0.0014306055381894112
+        }
+      }
+    }
+  },
+  "policy_checkpoints": {
+    "taskhard_bc03": "artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt"
+  },
+  "reference_horizon": 10,
+  "remaining_fraction": 1.0,
+  "samples": 4096,
+  "seed": 0
+}
