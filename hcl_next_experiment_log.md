@@ -11756,3 +11756,93 @@ checkpoint. If selector work continues, it should use online step-level or
 recurrent context, or train the selector/policy directly inside the closed-loop
 distribution. Otherwise, the more promising path remains changing the training
 target so the tuned policy creates a larger and more consistently useful effect.
+
+## 2026-06-26 - Online step deployment of closed-loop selector
+
+I added `--step-selector` to `rl-rerun eval-closed-loop-r{1,2,3}`. It consumes a
+JSON produced by `fit-closed-loop-selector`, but only accepts features available
+at the current step:
+
+```text
+episode_action_delta_l2_initial -> current action_delta_l2
+episode_policy_saturation_initial -> current policy_saturation
+episode_goal_l2_initial -> current goal_l2
+```
+
+Selectors containing non-online features fail clearly. At each action, the eval
+path computes the selector score and falls back to the frozen base action when
+the score is below the fitted threshold.
+
+Smoke command:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 8 \
+  --eval-seed-start 4720000 \
+  --num-envs 8 \
+  --goal-source learned \
+  --step-selector results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initial_selector_fit_train460_valid470.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_step_selector_smoke_8_seed4720000.json
+```
+
+The smoke wrote the expected selector metadata and selected residual actions
+about `0.766` of active steps.
+
+I then evaluated the same selector on the train and validation 100-episode
+banks:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4600000 \
+  --num-envs 64 \
+  --goal-source learned \
+  --step-selector results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initial_selector_fit_train460_valid470.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_step_selector_100_seed4600000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 4700000 \
+  --num-envs 64 \
+  --goal-source learned \
+  --step-selector results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_initial_selector_fit_train460_valid470.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_step_selector_100_seed4700000.json
+```
+
+Results:
+
+| seed | frozen | ungated residual | online step selector | residual action rate | selector max-reward delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4600000 | 0.260 | 0.290 | 0.290 | 0.807 | +0.0264 |
+| 4700000 | 0.290 | 0.290 | 0.270 | 0.804 | -0.0158 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_step_selector_smoke_8_seed4720000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_step_selector_100_seed4600000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_step_selector_100_seed4700000.json`
+
+Interpretation:
+
+The online step deployment does not rescue the learned selector. It is neutral
+in-sample and worse on the validation bank. Combined with the offline selector
+audit, this suggests the remaining selector opportunity is not a linear
+threshold over these simple state/action features. A useful selector likely
+needs to be trained directly in closed loop, with temporal context and its own
+intervention consequences, or the next work should return to changing the
+training target so residual actions are useful more often.

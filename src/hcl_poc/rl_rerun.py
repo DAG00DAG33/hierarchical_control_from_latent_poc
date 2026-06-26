@@ -3708,6 +3708,12 @@ DEFAULT_CLOSED_LOOP_SELECTOR_FEATURES = [
     "episode_goal_l2_initial",
 ]
 
+ONLINE_STEP_SELECTOR_FEATURES = {
+    "episode_action_delta_l2_initial": "action_delta_l2",
+    "episode_policy_saturation_initial": "policy_saturation",
+    "episode_goal_l2_initial": "goal_l2",
+}
+
 
 def _closed_loop_selector_arrays(
     payload: dict[str, Any],
@@ -3865,6 +3871,62 @@ def fit_rl_rerun_closed_loop_selector(
     return output_path
 
 
+def _load_closed_loop_step_selector(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    payload = json.loads(path.read_text())
+    if payload.get("stage") != "closed_loop_outcome_selector_fit":
+        raise ValueError("Step selector JSON must come from fit-closed-loop-selector")
+    feature_names = [str(name) for name in payload["feature_names"]]
+    unsupported = [name for name in feature_names if name not in ONLINE_STEP_SELECTOR_FEATURES]
+    if unsupported:
+        raise ValueError(
+            "Step selector contains non-online features: "
+            f"{unsupported}. Supported features are {sorted(ONLINE_STEP_SELECTOR_FEATURES)}"
+        )
+    mean = np.asarray(payload["feature_mean"], dtype=np.float32)
+    std = np.asarray(payload["feature_std"], dtype=np.float32)
+    weights = np.asarray(payload["weights"], dtype=np.float32)
+    if len(feature_names) != len(mean) or len(feature_names) != len(std):
+        raise ValueError("Step selector feature statistics have inconsistent lengths")
+    if len(feature_names) != len(weights):
+        raise ValueError("Step selector weights have inconsistent length")
+    if np.any(std <= 0.0):
+        raise ValueError("Step selector standard deviations must be positive")
+    return {
+        "path": str(path),
+        "feature_names": feature_names,
+        "mean": mean,
+        "std": std,
+        "weights": weights,
+        "bias": float(payload["bias"]),
+        "threshold": float(payload.get("threshold", 0.0)),
+    }
+
+
+def _closed_loop_step_selector_scores(
+    selector: dict[str, Any],
+    action_delta_l2: np.ndarray,
+    policy_saturation: np.ndarray,
+    goal_l2: np.ndarray,
+) -> np.ndarray:
+    values: list[np.ndarray] = []
+    for name in selector["feature_names"]:
+        online_name = ONLINE_STEP_SELECTOR_FEATURES[name]
+        if online_name == "action_delta_l2":
+            values.append(action_delta_l2)
+        elif online_name == "policy_saturation":
+            values.append(policy_saturation)
+        elif online_name == "goal_l2":
+            values.append(goal_l2)
+        else:
+            raise RuntimeError(f"Unhandled online selector feature: {online_name}")
+    features = np.stack(values, axis=1).astype(np.float32)
+    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+    normalized = (features - selector["mean"]) / selector["std"]
+    return normalized @ selector["weights"] + selector["bias"]
+
+
 @torch.inference_mode()
 def evaluate_rl_rerun_closed_loop_r1(
     config: Config,
@@ -3879,6 +3941,7 @@ def evaluate_rl_rerun_closed_loop_r1(
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
+    step_selector_path: Path | None = None,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -3902,6 +3965,11 @@ def evaluate_rl_rerun_closed_loop_r1(
     if goal_l2_gate_min is not None and goal_l2_gate_min < 0.0:
         raise ValueError("goal_l2_gate_min must be non-negative")
     need_oracle_branch = goal_source == "oracle" or diagnose_oracle_goals
+    step_selector = (
+        _load_closed_loop_step_selector(step_selector_path)
+        if step_selector_path is not None
+        else None
+    )
 
     device = default_device()
     rerun_config = _rerun_base_config(config)
@@ -3981,6 +4049,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         episode_policy_saturation_rate: list[float] = []
         episode_action_delta_gate_rate: list[float] = []
         episode_goal_l2_gate_rate: list[float] = []
+        episode_step_selector_residual_rate: list[float] = []
         episode_goal_l2_initial: list[float] = []
         episode_goal_l2_mean: list[float] = []
         episode_predicted_oracle_goal_l2_initial: list[float] = []
@@ -3998,6 +4067,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         active_actions = 0
         gated_actions = 0
         goal_l2_gated_actions = 0
+        step_selector_base_actions = 0
         high_decisions = 0
 
         for batch_start in range(0, episodes, num_envs):
@@ -4073,6 +4143,7 @@ def evaluate_rl_rerun_closed_loop_r1(
             current_policy_saturation_sum = np.zeros(batch_envs, dtype=np.float32)
             current_action_delta_gate_sum = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_gate_sum = np.zeros(batch_envs, dtype=np.float32)
+            current_step_selector_residual_sum = np.zeros(batch_envs, dtype=np.float32)
             current_action_count = np.zeros(batch_envs, dtype=np.float32)
             current_goal_l2_initial = np.full(batch_envs, np.nan, dtype=np.float32)
             current_goal_l2_sum = np.zeros(batch_envs, dtype=np.float32)
@@ -4349,6 +4420,30 @@ def evaluate_rl_rerun_closed_loop_r1(
                             )
                             goal_l2_gated_actions += int(goal_l2_gate_to_base_np.sum())
                             current_goal_l2_gate_sum[goal_l2_gate_to_base_np] += 1.0
+                    if use_residual and step_selector is not None:
+                        selector_scores = _closed_loop_step_selector_scores(
+                            step_selector,
+                            action_delta_np,
+                            policy_saturation_np,
+                            current_segment_goal_l2,
+                        )
+                        selector_to_base_np = active & (
+                            selector_scores < step_selector["threshold"]
+                        )
+                        if bool(np.any(selector_to_base_np)):
+                            selector_to_base = torch.from_numpy(selector_to_base_np).to(
+                                device
+                            )
+                            unclipped = torch.where(
+                                selector_to_base[:, None],
+                                base_action,
+                                unclipped,
+                            )
+                            step_selector_base_actions += int(selector_to_base_np.sum())
+                        selector_to_residual_np = active & ~selector_to_base_np
+                        current_step_selector_residual_sum[
+                            selector_to_residual_np
+                        ] += 1.0
                     current_action_delta_sum[active] += action_delta_np[active]
                     missing_action_delta_initial = active & np.isnan(
                         current_action_delta_initial
@@ -4484,6 +4579,11 @@ def evaluate_rl_rerun_closed_loop_r1(
             episode_goal_l2_gate_rate.extend(
                 (current_goal_l2_gate_sum / action_denominator).astype(float).tolist()
             )
+            episode_step_selector_residual_rate.extend(
+                (current_step_selector_residual_sum / action_denominator)
+                .astype(float)
+                .tolist()
+            )
             episode_goal_l2_initial.extend(
                 current_goal_l2_initial.astype(float).tolist()
             )
@@ -4526,6 +4626,16 @@ def evaluate_rl_rerun_closed_loop_r1(
             "goal_l2_gate_rate": goal_l2_gated_actions / max(active_actions, 1)
             if use_residual and goal_l2_gate_min is not None
             else 0.0,
+            "step_selector_path": step_selector["path"]
+            if use_residual and step_selector is not None
+            else None,
+            "step_selector_feature_names": step_selector["feature_names"]
+            if use_residual and step_selector is not None
+            else None,
+            "step_selector_residual_rate": 1.0
+            - (step_selector_base_actions / max(active_actions, 1))
+            if use_residual and step_selector is not None
+            else None,
             "mean_residual_norm": (
                 float(np.mean(residual_norms)) if residual_norms else 0.0
             ),
@@ -4540,6 +4650,7 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_policy_saturation_rate": episode_policy_saturation_rate,
             "episode_action_delta_gate_rate": episode_action_delta_gate_rate,
             "episode_goal_l2_gate_rate": episode_goal_l2_gate_rate,
+            "episode_step_selector_residual_rate": episode_step_selector_residual_rate,
             "episode_goal_l2_initial": episode_goal_l2_initial,
             "episode_goal_l2_mean": episode_goal_l2_mean,
             "episode_predicted_oracle_goal_l2_initial": (
@@ -4607,6 +4718,7 @@ def evaluate_rl_rerun_closed_loop_r1(
         "oracle_copy_mode": oracle_copy_mode if goal_source == "oracle" else None,
         "action_delta_gate_min": action_delta_gate_min,
         "goal_l2_gate_min": goal_l2_gate_min,
+        "step_selector_path": str(step_selector_path) if step_selector_path else None,
         "diagnose_oracle_goals": diagnose_oracle_goals,
         "horizon": frozen.horizon_steps,
         "update_period": frozen.update_period,
@@ -4653,6 +4765,7 @@ def evaluate_rl_rerun_closed_loop_r2(
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
+    step_selector_path: Path | None = None,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -4669,6 +4782,7 @@ def evaluate_rl_rerun_closed_loop_r2(
         oracle_copy_mode=oracle_copy_mode,
         action_delta_gate_min=action_delta_gate_min,
         goal_l2_gate_min=goal_l2_gate_min,
+        step_selector_path=step_selector_path,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )
@@ -4688,6 +4802,7 @@ def evaluate_rl_rerun_closed_loop_r3(
     oracle_copy_mode: str = "replay",
     action_delta_gate_min: float | None = None,
     goal_l2_gate_min: float | None = None,
+    step_selector_path: Path | None = None,
     diagnose_oracle_goals: bool = False,
     output_path: Path | None = None,
 ) -> Path:
@@ -4704,6 +4819,7 @@ def evaluate_rl_rerun_closed_loop_r3(
         oracle_copy_mode=oracle_copy_mode,
         action_delta_gate_min=action_delta_gate_min,
         goal_l2_gate_min=goal_l2_gate_min,
+        step_selector_path=step_selector_path,
         diagnose_oracle_goals=diagnose_oracle_goals,
         output_path=output_path,
     )

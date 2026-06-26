@@ -750,6 +750,20 @@ trajectory, but not enough in first-decision features. A useful selector likely
 needs online recurrent/step-level context or must be trained as part of the
 closed-loop policy, not as an episode-start switch.
 
+I also deployed the initial-feature selector as an online step selector in
+`eval-closed-loop-r3`, recomputing the same three features at every action and
+falling back to the frozen action when the selector score is negative. This did
+not transfer:
+
+| seed | frozen | ungated residual | online step selector | residual action rate |
+| ---: | ---: | ---: | ---: | ---: |
+| 4600000 | 0.260 | 0.290 | 0.290 | 0.807 |
+| 4700000 | 0.290 | 0.290 | 0.270 | 0.804 |
+
+So the current learned linear selector is not a useful online controller. The
+selector path should now move beyond episode-level outcome fitting: either train
+a policy/selector directly online, or change the RL objective first.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:
