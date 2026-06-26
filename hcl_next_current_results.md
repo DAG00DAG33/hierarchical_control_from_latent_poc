@@ -1085,6 +1085,15 @@ features were more predictive (`initial_distance` AUC `0.643`), suggesting that
 where an intervention is attempted may matter more than the current raw or
 learned local-distance delta.
 
+I then ran the same audit on the contrasting task-hard `bc=0.3` one-update
+checkpoint. On the same 512-sample bank, it had a stronger task signal than the
+task-reward-debug checkpoint (`+0.0106` final reward, `+0.0195` success-once),
+but raw local distance again did not explain success deltas well: raw AUC was
+`0.333`, while `D_phi` AUC was `0.597`. Dense-reward correlations remained weak
+for both (`0.091` raw, `0.061` D_phi). This suggests the same-sample audit can
+distinguish checkpoint behavior, but neither local proxy is currently strong
+enough to trust alone.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

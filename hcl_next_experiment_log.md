@@ -14602,3 +14602,73 @@ action magnitude look more predictive, but the discordant subset is only 24
 samples, so this is a feature-design hint rather than a policy conclusion. The
 main practical gain is that future candidate checkpoints can now be screened
 with the same proxy audit before expensive closed-loop validation.
+
+## 2026-06-26 - Comparative proxy audit on task-hard checkpoint
+
+### Hypothesis
+
+The same-sample proxy audit should be useful for comparing candidate local
+checkpoints, not just diagnosing one checkpoint. The task-hard `bc=0.3`
+one-update checkpoint is a good contrast because it previously showed the best
+task-hard subset local signal while remaining weak in broader closed-loop
+transfer.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n512_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n512_dphi_1_seed0.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-local-sample-proxies \
+  --local-json results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n512_dphi_1_seed0.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n512_dphi_proxy_audit.json \
+  --force
+```
+
+### Results
+
+Same 512-sample bank comparison:
+
+| checkpoint | final reward delta | max reward delta | success delta | raw delta | D_phi delta | raw success AUC | D_phi success AUC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| task-reward debug | +0.0079 | +0.0027 | +0.0039 | +0.0135 | -0.0091 | 0.469 | 0.483 |
+| task-hard bc0.3 | +0.0106 | +0.0130 | +0.0195 | +0.0089 | -0.0083 | 0.333 | 0.597 |
+
+Task-hard proxy correlations:
+
+| proxy | corr final reward delta | corr max reward delta | success-delta AUC |
+| --- | ---: | ---: | ---: |
+| raw-distance delta | 0.0908 | 0.0264 | 0.333 |
+| D_phi delta | 0.0614 | 0.0579 | 0.597 |
+| mean action delta | -0.0390 | -0.0069 | 0.431 |
+| initial raw distance | -0.0275 | -0.0305 | 0.340 |
+
+Success-delta counts for task-hard:
+
+```text
+-1: 8
+ 0: 486
++1: 18
+```
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n512_dphi_1_seed0.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n512_dphi_proxy_audit.json`
+
+### Interpretation
+
+The audit distinguishes the two checkpoints: task-hard has a stronger
+same-sample task signal than task-reward-debug on this 512-bank smoke. But raw
+local distance still misranks the success-discordant samples, and `D_phi` only
+partly helps. Dense-reward correlations stay weak for both proxies. This makes
+the next objective clearer: use the proxy audit as a promotion gate, but do not
+select checkpoints from raw L2 or D_phi alone unless the audit improves on a
+larger bank.
