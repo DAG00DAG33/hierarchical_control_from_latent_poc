@@ -1135,7 +1135,11 @@ the tuned policy reached `0.302` success versus frozen `0.306`, with final
 reward delta `-0.0046` and max reward delta `-0.0052`. This is still useful:
 `D_phi` is a better local reward than raw/task-hard variants under the full-bank
 proxy audit, but the resulting update is tiny and not yet a deployment
-improvement.
+improvement. I then tried the smallest stronger-effect variant, lowering
+`bc_weight` from `1.0` to `0.3` while keeping the same one-update D_phi reward
+setup. That failed the full-bank local gate: final reward delta `-0.0034`, max
+reward delta `-0.0032`, success delta `-0.0049`, and `D_phi` delta `-0.0018`.
+So simple BC weakening does not solve the D_phi effect-size problem.
 
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of

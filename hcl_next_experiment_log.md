@@ -15056,3 +15056,90 @@ deployment and does not improve learned-goal task success. The next D_phi reward
 check should increase the effect size deliberately, for example by lowering BC
 weight, increasing updates, or using D_phi paired reward, while keeping the
 full-bank local audit and 500-episode closed-loop validation as promotion gates.
+
+## 2026-06-26 - D_phi reward lower-BC effect-size check
+
+### Hypothesis
+
+The first D_phi reward run passed the full-bank local gate but had very small
+closed-loop action changes. Lowering the BC anchor from `1.0` to `0.3` might
+increase useful D_phi-driven policy change while keeping the same stable LR and
+initial action noise.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name dphi_reward_n4096_1update_bc03_lr1e5_logstd5 \
+  --steps 40960 \
+  --bc-weight 0.3 \
+  --terminal-weight 1 \
+  --dense-progress-weight 1 \
+  --reward-mode progress \
+  --reward-distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --checkpoint-every-updates 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-local-sample-proxies \
+  --local-json results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json \
+  --output results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --force
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml compare-local-proxy-audits \
+  --audit-json \
+    results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+    results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --name dphi_bc1 dphi_bc03 \
+  --output results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_dphi_bc1_vs_bc03.json \
+  --force
+```
+
+### Results
+
+Training final row:
+
+| run | bc weight | mean reward | mean D_phi distance | terminal D_phi distance | action delta | saturation | task success diagnostic |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| D_phi bc1 | 1.0 | -0.0736 | 0.8402 | 0.8024 | 0.0108 | 0.0075 | 0.213 |
+| D_phi bc0.3 | 0.3 | -0.0736 | 0.8402 | 0.8024 | 0.0108 | 0.0075 | 0.213 |
+
+Full-bank local proxy comparison:
+
+| checkpoint | final reward delta | max reward delta | success delta | raw delta | D_phi delta | raw success AUC | D_phi success AUC | positive task gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| D_phi bc1 | +0.0026 | +0.0005 | +0.0007 | +0.0002 | +0.0035 | 0.549 | 0.500 | true |
+| D_phi bc0.3 | -0.0034 | -0.0032 | -0.0049 | +0.0003 | -0.0018 | 0.518 | 0.535 | false |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json`
+- `results/rl_rerun/local_r3/n500/seed0/dphi_reward_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json`
+- `results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_dphi_bc1_vs_bc03.json`
+
+### Interpretation
+
+Lowering BC weight did not increase useful effect size. The training metrics
+were effectively unchanged because the BC loss is already tiny in this
+one-update final-layer setup, and the held-out full-bank local audit regressed
+below the `bc=1` D_phi run. Since `bc=0.3` failed the local promotion gate, I did
+not run closed-loop validation. The next D_phi reward check should change the
+optimization regime more substantially, such as more updates or a paired D_phi
+terminal reward, rather than simply weakening this already-small BC term.
