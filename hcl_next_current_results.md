@@ -619,25 +619,31 @@ manifest, I skipped closed-loop deployment for that checkpoint. The next useful
 change should be a stronger target or representation change, not a linear sum
 of the current paired and sensitivity losses.
 
-I screened `ae256_film` as an alternative representation. It has stronger
-offline goal-use than effect32, and D_phi trains cleanly:
+I screened `ae256_film` and then rechecked `vae512_b1e6_film` with the same
+D_phi/R3 recipe. Both VAE-style representations have strong temporal D_phi
+metrics, but neither beats effect32 as a deployment base:
 
 | candidate | temporal Spearman | near/far acc | shuffled AUC | demo-decrease acc |
 | --- | ---: | ---: | ---: | ---: |
 | ae256_film | 0.933 | 0.986 | 0.868 | 0.694 |
 | effect32_film | 0.833 | 0.928 | 0.907 | 0.740 |
+| vae512_b1e6_film | 0.930 | 0.984 | 0.877 | 0.703 |
 
-But the analogous 40k D_phi R3 smoke regressed deployment:
+The analogous 40k D_phi R3 smokes gave:
 
 | policy | success | max reward | raw reduction |
 | --- | ---: | ---: | ---: |
 | ae256_film frozen | 0.596 | 0.710 | 0.294 |
 | ae256_film R3 | 0.586 | 0.706 | 0.292 |
+| vae512_b1e6_film frozen | 0.418 | 0.580 | 0.150 |
+| vae512_b1e6_film R3 | 0.478 | 0.627 | 0.161 |
 | effect32_film frozen | 0.634 | 0.738 | 0.397 |
 | effect32_film R3 | 0.684 | 0.773 | 0.410 |
 
-So `ae256_film` is not a better RL base. Stronger one-step goal sensitivity is
-not enough when the closed-loop base and local-to-task transfer are weaker.
+So `ae256_film` is not a better RL base, and VAE512 FiLM is a weak base even
+though R3 improves it on this window. Stronger one-step goal sensitivity or
+clean D_phi temporal structure is not enough when the frozen closed-loop policy
+and local-to-task transfer are weaker.
 
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.

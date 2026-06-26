@@ -10854,6 +10854,113 @@ This reinforces the earlier lesson that one-step goal sensitivity alone is not
 enough; the representation also needs a deployment-useful closed-loop base and
 a reachability metric whose local improvements transfer to task behavior.
 
+## 2026-06-26 - VAE512 FiLM D_phi R3 representation screen
+
+After `ae256_film` failed to beat effect32, I completed the same
+reachability-distance/R3 screen for the existing `vae512_b1e6_film` hierarchy.
+It already had learned-interface and goal-use artifacts, but no D_phi checkpoint
+under `artifacts/incremental/reachability_distance/vae512_b1e6_film/seed0`.
+
+I trained and evaluated D_phi:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-reachability-distance \
+  --candidate vae512_b1e6_film \
+  --seed 0
+
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-reachability-distance \
+  --candidate vae512_b1e6_film \
+  --seed 0 \
+  --force
+```
+
+Reachability-distance diagnostics:
+
+| candidate | temporal MSE | temporal Spearman | near/far acc | shuffled AUC | demo-decrease acc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vae512_b1e6_film | 0.00793 | 0.9296 | 0.9841 | 0.8769 | 0.7031 |
+| ae256_film | 0.00793 | 0.9334 | 0.9863 | 0.8678 | 0.6936 |
+| effect32_film | 0.03267 | 0.8333 | 0.9275 | 0.9074 | 0.7396 |
+| vae512_w2048_b1e6 | 0.00793 | 0.9296 | 0.9841 | 0.8769 | 0.7031 |
+
+Existing VAE512 FiLM closed-loop and goal-use diagnostics before R3:
+
+| goal source | episodes | success | max reward | final reward |
+| --- | ---: | ---: | ---: | ---: |
+| learned | 200 | 0.425 | 0.5916 | 0.5730 |
+| oracle | 200 | 0.535 | 0.6716 | 0.6646 |
+| shuffled | 200 | 0.010 | 0.2046 | 0.1404 |
+
+| diagnostic | value |
+| --- | ---: |
+| goal-shuffle action L2 | 0.2783 |
+| max valid-goal sensitivity L2 | 0.1266 |
+| frame-shuffle action L2 | 0.8213 |
+| previous-action shuffle action L2 | 0.1129 |
+
+Then I ran the same 40k terminal-only final-layer R3 shape used for ae256 and
+effect32:
+
+```bash
+uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate vae512_b1e6_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_vae512film_dphi_r3_4096_terminal_smoke_40k_bc10 \
+  --steps 40960 \
+  --bc-weight 10.0 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/vae512_b1e6_film/seed0/d_phi.pt \
+  --num-envs 4096
+```
+
+Training metrics:
+
+| candidate | terminal distance | action delta L2 | saturation |
+| --- | ---: | ---: | ---: |
+| vae512_b1e6_film R3 | 0.5207 | 0.02931 | 0.1933 |
+| ae256_film R3 | 0.7728 | 0.02931 | 0.3218 |
+| effect32_film R3 | 0.5757 | 0.02931 | 0.2587 |
+
+Closed-loop check on `seed_start=3500000`, 500 episodes:
+
+| policy | success | max reward | raw reduction | selected reduction | goal reach | action delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| vae512_b1e6_film frozen | 0.418 | 0.5797 | 0.1495 | 0.1116 | 0.8486 | 0.000000 |
+| vae512_b1e6_film R3 | 0.478 | 0.6271 | 0.1611 | 0.1150 | 0.8936 | 0.001637 |
+| ae256_film frozen | 0.596 | 0.7100 | 0.2938 | 0.0701 | 0.8133 | 0.000000 |
+| ae256_film R3 | 0.586 | 0.7057 | 0.2916 | 0.0698 | 0.8117 | 0.001307 |
+| effect32_film frozen | 0.634 | 0.7378 | 0.3965 | 0.0731 | 0.7176 | 0.000000 |
+| effect32_film R3 | 0.684 | 0.7725 | 0.4097 | 0.0801 | 0.7307 | 0.001006 |
+
+Artifacts:
+
+- `artifacts/incremental/reachability_distance/vae512_b1e6_film/seed0/d_phi.pt`
+- `results/incremental/reachability_distance/vae512_b1e6_film/seed0/eval.json`
+- `artifacts/incremental/low_level_rl/vae512_b1e6_film/seed0/hcl_next_vae512film_dphi_r3_4096_terminal_smoke_40k_bc10/latest.pt`
+- `results/incremental/low_level_rl/vae512_b1e6_film/seed0/hcl_next_vae512film_dphi_r3_4096_terminal_smoke_40k_bc10/train_metrics.json`
+- `results/incremental/low_level_rl/vae512_b1e6_film/seed0/hcl_next_vae512film_dphi_frozen_final500_seed3500000/eval_500_seed3500000.json`
+- `results/incremental/low_level_rl/vae512_b1e6_film/seed0/hcl_next_vae512film_dphi_r3_4096_terminal_smoke_40k_bc10_final500_seed3500000/eval_500_seed3500000.json`
+
+Interpretation:
+
+VAE512 FiLM is interesting diagnostically because this R3 update improves its
+own weak frozen baseline by `+0.060` success and `+0.0474` max reward on the
+500-episode check. But the absolute policy is still far behind effect32, and
+even behind the frozen ae256 hierarchy. Its D_phi metrics are nearly identical
+to the VAE512 concat metrics, so the FiLM architecture's stronger one-step
+goal-use did not translate into a stronger deployment base. This leaves
+`effect32_film` as the best current real-compatible representation for low-level
+RL transfer despite its weaker temporal D_phi MSE.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:
