@@ -18877,3 +18877,104 @@ promotion gates, either pin the evaluator protocol or treat vectorized and
 single-env evaluations as different seed distributions, not matched
 comparisons. This further supports using the single-env/serial-compatible
 protocol for local-RL base selection.
+
+## 2026-06-27 - Matched-reset vectorized learned-interface diagnostic
+
+### Hypothesis
+
+If the vectorized learned-interface instability is mainly caused by reset-state
+mismatch, then forcing a vectorized env to the corresponding `num_envs=1` reset
+states should reproduce the single-env evaluator much more closely.
+
+### Implementation
+
+Added `learned-interface-eval --eval-reset-mode serial_state`. In this mode the
+evaluator creates a temporary single-env reset for each evaluation seed, stores
+`env.unwrapped.get_state()`, resets the vectorized student/branch envs as usual,
+then calls `env.unwrapped.set_state(...)` and `get_obs()` before rollout.
+
+The default is still `--eval-reset-mode raw`.
+
+### Commands
+
+Single-env reference:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 20 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 1 \
+  --force
+```
+
+Vectorized matched-reset diagnostic:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 20 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 4 \
+  --eval-reset-mode serial_state \
+  --force
+```
+
+### Results
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_20_seed3500000_envs1.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_20_seed3500000_envs4_resetserial_state.json`
+
+Comparison:
+
+| metric | exact matches | max abs diff | mean abs diff |
+| --- | ---: | ---: | ---: |
+| episode success | 17 / 20 | 1.0 | 0.1500 |
+| episode max reward | 14 / 20 | 0.7086 | 0.1049 |
+| episode final reward | 14 / 20 | 0.7390 | 0.1099 |
+
+Aggregate:
+
+| eval mode | num envs | success | final reward | max reward |
+| --- | ---: | ---: | ---: | ---: |
+| raw | 1 | 0.700 | 0.7699 | 0.7857 |
+| serial_state | 4 | 0.850 | 0.8798 | 0.8901 |
+
+Focused probe on seeds `3500000..3500003`:
+
+| check | max abs diff | mean abs diff |
+| --- | ---: | ---: |
+| raw vector reset state vs serial reset state | 1.1450 | - |
+| vector state after `set_state` vs serial reset state | 2.38e-7 | - |
+| observation state after `set_state` | 8.34e-7 | 2.97e-8 |
+| RGB after `set_state` | 2 pixels | 2.54e-5 |
+| DINO/state frame input after `set_state` | 0.0080 | 0.00125 |
+| first high-level goal | 0.0065 | 0.00165 |
+| first low-level action | 0.00105 | 0.00039 |
+| next simulator state after identical first action | 5.65e-4 | 1.62e-5 |
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py src/hcl_poc/cli.py
+uv run hcl-poc incremental learned-interface-eval --help
+```
+
+### Interpretation
+
+Overwriting vectorized env state is feasible and removes the large reset-state
+mismatch, but it is not enough to reproduce the single-env learned-interface
+evaluator. Rendering/feature extraction differs slightly after `set_state`, the
+first model outputs differ slightly, and even stepping identical first actions
+introduces small simulator-state differences in batched mode. These small
+differences can compound across a closed-loop rollout.
+
+Treat `--eval-reset-mode serial_state` as an audit/debugging tool only. It does
+not replace the single-env/serial-compatible promotion protocol. The
+conservative RL base remains `effect32_film_gsens_ft_highact_strong`.

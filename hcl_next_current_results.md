@@ -674,6 +674,35 @@ comparisons. This explains why the ranking changes with `eval_num_envs` and
 means future promotion gates should either use a fixed evaluator protocol or
 explicitly report that the seed distributions differ.
 
+I then added an opt-in `learned-interface-eval --eval-reset-mode serial_state`
+diagnostic that first computes the `num_envs=1` reset simulator state for each
+evaluation seed and overwrites the vectorized env state after reset. This removes
+the large initial-state mismatch, but it does not make vectorized rollouts a
+drop-in proxy for single-env rollouts. On a 20-episode high-action check at
+`seed_start=3500000`, the matched-state `eval_num_envs=4` run still disagreed
+with the `eval_num_envs=1` reference on 3 / 20 success labels and had mean
+episode max-reward absolute error `0.1049`.
+
+Focused probes show why this is only a diagnostic:
+
+| check | max abs diff | mean abs diff |
+| --- | ---: | ---: |
+| raw vector reset state vs serial reset state | 1.1450 | - |
+| vector state after `set_state` vs serial reset state | 2.38e-7 | - |
+| observation state after `set_state` | 8.34e-7 | 2.97e-8 |
+| RGB after `set_state` | 2 pixels | 2.54e-5 |
+| DINO/state frame input after `set_state` | 0.0080 | 0.00125 |
+| first high-level goal | 0.0065 | 0.00165 |
+| first low-level action | 0.00105 | 0.00039 |
+| next simulator state after identical first action | 5.65e-4 | 1.62e-5 |
+
+The initial simulator state can be matched, but rendering/features, policy
+outputs, and batched stepping still introduce small differences that can
+compound over a closed-loop rollout. Keep `eval_reset_mode=serial_state` as an
+audit tool, not as a replacement for the single-env/serial-compatible promotion
+protocol. For RL-base selection, the conservative base remains
+`effect32_film_gsens_ft_highact_strong`.
+
 I then tested a middle high-level objective,
 `effect32_film_gsens_ft_highact_goal01`, with the same frozen low policy and
 action-through-low loss but `high_goal_mse_weight=0.1`. On the first 100-seed

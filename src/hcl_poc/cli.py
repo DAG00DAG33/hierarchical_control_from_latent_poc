@@ -2020,6 +2020,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             episodes=args.episodes,
             eval_seed_start=args.eval_seed_start,
             eval_num_envs=args.eval_num_envs,
+            eval_reset_mode=args.eval_reset_mode,
             checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
             force=args.force,
         )
@@ -3603,6 +3604,11 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "learned-interface-eval":
             learned_interface.add_argument("--checkpoint")
             learned_interface.add_argument("--eval-num-envs", type=int)
+            learned_interface.add_argument(
+                "--eval-reset-mode",
+                choices=["raw", "serial_state"],
+                default="raw",
+            )
         if command in {"learned-interface-eval", "learned-interface-record"}:
             learned_interface.add_argument(
                 "--goal-source",

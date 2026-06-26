@@ -2686,11 +2686,14 @@ def evaluate_learned_interface_hierarchy(
     episodes: int | None = None,
     eval_seed_start: int | None = None,
     eval_num_envs: int | None = None,
+    eval_reset_mode: str = "raw",
     checkpoint_path: Path | None = None,
     force: bool = False,
 ) -> Path:
     if goal_source not in {"learned", "oracle", "shuffled"}:
         raise ValueError(f"Unknown goal source: {goal_source}")
+    if eval_reset_mode not in {"raw", "serial_state"}:
+        raise ValueError(f"Unknown eval reset mode: {eval_reset_mode}")
     eval_episodes = int(
         episodes
         or (
@@ -2711,6 +2714,8 @@ def evaluate_learned_interface_hierarchy(
     )
     if eval_num_envs is not None:
         output_suffix = f"{output_suffix}_envs{eval_num_envs}"
+    if eval_reset_mode != "raw":
+        output_suffix = f"{output_suffix}_reset{eval_reset_mode}"
     output_path = _result_dir(config, candidate, seed) / f"{output_suffix}.json"
     if output_path.exists() and not force:
         console.print(f"Learned-interface evaluation exists: {output_path}")
@@ -2751,6 +2756,38 @@ def evaluate_learned_interface_hierarchy(
     if requested_num_envs <= 0:
         raise ValueError("eval_num_envs must be positive")
     max_num_envs = min(requested_num_envs, eval_episodes)
+
+    reference_states: dict[int, torch.Tensor] = {}
+    if eval_reset_mode == "serial_state":
+        for reset_seed in range(seed_start, seed_start + eval_episodes):
+            ref_env = gym.make(
+                config.get("env_id"),
+                obs_mode="rgb+state",
+                control_mode=config.get("control_mode"),
+                reward_mode="normalized_dense",
+                render_mode=None,
+                sim_backend=_rl_backend(config),
+                num_envs=1,
+                reconfiguration_freq=config.get("rl.eval_reconfiguration_freq", 1),
+            )
+            try:
+                ref_env.reset(seed=[reset_seed])
+                reference_states[int(reset_seed)] = (
+                    ref_env.unwrapped.get_state().detach().cpu()[0].clone()
+                )
+            finally:
+                ref_env.close()
+
+    def apply_reference_reset(env: Any, reset_seeds: list[int]) -> Any:
+        if eval_reset_mode != "serial_state":
+            raise RuntimeError("Reference reset requested in raw reset mode")
+        state = torch.stack(
+            [reference_states[int(value)] for value in reset_seeds], dim=0
+        )
+        state_device = env.unwrapped.get_state().device
+        env.unwrapped.set_state(state.to(state_device))
+        return env.unwrapped.get_obs()
+
     successes: list[float] = []
     final_rewards: list[float] = []
     max_rewards: list[float] = []
@@ -2815,6 +2852,8 @@ def evaluate_learned_interface_hierarchy(
         history: list[torch.Tensor] = []
         try:
             obs, _info = student.reset(seed=reset_seeds)
+            if eval_reset_mode == "serial_state":
+                obs = apply_reference_reset(student, reset_seeds)
             for _step in range(max_steps):
                 if not np.any(active):
                     break
@@ -2836,6 +2875,8 @@ def evaluate_learned_interface_hierarchy(
                     selected_goal = predicted_goal
                     if branch is not None:
                         branch_obs, _branch_info = branch.reset(seed=reset_seeds)
+                        if eval_reset_mode == "serial_state":
+                            branch_obs = apply_reference_reset(branch, reset_seeds)
                         for action_history in history:
                             branch_obs, _reward, _terminated, _truncated, _info = (
                                 branch.step(action_history)
@@ -3021,6 +3062,7 @@ def evaluate_learned_interface_hierarchy(
         "episodes": eval_episodes,
         "seed_start": seed_start,
         "eval_num_envs": max_num_envs,
+        "eval_reset_mode": eval_reset_mode,
         "success": success,
         "success_wilson_95": _wilson_interval(success, eval_episodes),
         "final_reward": float(np.mean(final_rewards)),
