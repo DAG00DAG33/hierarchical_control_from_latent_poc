@@ -211,6 +211,20 @@ performance, but the low-level action is still dominated by the current frame.
 This supports the current decision to avoid more expensive RL on candidates that
 do not pass a stronger goal-use gate.
 
+The existing diagnostic archive also shows why this gate cannot be the only
+selector. Some candidates have much stronger offline goal sensitivity than
+`effect32_film`, but they were weaker deployment bases:
+
+| candidate | goal shuffle L2 | frame shuffle L2 | max horizon sensitivity L2 |
+| --- | ---: | ---: | ---: |
+| effect32_film | 0.062 | 0.950 | 0.0368 |
+| ae256_film | 0.251 | 0.865 | 0.0937 |
+| vae512_b1e6_film | 0.278 | 0.821 | 0.1266 |
+
+So goal-use diagnostics should be treated as a hard rejection gate, not a
+promotion criterion. A candidate still needs closed-loop imitation quality and
+local-to-task transfer before PPO is worth scaling.
+
 I added candidate-level `horizon_steps` / `update_period` overrides for learned
 interfaces and trained short-horizon aliases of the effect32 FiLM interface:
 
