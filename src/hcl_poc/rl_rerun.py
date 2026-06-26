@@ -2603,6 +2603,7 @@ def train_rl_rerun_local_r3(
     goal_sensitivity_weight: float = 0.0,
     goal_sensitivity_margin: float = 0.05,
     min_base_terminal_distance: float | None = None,
+    max_base_terminal_env_reward: float | None = None,
     force: bool = False,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
@@ -2636,6 +2637,8 @@ def train_rl_rerun_local_r3(
             raise ValueError(
                 "min_base_terminal_distance requires paired or task_paired reward"
             )
+    if max_base_terminal_env_reward is not None and reward_mode != "task_paired":
+        raise ValueError("max_base_terminal_env_reward requires task_paired reward")
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
@@ -2785,6 +2788,8 @@ def train_rl_rerun_local_r3(
         recipe["dense_progress_weight"] = dense_progress_weight
     if min_base_terminal_distance is not None:
         recipe["min_base_terminal_distance"] = float(min_base_terminal_distance)
+    if max_base_terminal_env_reward is not None:
+        recipe["max_base_terminal_env_reward"] = float(max_base_terminal_env_reward)
     global_step = 0
     history: list[dict[str, Any]] = []
     if latest.exists() and not force:
@@ -2885,11 +2890,12 @@ def train_rl_rerun_local_r3(
         if reward_mode in {"paired", "task_paired"}:
             base_terminal_distance, base_terminal_env_reward = frozen_base_terminal_outcome()
             load_local_start(group, current_t)
-            if min_base_terminal_distance is None:
-                local_active = np.ones(num_envs, dtype=np.bool_)
-            else:
-                local_active = (
-                    base_terminal_distance >= min_base_terminal_distance
+            local_active = np.ones(num_envs, dtype=np.bool_)
+            if min_base_terminal_distance is not None:
+                local_active &= base_terminal_distance >= min_base_terminal_distance
+            if max_base_terminal_env_reward is not None:
+                local_active &= (
+                    base_terminal_env_reward <= max_base_terminal_env_reward
                 )
         else:
             base_terminal_distance = np.full(num_envs, np.nan, dtype=np.float32)
@@ -2939,7 +2945,10 @@ def train_rl_rerun_local_r3(
             else:
                 reward -= terminal_weight * next_distance
         active_mask = local_active.copy()
-        if min_base_terminal_distance is not None:
+        if (
+            min_base_terminal_distance is not None
+            or max_base_terminal_env_reward is not None
+        ):
             reward *= active_mask.astype(np.float32)
         current_obs = next_obs
         current_frames = next_frames
