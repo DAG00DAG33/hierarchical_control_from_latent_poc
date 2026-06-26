@@ -16238,3 +16238,135 @@ no-projection frozen success and only gives a small mixed R3 signal. This
 supports the narrower conclusion that reachability-aware goal projection is a
 useful high-level diagnostic, but high-level on-manifold projection alone does
 not solve the low-level/R3 reliability problem.
+
+## 2026-06-26 - Baseline-initialized goal-sensitivity fine-tune
+
+### Hypothesis
+
+The previous goal-sensitivity margin loss raised offline goal use but damaged
+deployment because the low-level policy was trained from scratch under the new
+objective. This test starts from the working `effect32_film` low policy and
+applies a short, low-learning-rate goal-sensitivity fine-tune. The goal is to
+preserve imitation quality while nudging the low-level toward stronger goal
+dependence.
+
+I first tried an `effect32_delta` conditioning alias, but that branch is not
+deployable for effect-code latents: evaluation requires a unary current effect,
+which is undefined for the effect representation. I removed the config entry and
+kept the direction focused on a deployable FiLM checkpoint.
+
+### Code Change
+
+`train_learned_interface_hierarchy` now supports:
+
+```text
+low_init_candidate
+```
+
+When set, the trainer loads the source checkpoint's low-level weights after
+constructing a compatible low policy. It fails clearly if frame/goal/hidden
+dimensions or conditioning mode differ.
+
+Candidate:
+
+```yaml
+effect32_film_gsens_ft:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  low_init_candidate: effect32_film
+  goal_sensitivity_weight: 0.05
+  goal_sensitivity_margin: 0.2
+  policy_lr: 1.0e-5
+  policy_epochs: 10
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_gsens_ft \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft/diagnostics.json \
+  --force
+
+for source in learned oracle; do
+  TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+    --config configs/pusht_incremental.yaml \
+    --candidate effect32_film_gsens_ft \
+    --goal-source "${source}" \
+    --episodes 200 \
+    --eval-seed-start 3500000 \
+    --force
+done
+```
+
+### Results
+
+Training validation:
+
+| metric | value |
+| --- | ---: |
+| best epoch | 10 |
+| low init candidate | `effect32_film` |
+| oracle action MAE | 0.0362 |
+| predicted action MAE | 0.0367 |
+| prediction-induced action L2 | 0.0131 |
+
+Goal-use/deployment:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | learned success | oracle success |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.0622 | 0.0368 | 0.645 | 0.645 |
+| effect32_film_gsens | 0.1149 | 0.0476 | 0.500 | 0.515 |
+| effect32_film_gsens_ft | 0.0919 | 0.0399 | 0.550 | 0.675 |
+
+After adding this candidate, the aggregate gate report is:
+
+```text
+total: 35
+offline_goal_use_pass: 5
+reject_low_goal_use: 30
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft/seed0/hierarchy_metrics.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft/diagnostics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py
+```
+
+### Interpretation
+
+Baseline initialization helps compared with training the sensitivity-regularized
+policy from scratch. It preserves offline action MAE and improves oracle-goal
+closed-loop success above the baseline on the fixed 200-episode window
+(`0.645 -> 0.675`). But it still misses the strict goal-use gate
+(`0.0919 < 0.1`) and learned-goal deployment remains well below the baseline
+(`0.645 -> 0.550`). This is a useful diagnostic: stronger low-level goal use
+can help when the goal is good, but the current learned high-level goals do not
+support the same gain. The next representation work should treat high-level
+goal quality and low-level goal sensitivity as a coupled problem, not optimize
+the low-level margin alone.

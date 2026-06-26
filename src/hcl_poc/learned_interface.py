@@ -2234,6 +2234,29 @@ def train_learned_interface_hierarchy(
         conditioning,
         residual_scale=goal_residual_scale,
     ).to(device)
+    low_init_candidate = spec.get("low_init_candidate")
+    if low_init_candidate is not None:
+        source_path = train_learned_interface_hierarchy(
+            config,
+            str(low_init_candidate),
+            seed,
+            force=False,
+        )
+        source_checkpoint = torch.load(
+            source_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        if (
+            int(source_checkpoint["frame_dim"]) != frame_dim
+            or int(source_checkpoint["goal_dim"]) != goal_dim
+            or int(source_checkpoint["hidden_dim"]) != hidden_dim
+            or str(source_checkpoint.get("conditioning", "concat")) != conditioning
+        ):
+            raise ValueError(
+                "low_init_candidate checkpoint is incompatible with this low policy"
+            )
+        low_model.load_state_dict(source_checkpoint["low_model"])
     learning_rate = float(
         spec.get("policy_lr", config.get("learned_interface.policy.lr", 3e-4))
     )
@@ -2386,6 +2409,7 @@ def train_learned_interface_hierarchy(
         "hidden_dim": hidden_dim,
         "conditioning": conditioning,
         "high_level_candidate": high_level_candidate,
+        "low_init_candidate": low_init_candidate,
         "goal_residual_scale": goal_residual_scale,
         "low_frame_dropout_prob": low_frame_dropout_prob,
         "low_frame_dropout_keep_tail_dim": low_frame_dropout_keep_tail_dim,

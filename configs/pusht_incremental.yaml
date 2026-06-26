@@ -597,6 +597,16 @@ learned_interface:
       goal_sensitivity_weight: 0.01
       goal_sensitivity_margin: 0.1
       policy_epochs: 40
+    effect32_film_gsens_ft:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32
+      conditioning: film
+      low_init_candidate: effect32_film
+      goal_sensitivity_weight: 0.05
+      goal_sensitivity_margin: 0.2
+      policy_lr: 1.0e-5
+      policy_epochs: 10
     effect32_film_frame_drop25:
       family: conditioning_ablation
       representation_candidate: effect32
