@@ -14077,3 +14077,85 @@ closed-loop branch decision with deployable online state/history features, or to
 train the residual/selector directly in that intervention distribution. The
 effect size over frozen is currently tiny (`+0.004` success over two windows),
 so this is a harm-reduction lead rather than a solved improvement.
+
+## 2026-06-26 - Oracle segment selector trace export
+
+### Hypothesis
+
+The task-reward oracle segment selector is useful only as a non-deployable
+upper-bound unless it can produce supervised labels and online features for a
+future deployable selector.
+
+### Implementation
+
+I added `oracle_segment_selector_trace` to residual closed-loop eval results
+when `--oracle-segment-selector` is enabled. The trace is column-oriented and
+records one row per high-level replan:
+
+- episode index and step index
+- oracle residual/base choice
+- frozen and tuned one-segment latent distances
+- frozen and tuned one-segment terminal normalized dense rewards
+- action-delta, saturation, goal-distance, and high-level-decision prefix
+  features available before executing the current action
+
+### Validation command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 5000000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5000000.json
+```
+
+### Results
+
+| metric | value |
+| --- | ---: |
+| episodes | 20 |
+| frozen success | 0.450 |
+| selector success | 0.450 |
+| success delta | 0.000 |
+| final reward delta | -0.0041 |
+| max reward delta | +0.0072 |
+| selector residual action rate | 0.454 |
+| selector decision residual rate | 0.444 |
+| oracle decisions | 162 |
+| trace rows | 162 |
+
+The trace contains the expected keys:
+
+```text
+action_delta_l2_prefix_max
+action_delta_l2_prefix_mean
+base_env_reward
+base_latent_distance
+choose_residual
+env_reward_delta
+episode_index
+goal_l2
+goal_l2_prefix_mean
+high_level_decisions
+latent_distance_delta
+policy_saturation_prefix_rate
+step_index
+tuned_env_reward
+tuned_latent_distance
+```
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5000000.json`
+
+### Interpretation
+
+The smoke run validates the trace plumbing: decision count and trace length
+match exactly. This does not change the policy conclusion yet, but it creates
+the dataset shape needed to train or fit a deployable branch selector against
+the task-reward oracle labels.

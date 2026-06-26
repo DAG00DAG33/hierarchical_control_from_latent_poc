@@ -4365,6 +4365,23 @@ def evaluate_rl_rerun_closed_loop_r1(
         oracle_segment_selector_decisions = 0
         oracle_segment_selector_latent_delta_l2: list[float] = []
         oracle_segment_selector_env_reward_delta: list[float] = []
+        oracle_segment_selector_trace = {
+            "episode_index": [],
+            "step_index": [],
+            "choose_residual": [],
+            "base_latent_distance": [],
+            "tuned_latent_distance": [],
+            "latent_distance_delta": [],
+            "base_env_reward": [],
+            "tuned_env_reward": [],
+            "env_reward_delta": [],
+            "action_delta_l2_prefix_mean": [],
+            "action_delta_l2_prefix_max": [],
+            "policy_saturation_prefix_rate": [],
+            "goal_l2": [],
+            "goal_l2_prefix_mean": [],
+            "high_level_decisions": [],
+        }
         high_decisions = 0
 
         for batch_start in range(0, episodes, num_envs):
@@ -4773,19 +4790,105 @@ def evaluate_rl_rerun_closed_loop_r1(
                                     branch_tuned_outcome["env_reward"][replan_indices]
                                     > branch_base_outcome["env_reward"][replan_indices]
                                 )
+                            base_latent_distance = branch_base_outcome[
+                                "latent_distance"
+                            ][replan_indices]
+                            tuned_latent_distance = branch_tuned_outcome[
+                                "latent_distance"
+                            ][replan_indices]
+                            base_env_reward = branch_base_outcome["env_reward"][
+                                replan_indices
+                            ]
+                            tuned_env_reward = branch_tuned_outcome["env_reward"][
+                                replan_indices
+                            ]
+                            latent_distance_delta = (
+                                base_latent_distance - tuned_latent_distance
+                            )
+                            env_reward_delta = tuned_env_reward - base_env_reward
                             oracle_segment_selector_latent_delta_l2.extend(
+                                latent_distance_delta.astype(float).tolist()
+                            )
+                            oracle_segment_selector_env_reward_delta.extend(
+                                env_reward_delta.astype(float).tolist()
+                            )
+                            action_denominator = np.maximum(
+                                current_action_count[replan_indices], 1.0
+                            )
+                            goal_denominator = np.maximum(
+                                current_goal_l2_count[replan_indices], 1.0
+                            )
+                            oracle_segment_selector_trace["episode_index"].extend(
+                                (batch_start + replan_indices).astype(int).tolist()
+                            )
+                            oracle_segment_selector_trace["step_index"].extend(
+                                [int(step_index)] * int(len(replan_indices))
+                            )
+                            oracle_segment_selector_trace["choose_residual"].extend(
+                                choose_residual.astype(int).tolist()
+                            )
+                            oracle_segment_selector_trace[
+                                "base_latent_distance"
+                            ].extend(base_latent_distance.astype(float).tolist())
+                            oracle_segment_selector_trace[
+                                "tuned_latent_distance"
+                            ].extend(tuned_latent_distance.astype(float).tolist())
+                            oracle_segment_selector_trace[
+                                "latent_distance_delta"
+                            ].extend(latent_distance_delta.astype(float).tolist())
+                            oracle_segment_selector_trace["base_env_reward"].extend(
+                                base_env_reward.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["tuned_env_reward"].extend(
+                                tuned_env_reward.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["env_reward_delta"].extend(
+                                env_reward_delta.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace[
+                                "action_delta_l2_prefix_mean"
+                            ].extend(
                                 (
-                                    branch_base_outcome["latent_distance"][replan_indices]
-                                    - branch_tuned_outcome["latent_distance"][replan_indices]
+                                    current_action_delta_sum[replan_indices]
+                                    / action_denominator
                                 )
                                 .astype(float)
                                 .tolist()
                             )
-                            oracle_segment_selector_env_reward_delta.extend(
+                            oracle_segment_selector_trace[
+                                "action_delta_l2_prefix_max"
+                            ].extend(
+                                current_action_delta_max[replan_indices]
+                                .astype(float)
+                                .tolist()
+                            )
+                            oracle_segment_selector_trace[
+                                "policy_saturation_prefix_rate"
+                            ].extend(
                                 (
-                                    branch_tuned_outcome["env_reward"][replan_indices]
-                                    - branch_base_outcome["env_reward"][replan_indices]
+                                    current_policy_saturation_sum[replan_indices]
+                                    / action_denominator
                                 )
+                                .astype(float)
+                                .tolist()
+                            )
+                            oracle_segment_selector_trace["goal_l2"].extend(
+                                goal_l2.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace[
+                                "goal_l2_prefix_mean"
+                            ].extend(
+                                (
+                                    current_goal_l2_sum[replan_indices]
+                                    / goal_denominator
+                                )
+                                .astype(float)
+                                .tolist()
+                            )
+                            oracle_segment_selector_trace[
+                                "high_level_decisions"
+                            ].extend(
+                                current_high_decisions[replan_indices]
                                 .astype(float)
                                 .tolist()
                             )
@@ -5207,6 +5310,11 @@ def evaluate_rl_rerun_closed_loop_r1(
             )
             if use_residual and oracle_segment_selector
             else None,
+            "oracle_segment_selector_decisions": (
+                oracle_segment_selector_decisions
+                if use_residual and oracle_segment_selector
+                else None
+            ),
             "oracle_segment_selector_distance_delta_l2_mean": (
                 float(np.mean(oracle_segment_selector_latent_delta_l2))
                 if oracle_segment_selector_latent_delta_l2
@@ -5249,6 +5357,8 @@ def evaluate_rl_rerun_closed_loop_r1(
             "episode_current_oracle_goal_l2_mean": episode_current_oracle_goal_l2_mean,
             "episode_high_level_decisions": episode_high_level_decisions,
         }
+        if use_residual and oracle_segment_selector:
+            result["oracle_segment_selector_trace"] = oracle_segment_selector_trace
         if need_oracle_branch:
             result.update(
                 {

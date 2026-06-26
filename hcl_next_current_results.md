@@ -1026,6 +1026,18 @@ simulator rollouts from the current state. Treat it as evidence that
 task-aligned closed-loop branch selection can reduce harm, not as a policy
 candidate.
 
+I added per-replan trace output for the oracle segment selector so this
+non-deployable diagnostic can generate labels for a future deployable selector.
+Each residual rollout with `--oracle-segment-selector` now records the oracle
+choice, both branch outcomes, and online prefix features available before the
+current action. A 20-episode smoke at `seed_start=5000000` produced 162 trace
+rows with matched decision count, `0.45` frozen/residual success, and selector
+residual action rate `0.454`. The trace artifact is:
+
+```text
+results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_20_seed5000000.json
+```
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:
