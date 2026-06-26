@@ -407,6 +407,25 @@ The next validation should use a fresh 500-episode learned-goal window before
 promoting it, and the next implementation step should consider joint high/low
 coupled training if the fresh window holds.
 
+The fresh `seed_start=3600000` 500-episode learned-goal window did hold:
+
+| candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.666 | 0.7524 | 0.7618 | 0.0965 |
+| effect32_film_gsens_ft_highact_strong | 0.672 | 0.7620 | 0.7674 | 0.0834 |
+
+Across the two 500-episode learned-goal windows (`3500000`, `3600000`), the
+aggregate is:
+
+| candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.658 | 0.7467 | 0.7551 | 0.0981 |
+| effect32_film_gsens_ft_highact_strong | 0.662 | 0.7538 | 0.7598 | 0.0865 |
+
+This remains a small margin, but it is now replicated and aligned with reward
+and teacher-action metrics. The next useful step is a larger final-style
+validation window or joint high/low coupled training based on this signal.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a

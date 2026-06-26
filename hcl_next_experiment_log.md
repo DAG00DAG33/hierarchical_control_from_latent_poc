@@ -16728,3 +16728,66 @@ goal-sensitive low-level deployable again. The next validation should test this
 candidate on a fresh 500-episode learned-goal window, and if it survives, the
 next implementation step should move from high-only tuning to a joint high/low
 coupled objective or closed-loop intervention training.
+
+## 2026-06-26 - Fresh-window validation for strong action-aware high-level tuning
+
+### Hypothesis
+
+The fixed `seed_start=3500000` 500-episode check for
+`effect32_film_gsens_ft_highact_strong` was only slightly above the original
+`effect32_film` baseline. A fresh 500-episode learned-goal window should tell
+whether that small gain is a one-window artifact or a reproducible lead.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3600000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 500 \
+  --eval-seed-start 3600000 \
+  --force
+```
+
+### Results
+
+Fresh 500-episode learned-goal window:
+
+| candidate | success | final reward | max reward | teacher action MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.666 | 0.7524 | 0.7618 | 0.0965 |
+| effect32_film_gsens_ft_highact_strong | 0.672 | 0.7620 | 0.7674 | 0.0834 |
+
+Two-window 1000-episode aggregate over `seed_start=3500000` and `3600000`:
+
+| candidate | success | final reward | max reward | teacher action MAE |
+| --- | ---: | ---: | ---: | ---: |
+| effect32_film | 0.658 | 0.7467 | 0.7551 | 0.0981 |
+| effect32_film_gsens_ft_highact_strong | 0.662 | 0.7538 | 0.7598 | 0.0865 |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film/seed0/learned_hierarchy_eval_500_seed3600000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_500_seed3600000.json`
+
+### Interpretation
+
+The strong action-aware high-level candidate survives the first fresh-window
+check. The margin remains small (`+0.004` success over 1000 episodes), but the
+reward and teacher-action metrics also move in the right direction. This is now
+the strongest real-compatible learned-interface lead in the current branch:
+action-aware high-level tuning can recover deployment quality for the more
+goal-sensitive low-level while slightly improving over the original baseline.
+
+This is still not a final policy claim. The next useful step is either a larger
+final-style validation window or an implementation step toward joint high/low
+coupled training, using this result as the justification.
