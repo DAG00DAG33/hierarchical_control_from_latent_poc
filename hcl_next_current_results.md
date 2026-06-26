@@ -1924,6 +1924,25 @@ online-selector branch for task-reward-debug R3; the next selector attempt needs
 training in the closed-loop intervention distribution, not another linear gate
 fit from retrospective outcome labels.
 
+I also ran the stronger long-credit task-reward diagnostic on the original
+`effect32_film` base, not only on the later high-action candidate. The run used
+R3 direct-low training for one 2048-env x 50-step update with dense task reward
+and `segment_terminates_gae=False`. On the exact serial validation window
+`4511000..4511099`, it did not improve deployment:
+
+| policy | success | final reward | max reward | raw local reduction | reach rate | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen effect32 | 0.660 | 0.6802 | 0.7611 | 0.4407 | 0.714 | 0.000000 |
+| terminal D_phi R3 | 0.650 | 0.6760 | 0.7502 | 0.4527 | 0.713 | 0.001034 |
+| task-reward roll50 R3 | 0.650 | 0.6409 | 0.7466 | 0.4347 | 0.706 | 0.001128 |
+
+Paired against frozen, task-reward roll50 had 13 improvements and 14
+regressions. Longer credit with direct dense task reward creates a larger
+task-aligned training signal, but on this base it still fails the serial
+deployment smoke and is worse than the terminal-`D_phi` R3 checkpoint on final
+reward. This closes the simple effect32 version of the long-credit
+task-reward diagnostic.
+
 ## Current Best Policies
 
 Best observed real-compatible checkpoint:

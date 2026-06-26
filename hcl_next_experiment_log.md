@@ -19089,3 +19089,98 @@ This further rejects simple offline linear segment gating for the current R3
 checkpoint. The next selector attempt needs closed-loop intervention training
 or a larger/more task-aligned residual effect, not just more exact serial
 segments for the same five-feature linear gate.
+
+## 2026-06-27 - Effect32 long-credit task-reward R3 diagnostic
+
+### Hypothesis
+
+The high-action task-reward diagnostic showed that cutting GAE at every held-goal
+segment can make dense task-reward R3 too myopic. The original `effect32_film`
+base is still the canonical real-compatible effect-latent checkpoint, so I
+tested whether a one-update task-reward R3 run with 50-step rollouts and
+`segment_terminates_gae=False` gives a stronger deployment-aligned effect there.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film \
+  --n-demo 1000 \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_taskreward_2048_roll50_102k_bc1_noseggae \
+  --steps 102400 \
+  --num-envs 2048 \
+  --rollout-steps 50 \
+  --num-minibatches 8 \
+  --update-epochs 4 \
+  --bc-weight 1 \
+  --terminal-weight 1.0 \
+  --distance-progress-weight 0.0 \
+  --task-reward-weight 1.0 \
+  --reward-mode absolute \
+  --distance-metric reachability \
+  --no-segment-terminate-gae \
+  --force
+```
+
+Exact serial deployment smoke:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 1000 \
+  --candidate effect32_film \
+  --seed 0 \
+  --run-name hcl_next_effect32_dphi_r3_taskreward_roll50_102k_bc1_noseggae_serial100_seed4511000 \
+  --episodes 100 \
+  --seed-start 4511000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_taskreward_2048_roll50_102k_bc1_noseggae/latest.pt \
+  --distance-metric reachability \
+  --force
+```
+
+### Results
+
+Training produced one update:
+
+| global step | mean reward | terminal D_phi | action saturation | BC loss |
+| ---: | ---: | ---: | ---: | ---: |
+| 102400 | 0.2450 | 0.5901 | 0.075 | 5.17e-7 |
+
+Exact serial validation on `4511000..4511099`:
+
+| policy | success | final reward | max reward | raw local reduction | reach rate | residual L2 | saturation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen | 0.660 | 0.6802 | 0.7611 | 0.4407 | 0.714 | 0.000000 | 0.0357 |
+| terminal D_phi R3 | 0.650 | 0.6760 | 0.7502 | 0.4527 | 0.713 | 0.001034 | 0.0339 |
+| task-reward roll50 R3 | 0.650 | 0.6409 | 0.7466 | 0.4347 | 0.706 | 0.001128 | 0.0394 |
+
+Paired against frozen:
+
+| policy | improvements | regressions | net |
+| --- | ---: | ---: | ---: |
+| terminal D_phi R3 | 10 | 11 | -1 |
+| task-reward roll50 R3 | 13 | 14 | -1 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_taskreward_2048_roll50_102k_bc1_noseggae/latest.pt`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_taskreward_2048_roll50_102k_bc1_noseggae/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film/seed0/hcl_next_effect32_dphi_r3_taskreward_roll50_102k_bc1_noseggae_serial100_seed4511000/serial_eval_100_seed4511000.json`
+
+### Interpretation
+
+The long-credit dense task-reward update is not a promotion candidate on
+`effect32_film`. It ties terminal-D_phi R3 on success in this smoke but has much
+worse final reward, lower raw local reduction, and lower reach rate. The paired
+win/regression balance is also neutral-negative. This rejects the simple
+effect32 version of the long-credit task-reward objective; the objective problem
+is not fixed by letting dense task reward backpropagate across five held-goal
+segments.
+
+The next objective change needs either a different target distribution or a
+larger closed-loop/intervention training setup, not another one-update dense
+task-reward variant of the same direct-low R3 recipe.
