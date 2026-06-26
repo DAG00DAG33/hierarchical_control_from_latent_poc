@@ -14672,3 +14672,65 @@ partly helps. Dense-reward correlations stay weak for both proxies. This makes
 the next objective clearer: use the proxy audit as a promotion gate, but do not
 select checkpoints from raw L2 or D_phi alone unless the audit improves on a
 larger bank.
+
+## 2026-06-26 - Full-bank task-hard proxy audit
+
+### Hypothesis
+
+The 512-bank task-hard proxy audit was positive on aggregate task reward and
+success, but the discordant-success subset was small. A full 4096-env
+same-sample audit should tell whether that signal survives a larger validation
+bank.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-local-sample-proxies \
+  --local-json results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --force
+```
+
+### Results
+
+512-bank versus 4096-bank task-hard audit:
+
+| bank | rows | final reward delta | max reward delta | success delta counts | raw delta | D_phi delta | raw success AUC | D_phi success AUC |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| n512 val | 512 | +0.0106 | +0.0130 | `-1: 8`, `0: 486`, `+1: 18` | +0.0089 | -0.0083 | 0.333 | 0.597 |
+| n4096 val | 4096 | -0.0024 | +0.0010 | `-1: 88`, `0: 3914`, `+1: 94` | -0.0071 | -0.0042 | 0.562 | 0.526 |
+
+Full-bank proxy correlations:
+
+| proxy | corr final reward delta | corr max reward delta | success-delta AUC |
+| --- | ---: | ---: | ---: |
+| raw-distance delta | 0.114 | 0.023 | 0.562 |
+| D_phi delta | 0.0489 | 0.0185 | 0.526 |
+| mean action delta | 0.0319 | 0.0303 | 0.577 |
+| initial raw distance | 0.0078 | 0.0002 | 0.483 |
+| frozen final raw distance | 0.0393 | 0.0057 | 0.543 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json`
+
+### Interpretation
+
+The 512-bank positive signal does not survive the full 4096-env same-sample
+audit. The task-hard checkpoint is slightly negative on final dense reward and
+negative under both raw L2 and D_phi local distance, with success nearly tied.
+Proxy AUCs are only weakly above chance. This is a useful correction: the
+same-sample audit should be run at the full validation-bank scale before using a
+checkpoint as evidence for a better local objective or before promoting it to
+closed-loop evaluation.

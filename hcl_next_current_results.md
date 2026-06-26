@@ -1094,6 +1094,14 @@ for both (`0.091` raw, `0.061` D_phi). This suggests the same-sample audit can
 distinguish checkpoint behavior, but neither local proxy is currently strong
 enough to trust alone.
 
+Scaling that task-hard audit to the full 4096-env validation bank changed the
+sign of the aggregate local result: final reward delta was `-0.0024`, raw
+distance delta `-0.0071`, and `D_phi` delta `-0.0042`, with success almost tied
+(`+0.0015`). Raw and `D_phi` success AUCs were only weakly above chance
+(`0.562` and `0.526`). So the 512-bank task-hard positive was not stable; the
+larger same-sample proxy audit agrees with the broader conclusion that this
+checkpoint is not a robust promotion candidate.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:
