@@ -2602,6 +2602,7 @@ def train_rl_rerun_local_r3(
     checkpoint_every_updates: int = 5,
     goal_sensitivity_weight: float = 0.0,
     goal_sensitivity_margin: float = 0.05,
+    min_base_terminal_distance: float | None = None,
     force: bool = False,
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
@@ -2628,6 +2629,13 @@ def train_rl_rerun_local_r3(
         raise ValueError(
             "reward_mode must be one of {'progress', 'paired', 'task_paired'}"
         )
+    if min_base_terminal_distance is not None:
+        if min_base_terminal_distance < 0.0:
+            raise ValueError("min_base_terminal_distance must be non-negative")
+        if reward_mode not in {"paired", "task_paired"}:
+            raise ValueError(
+                "min_base_terminal_distance requires paired or task_paired reward"
+            )
 
     artifact = ensure_dir(
         _rl_rerun_artifact_dir(config)
@@ -2775,6 +2783,8 @@ def train_rl_rerun_local_r3(
         recipe["reward_mode"] = reward_mode
     if dense_progress_weight != 1.0:
         recipe["dense_progress_weight"] = dense_progress_weight
+    if min_base_terminal_distance is not None:
+        recipe["min_base_terminal_distance"] = float(min_base_terminal_distance)
     global_step = 0
     history: list[dict[str, Any]] = []
     if latest.exists() and not force:
@@ -2796,6 +2806,7 @@ def train_rl_rerun_local_r3(
     previous_action: np.ndarray
     base_terminal_distance = np.full(1, np.nan, dtype=np.float32)
     base_terminal_env_reward = np.full(1, np.nan, dtype=np.float32)
+    local_active = np.ones(1, dtype=np.bool_)
     local_step = 0
 
     @torch.inference_mode()
@@ -2867,16 +2878,23 @@ def train_rl_rerun_local_r3(
 
     @torch.inference_mode()
     def reset_local_episode() -> None:
-        nonlocal base_terminal_distance, base_terminal_env_reward
+        nonlocal base_terminal_distance, base_terminal_env_reward, local_active
         group = h5[str(rng.choice(batch_keys))]
         current_t = int(rng.integers(0, max_steps - horizon + 1))
         load_local_start(group, current_t)
         if reward_mode in {"paired", "task_paired"}:
             base_terminal_distance, base_terminal_env_reward = frozen_base_terminal_outcome()
             load_local_start(group, current_t)
+            if min_base_terminal_distance is None:
+                local_active = np.ones(num_envs, dtype=np.bool_)
+            else:
+                local_active = (
+                    base_terminal_distance >= min_base_terminal_distance
+                )
         else:
             base_terminal_distance = np.full(num_envs, np.nan, dtype=np.float32)
             base_terminal_env_reward = np.full(num_envs, np.nan, dtype=np.float32)
+            local_active = np.ones(num_envs, dtype=np.bool_)
 
     @torch.inference_mode()
     def condition_and_bc() -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
@@ -2920,6 +2938,9 @@ def train_rl_rerun_local_r3(
                 reward += terminal_weight * (env_reward_np - base_terminal_env_reward)
             else:
                 reward -= terminal_weight * next_distance
+        active_mask = local_active.copy()
+        if min_base_terminal_distance is not None:
+            reward *= active_mask.astype(np.float32)
         current_obs = next_obs
         current_frames = next_frames
         current_z = next_z
@@ -2939,6 +2960,7 @@ def train_rl_rerun_local_r3(
             .reshape(-1)
             .astype(np.bool_),
             "env_reward": env_reward_np,
+            "active_mask": active_mask,
         }
         if segment_end:
             reset_local_episode()
@@ -2951,6 +2973,7 @@ def train_rl_rerun_local_r3(
     logprob_buf = torch.zeros((rollout_steps, num_envs), device=device)
     reward_buf = torch.zeros((rollout_steps, num_envs), device=device)
     done_buf = torch.zeros((rollout_steps, num_envs), device=device)
+    active_buf = torch.ones((rollout_steps, num_envs), device=device)
     value_buf = torch.zeros((rollout_steps, num_envs), device=device)
     next_done = torch.zeros(num_envs, device=device)
     run_start_step = int(global_step)
@@ -2972,6 +2995,7 @@ def train_rl_rerun_local_r3(
                 env_reward_values: list[float] = []
                 saturation_count = 0
                 success_count = 0
+                active_sample_count = 0
                 agent.eval()
                 for step in range(rollout_steps):
                     condition, base_action, distance = condition_and_bc()
@@ -2986,16 +3010,26 @@ def train_rl_rerun_local_r3(
                     value_buf[step] = value
                     reward, done, metrics = local_step_env(action, distance)
                     reward_buf[step] = torch.from_numpy(reward).to(device)
+                    active_mask = np.asarray(metrics["active_mask"], dtype=np.bool_)
+                    active_buf[step] = torch.from_numpy(
+                        active_mask.astype(np.float32)
+                    ).to(device)
                     next_done = torch.from_numpy(done.astype(np.float32)).to(device)
-                    distance_values.extend(distance.tolist())
-                    reward_values.extend(reward.tolist())
-                    env_reward_values.extend(metrics["env_reward"].tolist())
+                    active_sample_count += int(active_mask.sum())
+                    distance_values.extend(distance[active_mask].tolist())
+                    reward_values.extend(reward[active_mask].tolist())
+                    env_reward_values.extend(metrics["env_reward"][active_mask].tolist())
                     action_delta_values.extend(
-                        torch.linalg.vector_norm(action - base_action, dim=-1).cpu().tolist()
+                        torch.linalg.vector_norm(action - base_action, dim=-1)
+                        .cpu()
+                        .numpy()[active_mask]
+                        .tolist()
                     )
-                    success_count += int(metrics["success"].sum())
+                    success_count += int(metrics["success"][active_mask].sum())
                     if metrics["segment_end"]:
-                        terminal_distances.extend(metrics["next_distance"].tolist())
+                        terminal_distances.extend(
+                            metrics["next_distance"][active_mask].tolist()
+                        )
                         if reward_mode == "paired":
                             cached_base = metrics["base_terminal_distance"]
                             if cached_base is None:
@@ -3003,19 +3037,34 @@ def train_rl_rerun_local_r3(
                                     "Paired reward did not report base distance"
                                 )
                             improvement = cached_base - metrics["next_distance"]
-                            base_terminal_distances.extend(cached_base.tolist())
-                            paired_improvements.extend(improvement.tolist())
+                            base_terminal_distances.extend(
+                                cached_base[active_mask].tolist()
+                            )
+                            paired_improvements.extend(
+                                improvement[active_mask].tolist()
+                            )
                         if reward_mode == "task_paired":
                             cached_task_base = metrics["base_terminal_env_reward"]
                             if cached_task_base is None:
                                 raise RuntimeError(
                                     "Task-paired reward did not report base env reward"
                                 )
-                            terminal_env_rewards.extend(metrics["env_reward"].tolist())
+                            terminal_env_rewards.extend(
+                                metrics["env_reward"][active_mask].tolist()
+                            )
                             task_improvement = metrics["env_reward"] - cached_task_base
-                            base_terminal_env_rewards.extend(cached_task_base.tolist())
-                            task_paired_improvements.extend(task_improvement.tolist())
-                    saturation_count += int(torch.any(raw_action != action, dim=-1).sum().cpu())
+                            base_terminal_env_rewards.extend(
+                                cached_task_base[active_mask].tolist()
+                            )
+                            task_paired_improvements.extend(
+                                task_improvement[active_mask].tolist()
+                            )
+                    active_tensor = torch.from_numpy(active_mask).to(device)
+                    saturation_count += int(
+                        torch.any(raw_action != action, dim=-1)[active_tensor]
+                        .sum()
+                        .cpu()
+                    )
                     global_step += num_envs
                     progress.update(min(num_envs, total_steps - progress.n))
                     if global_step >= total_steps and step == rollout_steps - 1:
@@ -3049,7 +3098,12 @@ def train_rl_rerun_local_r3(
                 flat_advantages = advantages.flatten()
                 flat_returns = returns.flatten()
                 flat_values = value_buf.flatten()
-                indices = np.arange(batch_size)
+                flat_active = active_buf.flatten().bool()
+                indices = np.flatnonzero(flat_active.cpu().numpy())
+                if len(indices) == 0:
+                    raise RuntimeError(
+                        "No active hard-start samples; lower min_base_terminal_distance"
+                    )
                 clipfracs: list[float] = []
                 policy_losses: list[float] = []
                 value_losses: list[float] = []
@@ -3061,8 +3115,10 @@ def train_rl_rerun_local_r3(
                 agent.train()
                 for _epoch in range(update_epochs):
                     np.random.shuffle(indices)
-                    for start in range(0, batch_size, minibatch_size):
+                    for start in range(0, len(indices), minibatch_size):
                         mb = indices[start : start + minibatch_size]
+                        if len(mb) < 2:
+                            continue
                         _new_action, new_logprob, entropy, new_value = agent.get_action_and_value(
                             flat_condition[mb],
                             flat_raw_action[mb],
@@ -3140,15 +3196,22 @@ def train_rl_rerun_local_r3(
                         value_losses.append(float(value_loss.detach().cpu()))
                         entropies.append(float(entropy_loss.detach().cpu()))
                         bc_losses.append(float(bc_loss.detach().cpu()))
+                if not policy_losses:
+                    raise RuntimeError(
+                        "No PPO minibatches were produced from active hard-start samples"
+                    )
 
+                active_returns = flat_returns[flat_active]
+                active_values = flat_values[flat_active]
                 explained_variance = float(
                     1.0
-                    - torch.var(flat_returns - flat_values).item()
-                    / max(torch.var(flat_returns).item(), 1e-8)
+                    - torch.var(active_returns - active_values).item()
+                    / max(torch.var(active_returns).item(), 1e-8)
                 )
                 update_metrics = {
                     "global_step": int(global_step),
-                    "mean_return": float(torch.mean(returns).detach().cpu()),
+                    "active_fraction": float(active_sample_count / batch_size),
+                    "mean_return": float(torch.mean(active_returns).detach().cpu()),
                     "mean_reward": float(np.mean(reward_values)),
                     "mean_env_reward": float(np.mean(env_reward_values)),
                     "mean_distance": float(np.mean(distance_values)),
@@ -3185,8 +3248,12 @@ def train_rl_rerun_local_r3(
                     if paired_improvements
                     else None,
                     "mean_action_delta_l2": float(np.mean(action_delta_values)),
-                    "action_saturation_rate": float(saturation_count / batch_size),
-                    "task_success_diagnostic_rate": float(success_count / batch_size),
+                    "action_saturation_rate": float(
+                        saturation_count / max(active_sample_count, 1)
+                    ),
+                    "task_success_diagnostic_rate": float(
+                        success_count / max(active_sample_count, 1)
+                    ),
                     "policy_loss": float(np.mean(policy_losses)),
                     "value_loss": float(np.mean(value_losses)),
                     "bc_loss": float(np.mean(bc_losses)),
