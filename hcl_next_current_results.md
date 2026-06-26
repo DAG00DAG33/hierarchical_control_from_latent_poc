@@ -254,14 +254,15 @@ offline_goal_use_pass if goal_shuffle_action_change_l2 >= 0.1
 or max_goal_sensitivity_l2 >= 0.1
 ```
 
-On the current archive plus the new dropout checks and the baseline-initialized
-goal-sensitivity fine-tune, five of thirty-five
+On the current archive plus the new dropout checks, the baseline-initialized
+goal-sensitivity fine-tune, and the action-aware high-level fine-tune, five of
+thirty-six
 diagnostics pass:
 
 | status | candidates |
 | --- | --- |
 | offline goal-use pass | `effect32_film_frame_drop25`, `effect32_film_gsens`, `effect32_film_scene_drop25`, `ae256_film`, `vae512_b1e6_film` |
-| reject low goal-use | all other archived hierarchy candidates checked so far, including `effect32_film_gsens_ft` |
+| reject low goal-use | all other archived hierarchy candidates checked so far, including `effect32_film_gsens_ft` and `effect32_film_gsens_ft_highact` |
 
 This formalizes the current decision rule. Effect32 remains the best observed
 deployment base, but it fails the strict offline goal-use gate; AE/VAE FiLM
@@ -370,6 +371,23 @@ flipped across the two seed windows and the projected policy still did not beat
 the original no-projection `effect32_film` smoke (`0.700` success). So
 reachability-aware goal repair and low-level sensitivity can interact, but this
 combination is still a diagnostic rather than a promotable hierarchy.
+
+I then added an action-aware high-level fine-tune. It initializes the high model
+from `effect32`, freezes the `effect32_film_gsens_ft` low model, and
+backpropagates demonstration action MSE through that frozen low model into the
+predicted high-level goal while retaining the normal future-goal MSE. This
+recovered part of the learned-goal deployment loss:
+
+| candidate | learned success | learned max reward | oracle success | oracle max reward | oracle goal L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 0.645 | 0.742 | 0.645 | 0.746 | 3.391 |
+| effect32_film_gsens_ft | 0.550 | 0.679 | 0.675 | 0.773 | 3.292 |
+| effect32_film_gsens_ft_highact | 0.595 | 0.713 | 0.675 | 0.773 | 3.264 |
+
+This confirms that high-level action-aware tuning is directionally useful, but
+the mild high-only version is still below the original learned-goal baseline.
+It should be treated as evidence for coupled high/low training, not as a
+promotion candidate.
 
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a

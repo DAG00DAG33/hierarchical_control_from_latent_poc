@@ -16448,3 +16448,145 @@ no-projection `effect32_film` smoke on the same prefixes (`0.700` success).
 This supports the same broader conclusion: reachability-aware high-level goal
 repair and low-level goal sensitivity can interact, but the current pieces do
 not yet combine into a robust learned-goal hierarchy.
+
+## 2026-06-26 - Action-aware high-level fine-tune
+
+### Hypothesis
+
+`effect32_film_gsens_ft` improved oracle-goal deployment but hurt learned-goal
+deployment. This suggests that the low-level change can be useful when goals
+are good, but the reused high-level goal predictor is not aligned with the more
+goal-sensitive low-level. A direct coupled test is to freeze the
+`effect32_film_gsens_ft` low-level and fine-tune only the high-level so that its
+predicted goals make the frozen low-level match demonstration actions.
+
+### Code Change
+
+`train_learned_interface_hierarchy` now supports:
+
+```text
+high_init_candidate
+freeze_low_policy
+high_goal_mse_weight
+high_action_loss_weight
+```
+
+The trainer samples high-level replans plus low-level offsets from the same
+held-goal segment. When `high_action_loss_weight > 0`, it substitutes the
+predicted high-level goal into the low-level condition and backpropagates action
+MSE through the frozen low-level into the high-level model. The normal high
+goal-MSE target remains active.
+
+Candidate:
+
+```yaml
+effect32_film_gsens_ft_highact:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32_film_gsens_ft_highact
+  conditioning: film
+  high_init_candidate: effect32
+  low_init_candidate: effect32_film_gsens_ft
+  freeze_low_policy: true
+  high_action_loss_weight: 100.0
+  policy_lr: 1.0e-5
+  policy_epochs: 10
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-run \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact \
+  --seed 0 \
+  --force
+
+for source in learned oracle; do
+  TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+    --config configs/pusht_incremental.yaml \
+    --candidate effect32_film_gsens_ft_highact \
+    --goal-source "${source}" \
+    --episodes 200 \
+    --eval-seed-start 3500000 \
+    --force
+done
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_gsens_ft_highact \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft_highact/diagnostics.json \
+  --force
+```
+
+### Results
+
+Training validation:
+
+| metric | value |
+| --- | ---: |
+| best epoch | 7 |
+| high init candidate | `effect32` |
+| low init candidate | `effect32_film_gsens_ft` |
+| frozen low policy | true |
+| high action loss weight | 100 |
+| normalized goal L2 | 2.5467 |
+| oracle action MAE | 0.0362 |
+| predicted action MAE | 0.0365 |
+| prediction-induced action L2 | 0.0128 |
+
+Fixed 200-episode deployment check:
+
+| candidate | learned success | learned max reward | oracle success | oracle max reward | oracle goal L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 0.645 | 0.7420 | 0.645 | 0.7464 | 3.391 |
+| effect32_film_gsens_ft | 0.550 | 0.6793 | 0.675 | 0.7733 | 3.292 |
+| effect32_film_gsens_ft_highact | 0.595 | 0.7130 | 0.675 | 0.7733 | 3.264 |
+
+Goal-use gate:
+
+| candidate | goal shuffle L2 | max horizon sensitivity L2 | gate status |
+| --- | ---: | ---: | --- |
+| effect32_film_gsens_ft_highact | 0.0919 | 0.0399 | reject low goal-use |
+
+After adding this candidate, the aggregate gate report is:
+
+```text
+total: 36
+offline_goal_use_pass: 5
+reject_low_goal_use: 31
+```
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft_highact/diagnostics.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Verification
+
+```bash
+uv run python -m py_compile src/hcl_poc/learned_interface.py
+```
+
+### Interpretation
+
+The coupled high-level action loss works mechanically and moves in the intended
+direction. It reduces validation goal error, improves learned-goal success over
+the low-level-only fine-tune (`0.550 -> 0.595`), and preserves the oracle-goal
+gain (`0.675`). But it still remains below the original `effect32_film`
+learned-goal baseline (`0.645`). This narrows the next step: high-level
+action-aware tuning is useful, but this mild 10-epoch high-only version is not
+strong enough. Future coupled work should either tune high and low jointly in a
+closed-loop/intervention distribution or use a stronger high-level objective
+than demonstration action MSE through a frozen low-level.

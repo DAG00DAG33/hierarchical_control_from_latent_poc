@@ -1828,6 +1828,101 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
         )
 
 
+class _HighActionDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        episodes: list[dict[str, np.ndarray]],
+        frame_norm: Standardizer,
+        goal_norm: Standardizer,
+        action_norm: Standardizer,
+        horizon_steps: int,
+        conditioning: str,
+        length: int,
+    ) -> None:
+        if conditioning not in {"concat", "delta", "relation", "film", "goal_residual"}:
+            raise ValueError(f"Unknown goal conditioning: {conditioning}")
+        self.episodes = [
+            episode
+            for episode in episodes
+            if len(episode["actions"]) > horizon_steps
+        ]
+        self.frame_norm = frame_norm
+        self.goal_norm = goal_norm
+        self.action_norm = action_norm
+        self.horizon_steps = horizon_steps
+        self.conditioning = conditioning
+        self.length = length
+        self.zero_action = action_norm.transform(
+            np.zeros((1, 3), dtype=np.float32)
+        )[0]
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(
+        self,
+        _index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        episode = self.episodes[np.random.randint(0, len(self.episodes))]
+        base = int(
+            np.random.randint(0, len(episode["actions"]) - self.horizon_steps)
+        )
+        offset = int(np.random.randint(0, self.horizon_steps))
+        current = base + offset
+        high_previous = (
+            self.action_norm.transform(
+                episode["actions"][base - 1 : base]
+            )[0]
+            if base > 0
+            else self.zero_action
+        )
+        previous = (
+            self.action_norm.transform(
+                episode["actions"][current - 1 : current]
+            )[0]
+            if current > 0
+            else self.zero_action
+        )
+        high_condition = np.concatenate(
+            [
+                self.frame_norm.transform(episode["frames"][base : base + 1])[0],
+                high_previous,
+            ]
+        )
+        target_goal = self.goal_norm.transform(
+            episode["goals"][
+                base + self.horizon_steps : base + self.horizon_steps + 1
+            ]
+        )[0]
+        frame = self.frame_norm.transform(
+            episode["frames"][current : current + 1]
+        )
+        current_goal = self.goal_norm.transform(
+            episode["goals"][current : current + 1]
+        )
+        remaining = np.asarray(
+            [[(self.horizon_steps - offset) / self.horizon_steps]],
+            dtype=np.float32,
+        )
+        low_condition = _low_condition_array(
+            frame,
+            current_goal,
+            target_goal[None],
+            previous[None],
+            remaining,
+            self.conditioning,
+        )[0]
+        target_action = self.action_norm.transform(
+            episode["actions"][current : current + 1]
+        )[0]
+        return (
+            torch.from_numpy(high_condition.astype(np.float32)),
+            torch.from_numpy(target_goal.astype(np.float32)),
+            torch.from_numpy(low_condition.astype(np.float32)),
+            torch.from_numpy(target_action.astype(np.float32)),
+        )
+
+
 def _low_condition_array(
     frames: np.ndarray,
     current_goals: np.ndarray,
@@ -2140,15 +2235,14 @@ def train_learned_interface_hierarchy(
             config.get("learned_interface.policy.epochs", 60),
         )
     )
-    high_dataset = _HeldGoalDataset(
+    high_dataset = _HighActionDataset(
         train,
         frame_norm,
         goal_norm,
         action_norm,
         horizon_steps,
-        "high",
-        batch_size * batches_per_epoch,
         conditioning,
+        batch_size * batches_per_epoch,
     )
     low_dataset = _HeldGoalDataset(
         train,
@@ -2201,6 +2295,32 @@ def train_learned_interface_hierarchy(
             )
         high_model.load_state_dict(source_checkpoint["high_model"])
         high_model.requires_grad_(False)
+    high_init_candidate = spec.get("high_init_candidate")
+    if high_init_candidate is not None:
+        if reused_high_level:
+            raise ValueError(
+                "high_init_candidate cannot be combined with a reused high level"
+            )
+        source_path = train_learned_interface_hierarchy(
+            config,
+            str(high_init_candidate),
+            seed,
+            force=False,
+        )
+        source_checkpoint = torch.load(
+            source_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        if (
+            int(source_checkpoint["frame_dim"]) != frame_dim
+            or int(source_checkpoint["goal_dim"]) != goal_dim
+            or int(source_checkpoint["hidden_dim"]) != hidden_dim
+        ):
+            raise ValueError(
+                "high_init_candidate checkpoint is incompatible with this high policy"
+            )
+        high_model.load_state_dict(source_checkpoint["high_model"])
     goal_residual_scale = float(spec.get("goal_residual_scale", 1.0))
     low_frame_dropout_prob = float(spec.get("low_frame_dropout_prob", 0.0))
     if low_frame_dropout_prob < 0.0 or low_frame_dropout_prob > 1.0:
@@ -2257,9 +2377,22 @@ def train_learned_interface_hierarchy(
                 "low_init_candidate checkpoint is incompatible with this low policy"
             )
         low_model.load_state_dict(source_checkpoint["low_model"])
+    freeze_low_policy = bool(spec.get("freeze_low_policy", False))
+    if freeze_low_policy:
+        low_model.requires_grad_(False)
     learning_rate = float(
         spec.get("policy_lr", config.get("learned_interface.policy.lr", 3e-4))
     )
+    high_goal_mse_weight = float(spec.get("high_goal_mse_weight", 1.0))
+    if high_goal_mse_weight < 0.0:
+        raise ValueError("high_goal_mse_weight must be non-negative")
+    high_action_loss_weight = float(spec.get("high_action_loss_weight", 0.0))
+    if high_action_loss_weight < 0.0:
+        raise ValueError("high_action_loss_weight must be non-negative")
+    if high_action_loss_weight > 0.0 and not freeze_low_policy:
+        raise ValueError("high_action_loss_weight requires freeze_low_policy")
+    if high_action_loss_weight > 0.0 and conditioning == "relation":
+        raise ValueError("high_action_loss_weight does not support relation conditioning")
     goal_sensitivity_weight = float(spec.get("goal_sensitivity_weight", 0.0))
     goal_sensitivity_margin = float(spec.get("goal_sensitivity_margin", 0.0))
     if goal_sensitivity_weight < 0.0:
@@ -2295,7 +2428,11 @@ def train_learned_interface_hierarchy(
         if reused_high_level
         else torch.optim.AdamW(high_model.parameters(), lr=learning_rate)
     )
-    low_optimizer = torch.optim.AdamW(low_model.parameters(), lr=learning_rate)
+    low_optimizer = (
+        None
+        if freeze_low_policy
+        else torch.optim.AdamW(low_model.parameters(), lr=learning_rate)
+    )
     validation_samples = int(
         config.get("learned_interface.policy.validation_samples", 5000)
     )
@@ -2315,13 +2452,26 @@ def train_learned_interface_hierarchy(
         low_sum = 0.0
         sensitivity_sum = 0.0
         frame_dropout_aux_sum = 0.0
-        for (high_x, high_y), (low_x, low_y) in zip(
+        for (high_x, high_y, high_low_x, high_action_y), (low_x, low_y) in zip(
             high_loader, low_loader, strict=True
         ):
             if high_optimizer is not None:
                 high_x = high_x.to(device, non_blocking=True)
                 high_y = high_y.to(device, non_blocking=True)
-                high_loss = torch.mean((high_model(high_x) - high_y) ** 2)
+                predicted_goal = high_model(high_x)
+                high_goal_loss = torch.mean((predicted_goal - high_y) ** 2)
+                high_loss = high_goal_mse_weight * high_goal_loss
+                if high_action_loss_weight > 0.0:
+                    high_low_x = high_low_x.to(device, non_blocking=True)
+                    high_action_y = high_action_y.to(device, non_blocking=True)
+                    predicted_low_x = high_low_x.clone()
+                    predicted_low_x[:, goal_slice] = predicted_goal
+                    high_action_loss = torch.mean(
+                        (low_model(predicted_low_x) - high_action_y) ** 2
+                    )
+                    high_loss = high_loss + (
+                        high_action_loss_weight * high_action_loss
+                    )
                 high_optimizer.zero_grad(set_to_none=True)
                 high_loss.backward()
                 high_optimizer.step()
@@ -2333,34 +2483,35 @@ def train_learned_interface_hierarchy(
             low_bc_loss = torch.mean((low_prediction - low_y) ** 2)
             sensitivity_loss = low_bc_loss.new_tensor(0.0)
             frame_dropout_aux_loss = low_bc_loss.new_tensor(0.0)
-            low_loss = low_bc_loss
-            if (
-                low_frame_dropout_aux_weight > 0.0
-                and low_frame_dropout_aux_prob > 0.0
-            ):
-                aux_x = frame_dropout_aux_input(low_x)
-                frame_dropout_aux_loss = torch.mean(
-                    (low_model(aux_x) - low_y) ** 2
-                )
-                low_loss = low_loss + (
-                    low_frame_dropout_aux_weight * frame_dropout_aux_loss
-                )
-            if goal_sensitivity_weight > 0.0 and len(low_x) > 1:
-                shuffled_x = low_x.clone()
-                order = torch.randperm(len(shuffled_x), device=shuffled_x.device)
-                shuffled_x[:, goal_slice] = shuffled_x[order, goal_slice]
-                shuffled_prediction = low_model(shuffled_x)
-                action_delta = torch.linalg.norm(
-                    shuffled_prediction - low_prediction.detach(),
-                    dim=-1,
-                )
-                sensitivity_loss = torch.mean(
-                    torch.relu(goal_sensitivity_margin - action_delta) ** 2
-                )
-                low_loss = low_loss + goal_sensitivity_weight * sensitivity_loss
-            low_optimizer.zero_grad(set_to_none=True)
-            low_loss.backward()
-            low_optimizer.step()
+            if low_optimizer is not None:
+                low_loss = low_bc_loss
+                if (
+                    low_frame_dropout_aux_weight > 0.0
+                    and low_frame_dropout_aux_prob > 0.0
+                ):
+                    aux_x = frame_dropout_aux_input(low_x)
+                    frame_dropout_aux_loss = torch.mean(
+                        (low_model(aux_x) - low_y) ** 2
+                    )
+                    low_loss = low_loss + (
+                        low_frame_dropout_aux_weight * frame_dropout_aux_loss
+                    )
+                if goal_sensitivity_weight > 0.0 and len(low_x) > 1:
+                    shuffled_x = low_x.clone()
+                    order = torch.randperm(len(shuffled_x), device=shuffled_x.device)
+                    shuffled_x[:, goal_slice] = shuffled_x[order, goal_slice]
+                    shuffled_prediction = low_model(shuffled_x)
+                    action_delta = torch.linalg.norm(
+                        shuffled_prediction - low_prediction.detach(),
+                        dim=-1,
+                    )
+                    sensitivity_loss = torch.mean(
+                        torch.relu(goal_sensitivity_margin - action_delta) ** 2
+                    )
+                    low_loss = low_loss + goal_sensitivity_weight * sensitivity_loss
+                low_optimizer.zero_grad(set_to_none=True)
+                low_loss.backward()
+                low_optimizer.step()
             low_sum += float(low_bc_loss.detach().cpu())
             sensitivity_sum += float(sensitivity_loss.detach().cpu())
             frame_dropout_aux_sum += float(frame_dropout_aux_loss.detach().cpu())
@@ -2409,7 +2560,11 @@ def train_learned_interface_hierarchy(
         "hidden_dim": hidden_dim,
         "conditioning": conditioning,
         "high_level_candidate": high_level_candidate,
+        "high_init_candidate": high_init_candidate,
         "low_init_candidate": low_init_candidate,
+        "freeze_low_policy": freeze_low_policy,
+        "high_goal_mse_weight": high_goal_mse_weight,
+        "high_action_loss_weight": high_action_loss_weight,
         "goal_residual_scale": goal_residual_scale,
         "low_frame_dropout_prob": low_frame_dropout_prob,
         "low_frame_dropout_keep_tail_dim": low_frame_dropout_keep_tail_dim,
