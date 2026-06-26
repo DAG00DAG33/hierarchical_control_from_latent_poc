@@ -2684,6 +2684,7 @@ def evaluate_learned_interface_hierarchy(
     seed: int = 0,
     episodes: int | None = None,
     eval_seed_start: int | None = None,
+    eval_num_envs: int | None = None,
     checkpoint_path: Path | None = None,
     force: bool = False,
 ) -> Path:
@@ -2707,6 +2708,8 @@ def evaluate_learned_interface_hierarchy(
         if eval_seed_start is None
         else f"{goal_source}_hierarchy_eval_{eval_episodes}_seed{seed_start}"
     )
+    if eval_num_envs is not None:
+        output_suffix = f"{output_suffix}_envs{eval_num_envs}"
     output_path = _result_dir(config, candidate, seed) / f"{output_suffix}.json"
     if output_path.exists() and not force:
         console.print(f"Learned-interface evaluation exists: {output_path}")
@@ -2739,10 +2742,14 @@ def evaluate_learned_interface_hierarchy(
     update_period = int(checkpoint["update_period"])
     conditioning = str(checkpoint.get("conditioning", "concat"))
     max_steps = int(config.get("env_max_episode_steps", 100))
-    max_num_envs = min(
-        int(config.get("learned_interface.evaluation.num_envs", 16)),
-        eval_episodes,
+    requested_num_envs = int(
+        eval_num_envs
+        if eval_num_envs is not None
+        else config.get("learned_interface.evaluation.num_envs", 16)
     )
+    if requested_num_envs <= 0:
+        raise ValueError("eval_num_envs must be positive")
+    max_num_envs = min(requested_num_envs, eval_episodes)
     successes: list[float] = []
     final_rewards: list[float] = []
     max_rewards: list[float] = []
@@ -3012,6 +3019,7 @@ def evaluate_learned_interface_hierarchy(
         "checkpoint_candidate": checkpoint.get("candidate"),
         "episodes": eval_episodes,
         "seed_start": seed_start,
+        "eval_num_envs": max_num_envs,
         "success": success,
         "success_wilson_95": _wilson_interval(success, eval_episodes),
         "final_reward": float(np.mean(final_rewards)),

@@ -2017,6 +2017,7 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             seed=args.seed,
             episodes=args.episodes,
             eval_seed_start=args.eval_seed_start,
+            eval_num_envs=args.eval_num_envs,
             checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
             force=args.force,
         )
@@ -3583,6 +3584,7 @@ def build_parser() -> argparse.ArgumentParser:
             learned_interface.add_argument("--episodes", type=int)
         if command == "learned-interface-eval":
             learned_interface.add_argument("--checkpoint")
+            learned_interface.add_argument("--eval-num-envs", type=int)
         if command in {"learned-interface-eval", "learned-interface-record"}:
             learned_interface.add_argument(
                 "--goal-source",

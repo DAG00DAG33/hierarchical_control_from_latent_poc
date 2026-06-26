@@ -17566,3 +17566,89 @@ Do not immediately replace `highact_strong` with action-only for R3 experiments.
 The next useful step is to inspect the evaluator/protocol difference, or keep
 `highact_strong` as the conservative local-RL base while treating action-only as
 the best standard learned-interface deployment candidate.
+
+## 2026-06-26 - Learned-interface evaluator num-env audit
+
+### Hypothesis
+
+The disagreement between standard learned-interface evaluation and
+`low-level-rl eval-serial` may come from evaluator protocol rather than from the
+candidate itself. The learned-interface evaluator defaults to vectorized raw
+ManiSkill envs (`num_envs=16`), while `low-level-rl eval-serial` uses one env
+through `_visual_env`, which wraps ManiSkill with `ManiSkillVectorEnv`.
+
+### Implementation
+
+Added an opt-in `--eval-num-envs` argument to `learned-interface-eval`. When
+provided, it overrides `learned_interface.evaluation.num_envs` and appends
+`_envs{N}` to the output filename, preserving existing result files.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 100 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 100 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --goal-source learned \
+  --episodes 100 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_actiononly \
+  --goal-source learned \
+  --episodes 100 \
+  --eval-seed-start 3500000 \
+  --force
+```
+
+### Results
+
+Same first 100-seed bank, `seed_start=3500000`:
+
+| evaluator | num envs | candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| learned-interface | 16 | highact_strong | 0.690 | 0.7661 | 0.7734 | 0.1001 |
+| learned-interface | 16 | actiononly | 0.710 | 0.7819 | 0.7921 | 0.0931 |
+| learned-interface | 1 | highact_strong | 0.670 | 0.7492 | 0.7566 | 0.0937 |
+| learned-interface | 1 | actiononly | 0.660 | 0.7497 | 0.7562 | 0.0893 |
+| low-level-rl serial | 1 | highact_strong | 0.670 | 0.7092 | 0.7566 | - |
+| low-level-rl serial | 1 | actiononly | 0.660 | 0.6161 | 0.7562 | - |
+
+Artifacts:
+
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_strong/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_actiononly/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json`
+
+### Interpretation
+
+The `num_envs=1` learned-interface evaluator reproduces the serial success
+ordering and exact max rewards. The default vectorized learned-interface
+evaluator does not. This means the action-only lead is currently a vectorized
+evaluator lead, not a robust single-env/serial deployment lead.
+
+For follow-up RL, keep `highact_strong` as the conservative base because the
+R3/local-RL path uses serial evaluation. Future learned-interface validation
+tables should report `eval_num_envs`, and any promoted RL base should pass a
+single-env or serial check.

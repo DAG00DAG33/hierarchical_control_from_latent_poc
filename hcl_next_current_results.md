@@ -561,6 +561,25 @@ identify the protocol difference that makes action-only worse in serial mode or
 use the more conservative `highact_strong` base for local-RL experiments until
 that mismatch is understood.
 
+I added an `--eval-num-envs` override to `learned-interface-eval` and reran the
+first 100-seed window with the raw learned-interface evaluator forced to
+`num_envs=1`. This reproduced the serial success ordering exactly:
+
+| evaluator | num envs | candidate | success | final reward | max reward |
+| --- | ---: | --- | ---: | ---: | ---: |
+| learned-interface | 16 | highact_strong | 0.690 | 0.7661 | 0.7734 |
+| learned-interface | 16 | actiononly | 0.710 | 0.7819 | 0.7921 |
+| learned-interface | 1 | highact_strong | 0.670 | 0.7492 | 0.7566 |
+| learned-interface | 1 | actiononly | 0.660 | 0.7497 | 0.7562 |
+| low-level-rl serial | 1 | highact_strong | 0.670 | 0.7092 | 0.7566 |
+| low-level-rl serial | 1 | actiononly | 0.660 | 0.6161 | 0.7562 |
+
+So the action-only lead is tied to the default vectorized learned-interface
+protocol, not to single-environment/serial deployment. Until this is understood,
+the conservative RL base remains `effect32_film_gsens_ft_highact_strong`, while
+`actiononly` is only a vectorized learned-interface lead. Future promotion
+checks should report `eval_num_envs` explicitly.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
