@@ -12428,3 +12428,108 @@ is much worse despite frequent replanning and has worse predicted-action
 validation. For the current effect32 FiLM setup, the next useful lever is not a
 plain shorter horizon; it should be a changed objective or a policy/selector
 trained in the closed-loop intervention distribution.
+
+## 2026-06-26: Hard-start task-paired local R3
+
+### Hypothesis
+
+The uniform terminal task-paired R3 smoke produced a tiny positive terminal
+reward delta but did not improve matched local validation. This run tests a
+more targeted objective regime: train only on local starts where the frozen
+same-state branch ends far from the held goal.
+
+### Implementation
+
+Added `--min-base-terminal-distance` to `rl-rerun train-local-r3`.
+
+For `reward-mode paired` and `reward-mode task_paired`, the trainer already
+computes the cached frozen terminal branch. When the threshold is provided, it
+marks only environments with:
+
+```text
+base_terminal_distance >= min_base_terminal_distance
+```
+
+as active. Inactive samples stay in the vectorized rollout for simulator
+synchronization, but their rewards are zeroed and they are excluded from PPO
+minibatches and reported rollout metrics. Each history row records
+`active_fraction`.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5 \
+  --steps 40960 \
+  --bc-weight 1 \
+  --terminal-weight 1 \
+  --dense-progress-weight 0 \
+  --task-reward-weight 0 \
+  --reward-mode task_paired \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --min-base-terminal-distance 0.6 \
+  --force
+```
+
+Matched local validation:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
+```
+
+### Results
+
+Training metrics after one update:
+
+| metric | value |
+| --- | ---: |
+| active fraction | 0.3889 |
+| mean task-paired improvement | 0.00469 |
+| fraction task-paired improved | 0.451 |
+| terminal env reward | 0.4122 |
+| frozen terminal env reward | 0.4075 |
+| terminal latent distance | 0.8193 |
+| action delta L2 | 0.01087 |
+| task success diagnostic rate | 0.1696 |
+
+Matched local validation on the same 4096-row validation manifest:
+
+| policy | initial distance | final distance | reduction | action delta L2 | task success-once |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 previous baseline | 1.0671 | 0.6020 | 0.4651 | - | - |
+| uniform task-paired | 1.0671 | 0.6036 | 0.4635 | 0.00042 | 0.3306 |
+| hard-start task-paired | 1.0671 | 0.6093 | 0.4578 | 0.00054 | 0.3291 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json`
+
+### Interpretation
+
+Hard-start masking improved the in-training terminal reward delta compared with
+the uniform task-paired smoke, but it did not transfer to matched local
+validation. The hard-start checkpoint is worse than frozen and worse than the
+uniform task-paired checkpoint on latent reduction, with only a tiny action
+change. It does not justify closed-loop deployment.
+
+This closes the simple "same objective but only hard local starts" variant for
+effect32 local R3. The next objective-side experiment should use a more
+deployment-aligned target than one-segment terminal dense reward, or train the
+intervention policy/selector directly from closed-loop outcomes.

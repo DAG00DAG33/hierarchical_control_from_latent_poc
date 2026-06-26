@@ -863,6 +863,26 @@ a promotion candidate. It is useful mostly as infrastructure and evidence that
 one-segment terminal dense reward alone is still too weak/noisy under the
 current local-R3 update.
 
+I then added `--min-base-terminal-distance` to `rl-rerun train-local-r3` so
+paired/task-paired updates can train only on local starts where the frozen
+branch ends far from the held goal. A one-update hard-start task-paired run
+with `min_base_terminal_distance=0.6` selected `38.9%` of samples and improved
+the in-training terminal reward delta versus the uniform task-paired smoke:
+
+| metric | uniform task-paired | hard-start task-paired |
+| --- | ---: | ---: |
+| train task-paired improvement | 0.00150 | 0.00469 |
+| train fraction task-improved | 0.398 | 0.451 |
+| matched local final distance | 0.6036 | 0.6093 |
+| matched local reduction | 0.4635 | 0.4578 |
+| matched local action delta L2 | 0.00042 | 0.00054 |
+| matched local task success-once fraction | 0.331 | 0.329 |
+
+This is a useful negative target-regime check: hard-start masking makes the
+training signal less noisy, but it still does not transfer to the matched local
+validation bank and remains below frozen (`0.6020` final distance,
+`0.4651` reduction). I skipped closed-loop deployment for this checkpoint.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
@@ -941,7 +961,9 @@ The next useful directions are:
    weakly positive and the best local candidate failed a 500-episode closed-loop
    transfer check. A direct task-reward debug upper bound also failed transfer,
    and a terminal task-paired reward mode produced only tiny local action
-   changes with a negative 8-episode deployability smoke.
+   changes with a negative 8-episode deployability smoke. Hard-start masking for
+   task-paired local R3 increased the training reward delta but made matched
+   local validation worse than both frozen and the uniform task-paired smoke.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.
@@ -1017,6 +1039,9 @@ results/incremental/learned_interface/effect32_film_h5/seed0/learned_hierarchy_e
 results/incremental/learned_interface/effect32_film_h5/seed0/oracle_hierarchy_eval_200_seed3500000.json
 artifacts/incremental/learned_interface/effect32_film_h2/seed0/hierarchy.pt
 results/incremental/learned_interface/effect32_film_h2/seed0/learned_hierarchy_eval_200_seed3500000.json
+artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json
