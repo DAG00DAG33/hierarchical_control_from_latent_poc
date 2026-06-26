@@ -13977,6 +13977,30 @@ TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
   --eval-seed-start 4800000 \
   --num-envs 20 \
   --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_500_seed4800000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4900000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_500_seed4900000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4900000 \
+  --num-envs 20 \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_500_seed4900000.json
 ```
 
 ### Results
@@ -13996,13 +14020,24 @@ Matched 100-episode check:
 | ungated residual | 0.270 | 0.4177 | 0.4537 | 1.000 |
 | task-reward oracle selector | 0.250 | 0.4208 | 0.4505 | 0.493 |
 
-Matched 500-episode check:
+Matched 500-episode checks:
 
-| policy | success | final reward | max reward | residual action rate |
-| --- | ---: | ---: | ---: | ---: |
-| frozen | 0.312 | 0.4727 | 0.4960 | 0.000 |
-| ungated residual | 0.298 | 0.4553 | 0.4850 | 1.000 |
-| task-reward oracle selector | 0.322 | 0.4753 | 0.5047 | 0.483 |
+| seed | policy | success | final reward | max reward | residual action rate |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 4800000 | frozen | 0.312 | 0.4727 | 0.4960 | 0.000 |
+| 4800000 | ungated residual | 0.298 | 0.4553 | 0.4850 | 1.000 |
+| 4800000 | task-reward oracle selector | 0.322 | 0.4753 | 0.5047 | 0.483 |
+| 4900000 | frozen | 0.304 | 0.4532 | 0.4859 | 0.000 |
+| 4900000 | ungated residual | 0.284 | 0.4404 | 0.4727 | 1.000 |
+| 4900000 | task-reward oracle selector | 0.302 | 0.4563 | 0.4852 | 0.470 |
+
+Two-window aggregate:
+
+| policy | success | final reward | max reward |
+| --- | ---: | ---: | ---: |
+| frozen | 0.308 | 0.4630 | 0.4910 |
+| ungated residual | 0.291 | 0.4478 | 0.4788 |
+| task-reward oracle selector | 0.312 | 0.4658 | 0.4949 |
 
 The selector's counterfactual branch diagnostics on the 100-episode check were:
 
@@ -14021,17 +14056,24 @@ Artifacts:
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_100_seed4800000.json`
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_500_seed4800000.json`
 - `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_500_seed4800000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_500_seed4900000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_ungated_numenv20_500_seed4900000.json`
 
 ### Interpretation
 
 The 100-episode result was another small-window false signal: the selector
 looked worse than ungated on success despite better final reward. At 500
-episodes, however, the task-reward oracle selector is positive and beats both
-frozen and ungated residual. This suggests one-segment task reward is a better
-branch-selection proxy than one-segment latent distance for this checkpoint.
+episodes on the first window, however, the task-reward oracle selector was
+positive and beat both frozen and ungated residual. A fresh second 500-episode
+window weakened that to approximately tied with frozen, but still clearly
+better than ungated residual. This suggests one-segment task reward is a better
+branch-selection proxy than one-segment latent distance for this checkpoint,
+mostly because it suppresses harmful residual interventions.
 
 This is still an upper-bound diagnostic, not a deployable policy: it requires
 counterfactual simulator rollouts of frozen and tuned branches at the current
 state. The useful next direction is to approximate this kind of task-aligned
-closed-loop branch decision with deployable online state/history features or to
-train the residual/selector directly in that intervention distribution.
+closed-loop branch decision with deployable online state/history features, or to
+train the residual/selector directly in that intervention distribution. The
+effect size over frozen is currently tiny (`+0.004` success over two windows),
+so this is a harm-reduction lead rather than a solved improvement.

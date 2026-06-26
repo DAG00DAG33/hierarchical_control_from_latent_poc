@@ -1007,12 +1007,24 @@ Scaling the same check to 500 matched episodes changed the sign:
 | ungated residual | 0.298 | 0.4553 | 0.4850 | 1.000 |
 | task-reward oracle selector | 0.322 | 0.4753 | 0.5047 | 0.483 |
 
-So one-segment task reward is a better oracle branch selector than latent
-distance on this window, and it can recover a positive upper-bound signal where
-ungated residual is harmful. This is still not deployable: it requires
-counterfactual simulator rollouts from the current state. Treat it as evidence
-that closed-loop branch selection can help if the selector sees task-aligned
-counterfactual outcomes, not as a policy candidate.
+A fresh 500-episode window at `seed_start=4900000` weakened but did not erase
+the selector benefit over ungated residual:
+
+| policy | success | final reward | max reward | residual action rate |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.304 | 0.4532 | 0.4859 | 0.000 |
+| ungated residual | 0.284 | 0.4404 | 0.4727 | 1.000 |
+| task-reward oracle selector | 0.302 | 0.4563 | 0.4852 | 0.470 |
+
+Across these two 500-episode windows, the task-reward oracle selector is
+approximately tied with frozen on success (`0.312` vs `0.308`) and slightly
+better on final reward (`0.4658` vs `0.4630`), while ungated residual is clearly
+harmful (`0.291` success). So one-segment task reward is a better oracle branch
+selector than latent distance, mostly because it suppresses harmful residual
+interventions. This is still not deployable: it requires counterfactual
+simulator rollouts from the current state. Treat it as evidence that
+task-aligned closed-loop branch selection can reduce harm, not as a policy
+candidate.
 
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
