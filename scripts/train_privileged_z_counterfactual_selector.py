@@ -26,20 +26,62 @@ def _features(data: np.lib.npyio.NpzFile) -> np.ndarray:
     query_previous_expanded = np.repeat(query_previous[:, None, :], candidate_count, axis=1)
     goal_delta = query_goals_expanded - candidate_goals
     goal_mse = np.mean(goal_delta * goal_delta, axis=-1, keepdims=True)
-    return np.concatenate(
-        [
-            query_states_expanded,
-            query_goals_expanded,
-            query_previous_expanded,
-            candidate_goals,
-            goal_delta,
-            goal_mse,
-            nearest_scores[:, :, None],
-            source_return[:, :, None],
-            source_success[:, :, None],
-        ],
-        axis=-1,
-    ).reshape(query_count * candidate_count, state_dim * 4 + query_previous.shape[1] + 4)
+    blocks = [
+        query_states_expanded,
+        query_goals_expanded,
+        query_previous_expanded,
+        candidate_goals,
+        goal_delta,
+        goal_mse,
+        nearest_scores[:, :, None],
+        source_return[:, :, None],
+        source_success[:, :, None],
+    ]
+    if "candidate_segment_end_states" in data.files:
+        candidate_end = np.asarray(data["candidate_segment_end_states"], dtype=np.float32)
+        base_end = np.asarray(data["base_segment_end_states"], dtype=np.float32)
+        base_end_expanded = np.repeat(base_end[:, None, :], candidate_count, axis=1)
+        end_to_query_goal = query_goals_expanded - candidate_end
+        end_to_candidate_goal = candidate_goals - candidate_end
+        end_to_base = candidate_end - base_end_expanded
+        candidate_segment_return = np.asarray(
+            data["candidate_segment_return"],
+            dtype=np.float32,
+        )
+        candidate_segment_success = np.asarray(
+            data["candidate_segment_success"],
+            dtype=np.float32,
+        )
+        segment_return_delta = np.asarray(
+            data["candidate_segment_return_delta"],
+            dtype=np.float32,
+        )
+        segment_success_delta = np.asarray(
+            data["candidate_segment_success_delta"],
+            dtype=np.float32,
+        )
+        blocks.extend(
+            [
+                base_end_expanded,
+                candidate_end,
+                end_to_query_goal,
+                end_to_candidate_goal,
+                end_to_base,
+                np.mean(end_to_query_goal * end_to_query_goal, axis=-1, keepdims=True),
+                np.mean(
+                    end_to_candidate_goal * end_to_candidate_goal,
+                    axis=-1,
+                    keepdims=True,
+                ),
+                np.mean(end_to_base * end_to_base, axis=-1, keepdims=True),
+                candidate_segment_return[:, :, None],
+                candidate_segment_success[:, :, None],
+                segment_return_delta[:, :, None],
+                segment_success_delta[:, :, None],
+            ]
+        )
+    features = np.concatenate(blocks, axis=-1)
+    return features.reshape(query_count * candidate_count, features.shape[-1])
 
 
 def _model(input_dim: int, hidden_dim: int, depth: int) -> nn.Sequential:

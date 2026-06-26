@@ -201,7 +201,7 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
         first_goal: np.ndarray,
         *,
         first_segment_tuned: bool,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         rollout_env.unwrapped.set_state_dict(_clone_mani_state_dict(start_state))
         obs = rollout_env.unwrapped.get_obs()
         previous = previous_start.copy()
@@ -212,6 +212,9 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
         returns = np.zeros(args.num_envs, dtype=np.float32)
         final_success = np.zeros(args.num_envs, dtype=np.float32)
         final_return = np.zeros(args.num_envs, dtype=np.float32)
+        segment_end_state = np.zeros((args.num_envs, state_dim), dtype=np.float32)
+        segment_return = np.zeros(args.num_envs, dtype=np.float32)
+        segment_success = np.zeros(args.num_envs, dtype=np.float32)
 
         def record(reward: Any, info: dict[str, Any]) -> None:
             reward_np = _to_numpy(reward).reshape(-1).astype(np.float32)
@@ -259,6 +262,10 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
             obs, reward, _terminated, _truncated, info = rollout_env.step(action)
             record(reward, info)
             previous = action_norm.transform(action.detach().cpu().numpy().astype(np.float32))
+            if step == horizon_steps - 1:
+                segment_end_state[:] = state_norm.transform(_obs_state_np(obs))
+                segment_return[:] = returns
+                segment_success[:] = success_once.astype(np.float32)
             previous[completed] = zero_previous
             held_goal[completed] = 0.0
             countdown[completed] = 0
@@ -266,7 +273,14 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
                 break
         final_success[~completed] = success_once[~completed].astype(np.float32)
         final_return[~completed] = returns[~completed]
-        return final_success, final_return, completed
+        return (
+            final_success,
+            final_return,
+            completed,
+            segment_end_state,
+            segment_return,
+            segment_success,
+        )
 
     obs, _info = env.reset(seed=args.seed_start)
     previous = np.repeat(zero_previous[None], args.num_envs, axis=0)
@@ -283,6 +297,12 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
     candidate_successes: list[np.ndarray] = []
     candidate_returns: list[np.ndarray] = []
     completed_values: list[np.ndarray] = []
+    base_segment_states: list[np.ndarray] = []
+    base_segment_returns: list[np.ndarray] = []
+    base_segment_successes: list[np.ndarray] = []
+    candidate_segment_states: list[np.ndarray] = []
+    candidate_segment_returns: list[np.ndarray] = []
+    candidate_segment_successes: list[np.ndarray] = []
 
     try:
         for _batch in range(args.query_batches):
@@ -297,7 +317,14 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
                 bank["goals"],
                 args.candidates_per_query,
             )
-            base_success, base_return, base_completed = run_rollout(
+            (
+                base_success,
+                base_return,
+                base_completed,
+                base_segment_state,
+                base_segment_return,
+                base_segment_success,
+            ) = run_rollout(
                 start_state,
                 previous.copy(),
                 query_goal.copy(),
@@ -306,9 +333,19 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
             cand_success_blocks: list[np.ndarray] = []
             cand_return_blocks: list[np.ndarray] = []
             cand_completed_blocks: list[np.ndarray] = []
+            cand_segment_state_blocks: list[np.ndarray] = []
+            cand_segment_return_blocks: list[np.ndarray] = []
+            cand_segment_success_blocks: list[np.ndarray] = []
             for candidate_slot in range(indices.shape[1]):
                 candidate_goal = bank["goals"][indices[:, candidate_slot]]
-                cand_success, cand_return, cand_completed = run_rollout(
+                (
+                    cand_success,
+                    cand_return,
+                    cand_completed,
+                    cand_segment_state,
+                    cand_segment_return,
+                    cand_segment_success,
+                ) = run_rollout(
                     start_state,
                     previous.copy(),
                     candidate_goal.copy(),
@@ -317,6 +354,9 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
                 cand_success_blocks.append(cand_success)
                 cand_return_blocks.append(cand_return)
                 cand_completed_blocks.append(cand_completed)
+                cand_segment_state_blocks.append(cand_segment_state)
+                cand_segment_return_blocks.append(cand_segment_return)
+                cand_segment_success_blocks.append(cand_segment_success)
             query_states.append(current_norm.copy())
             query_goals.append(query_goal.copy())
             query_previous.append(previous.copy())
@@ -329,6 +369,12 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
             completed_values.append(
                 np.stack(cand_completed_blocks, axis=1) & base_completed[:, None]
             )
+            base_segment_states.append(base_segment_state.copy())
+            base_segment_returns.append(base_segment_return.copy())
+            base_segment_successes.append(base_segment_success.copy())
+            candidate_segment_states.append(np.stack(cand_segment_state_blocks, axis=1))
+            candidate_segment_returns.append(np.stack(cand_segment_return_blocks, axis=1))
+            candidate_segment_successes.append(np.stack(cand_segment_success_blocks, axis=1))
 
             held_goal[:] = query_goal
             countdown[:] = horizon_steps
@@ -359,6 +405,12 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
     cand_success = np.concatenate(candidate_successes, axis=0).astype(np.float32)
     cand_return = np.concatenate(candidate_returns, axis=0).astype(np.float32)
     completed = np.concatenate(completed_values, axis=0).astype(np.bool_)
+    base_segment_state = np.concatenate(base_segment_states, axis=0).astype(np.float32)
+    base_segment_return = np.concatenate(base_segment_returns, axis=0).astype(np.float32)
+    base_segment_success = np.concatenate(base_segment_successes, axis=0).astype(np.float32)
+    cand_segment_state = np.concatenate(candidate_segment_states, axis=0).astype(np.float32)
+    cand_segment_return = np.concatenate(candidate_segment_returns, axis=0).astype(np.float32)
+    cand_segment_success = np.concatenate(candidate_segment_successes, axis=0).astype(np.float32)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.output,
@@ -377,6 +429,18 @@ def collect_counterfactuals(args: argparse.Namespace) -> None:
         candidate_success_delta=(cand_success - base_success[:, None]).astype(np.float32),
         candidate_return_delta=(cand_return - base_return[:, None]).astype(np.float32),
         completed=completed,
+        base_segment_end_states=base_segment_state,
+        base_segment_return=base_segment_return,
+        base_segment_success=base_segment_success,
+        candidate_segment_end_states=cand_segment_state,
+        candidate_segment_return=cand_segment_return,
+        candidate_segment_success=cand_segment_success,
+        candidate_segment_return_delta=(
+            cand_segment_return - base_segment_return[:, None]
+        ).astype(np.float32),
+        candidate_segment_success_delta=(
+            cand_segment_success - base_segment_success[:, None]
+        ).astype(np.float32),
         checkpoint=np.asarray(str(args.checkpoint)),
         residual_checkpoint=np.asarray("" if args.residual_checkpoint is None else str(args.residual_checkpoint)),
         branch_bank=np.asarray(str(args.branch_bank)),

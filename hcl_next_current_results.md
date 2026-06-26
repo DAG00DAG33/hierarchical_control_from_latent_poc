@@ -430,6 +430,24 @@ currently establish a robust learned-high deployment improvement. The current
 bottleneck is not only visual representation; it is the objective/deployment
 alignment of local RL updates.
 
+I also extended the privileged branch-goal counterfactual harness so each
+candidate rollout saves first-segment end-state and prefix outcome features.
+This tests whether a selector can use actual candidate prefix evidence, not
+only static `(query, candidate goal, source outcome)` features. On a fresh
+`q128/k8` bank, the candidate set still had large oracle upside, but the small
+MLP selector did not extract it:
+
+| selector over 5 query-split seeds | validation return delta | validation success delta |
+| --- | ---: | ---: |
+| learned selector with prefix features | -0.517 | -0.013 |
+| nearest candidate | +2.070 | +0.031 |
+| oracle best-of-8 | +15.530 | +0.237 |
+
+So prefix/end-state features are not sufficient in the current static selector
+form. The remaining privileged branch-goal direction would need a better
+candidate-generation distribution, more query coverage, or a selector trained
+as an online/intervention policy rather than another small offline scorer.
+
 ### Multifeature segment gating has local signal
 
 I added `low-level-rl fit-serial-segment-selector`, which fits an offline linear
@@ -1163,4 +1181,6 @@ results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarc
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_hierarchy_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_direct_paired_hardmse005_oracle_200eps.json
+data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9963000_q128_k8_prefix.npz
+artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_seed0.pt
 ```

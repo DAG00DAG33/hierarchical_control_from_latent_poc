@@ -13010,3 +13010,91 @@ The larger matched check rejects the 100-episode smoke as a promotion signal.
 The residual branch is slightly worse than frozen on success and reward over 500
 episodes. Task-hard local R3 can improve the targeted held-out local subset, but
 that still does not transfer into a reliable closed-loop policy improvement.
+
+## 2026-06-26: Prefix-feature counterfactual branch selector
+
+### Hypothesis
+
+The previous privileged branch-goal selector used only static query/candidate
+features and source-state outcome priors. It may fail because it cannot see what
+actually happens when a candidate is rolled for the first held-goal segment from
+the query state. I extended the counterfactual bank to save first-segment
+end-state and prefix outcome features, then trained the same return-regression
+selector on those richer features.
+
+### Code Changes
+
+- `scripts/collect_privileged_z_branch_counterfactuals.py` now saves
+  `base_segment_*`, `candidate_segment_*`, and candidate prefix deltas.
+- `scripts/train_privileged_z_counterfactual_selector.py` automatically appends
+  these fields as optional features when present, while remaining compatible
+  with older banks.
+
+### Commands
+
+```bash
+uv run scripts/collect_privileged_z_branch_counterfactuals.py \
+  --config configs/pusht_incremental.yaml \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --branch-bank data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_all_seed9950000_200eps_b10.npz \
+  --output data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9963000_q128_k8_prefix.npz \
+  --seed-start 9963000 \
+  --num-envs 64 \
+  --query-batches 2 \
+  --candidates-per-query 8 \
+  --max-rollout-steps 120
+```
+
+Selector training was run for seeds `0..4` with:
+
+```bash
+uv run scripts/train_privileged_z_counterfactual_selector.py \
+  --input data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9963000_q128_k8_prefix.npz \
+  --output artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_seed0.pt \
+  --seed 0 \
+  --epochs 200 \
+  --batch-size 1024 \
+  --hidden-dim 128 \
+  --depth 2 \
+  --learning-rate 1e-3
+```
+
+### Counterfactual Bank
+
+| bank | queries | candidates/query | base success | base return | nearest return delta | oracle return delta | positive best > 5 | oracle success delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `seed9963000_q128_k8_prefix` | 128 | 8 | 0.500 | 43.79 | +1.98 | +15.87 | 0.516 | +0.313 |
+
+### Selector Results
+
+Validation metrics across five random query splits:
+
+| seed | selected return delta | selected success delta | nearest return delta | nearest success delta | oracle return delta | oracle success delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | -1.529 | -0.031 | -1.266 | +0.094 | +13.002 | +0.250 |
+| 1 | +1.518 | +0.031 | +1.551 | +0.000 | +18.778 | +0.281 |
+| 2 | +1.538 | +0.031 | +3.524 | +0.000 | +18.848 | +0.250 |
+| 3 | -0.385 | +0.000 | +8.922 | +0.156 | +16.651 | +0.281 |
+| 4 | -3.727 | -0.094 | -2.383 | -0.094 | +10.373 | +0.125 |
+| mean | -0.517 | -0.013 | +2.070 | +0.031 | +15.530 | +0.237 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9963000_q128_k8_prefix.npz`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_seed1.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_seed2.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_seed3.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_seed4.pt`
+
+### Interpretation
+
+The candidate set still contains large query-specific upside, but adding
+first-segment end-state and prefix outcome features did not make the small
+offline selector useful. Mean validation selection is worse than nearest
+selection and far below oracle best-of-8. This rejects the simplest
+"add prefix/final-state features to the static scorer" fix. The next privileged
+branch-goal attempt would need to change the data/modeling setup more
+substantially: broader query coverage, different candidate generation, or a
+selector trained directly as an online intervention policy.
