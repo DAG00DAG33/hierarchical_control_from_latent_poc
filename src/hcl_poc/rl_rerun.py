@@ -2677,6 +2677,8 @@ def train_rl_rerun_local_r3(
     dense_progress_weight: float = 1.0,
     task_reward_weight: float = 0.0,
     reward_mode: str = "progress",
+    reward_distance_metric: str = "raw_l2",
+    reachability_checkpoint_path: Path | None = None,
     learning_rate: float | None = None,
     num_minibatches: int | None = None,
     initial_logstd: float | None = None,
@@ -2689,7 +2691,12 @@ def train_rl_rerun_local_r3(
 ) -> Path:
     from hcl_poc.incremental import _phase4_dino_from_config, _phase4_frame_inputs
     from hcl_poc.learned_interface import _low_condition_array
-    from hcl_poc.low_level_rl import DirectLowActorCritic, _load_frozen
+    from hcl_poc.low_level_rl import (
+        DirectLowActorCritic,
+        _load_frozen,
+        _reachability_distance_values,
+    )
+    from hcl_poc.reachability import load_reachability_distance
     from hcl_poc.utils import set_seed
 
     path = dataset_path or _vector_dataset_path(config)
@@ -2711,6 +2718,17 @@ def train_rl_rerun_local_r3(
         raise ValueError(
             "reward_mode must be one of {'progress', 'paired', 'task_paired'}"
         )
+    if reward_distance_metric not in {"raw_l2", "reachability"}:
+        raise ValueError(
+            "reward_distance_metric must be one of {'raw_l2', 'reachability'}"
+        )
+    if reward_distance_metric == "reachability":
+        if reachability_checkpoint_path is None:
+            raise ValueError(
+                "reward_distance_metric=reachability requires --reachability-checkpoint"
+            )
+        if not reachability_checkpoint_path.exists():
+            raise FileNotFoundError(reachability_checkpoint_path)
     if min_base_terminal_distance is not None:
         if min_base_terminal_distance < 0.0:
             raise ValueError("min_base_terminal_distance must be non-negative")
@@ -2772,6 +2790,13 @@ def train_rl_rerun_local_r3(
     dino = _phase4_dino_from_config(config, device)
     env = _make_benchmark_env(config, num_envs, "rgb+state")
     h5 = h5py.File(path, "r")
+    reachability_model = None
+    reachability_goal_norm = None
+    if reward_distance_metric == "reachability":
+        reachability_model, reachability_goal_norm, _reachability_checkpoint = (
+            load_reachability_distance(reachability_checkpoint_path, device)
+        )
+        reachability_model.requires_grad_(False)
     action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
     action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
     condition_dim = _local_condition_dim(frozen)
@@ -2803,6 +2828,26 @@ def train_rl_rerun_local_r3(
     update_epochs = int(config.get("low_level_rl.update_epochs", 4))
     max_grad_norm = float(config.get("low_level_rl.max_grad_norm", 1.0))
     optimizer = torch.optim.Adam(trainable, lr=resolved_learning_rate, eps=1e-5)
+    reward_description = {
+        "progress": (
+            "latent_progress_minus_terminal_distance_plus_"
+            "bc_regularization_in_loss"
+        ),
+        "paired": (
+            "latent_progress_plus_cached_base_terminal_latent_improvement_"
+            "plus_bc_regularization_in_loss"
+        ),
+        "task_paired": (
+            "latent_progress_plus_cached_base_terminal_task_reward_improvement_"
+            "plus_bc_regularization_in_loss"
+        ),
+    }[reward_mode]
+    if reward_distance_metric == "reachability":
+        reward_description = (
+            reward_description.replace("latent_progress", "reachability_progress")
+            .replace("terminal_distance", "terminal_reachability_distance")
+            .replace("terminal_latent_improvement", "terminal_reachability_improvement")
+        )
     recipe = {
         "method": "r3_direct_last_layer_local_mode_a",
         "dataset": str(path),
@@ -2829,26 +2874,16 @@ def train_rl_rerun_local_r3(
         "actor_critic_depth": int(config.get("low_level_rl.residual_depth", 2)),
         "initial_logstd": resolved_initial_logstd,
         "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
-        "reward": {
-            "progress": (
-                "latent_progress_minus_terminal_distance_plus_"
-                "bc_regularization_in_loss"
-            ),
-            "paired": (
-                "latent_progress_plus_cached_base_terminal_latent_improvement_"
-                "plus_bc_regularization_in_loss"
-            ),
-            "task_paired": (
-                "latent_progress_plus_cached_base_terminal_task_reward_improvement_"
-                "plus_bc_regularization_in_loss"
-            ),
-        }[reward_mode],
+        "reward_distance_metric": reward_distance_metric,
+        "reward": reward_description,
         "disallowed_training_signals": [
             "task_success",
             "object_pose",
             "task_progress",
         ],
     }
+    if reachability_checkpoint_path is not None:
+        recipe["reachability_checkpoint"] = str(reachability_checkpoint_path)
     if task_reward_weight > 0.0:
         recipe["task_reward_weight"] = task_reward_weight
         recipe["reward"] = f"{recipe['reward']}_plus_mani_skill_dense_reward"
@@ -2894,6 +2929,25 @@ def train_rl_rerun_local_r3(
     base_terminal_env_reward = np.full(1, np.nan, dtype=np.float32)
     local_active = np.ones(1, dtype=np.bool_)
     local_step = 0
+
+    def reward_distance(
+        current_latent: np.ndarray,
+        goal_latent: np.ndarray,
+    ) -> np.ndarray:
+        if reward_distance_metric == "raw_l2":
+            return np.mean(np.square(current_latent - goal_latent), axis=-1).astype(
+                np.float32
+            )
+        if reachability_model is None or reachability_goal_norm is None:
+            raise RuntimeError("Reachability reward distance was not initialized")
+        return _reachability_distance_values(
+            reachability_model,
+            reachability_goal_norm,
+            frozen,
+            current_latent,
+            goal_latent,
+            device,
+        )
 
     @torch.inference_mode()
     def load_local_start(group: h5py.Group, current_t: int) -> None:
@@ -2959,7 +3013,7 @@ def train_rl_rerun_local_r3(
             )
             base_z = _encode_rerun_frames(frozen, base_frames, device)
             base_previous = frozen.action_norm.transform(action.cpu().numpy())
-        base_distance = np.mean(np.square(base_z - goal_z), axis=-1).astype(np.float32)
+        base_distance = reward_distance(base_z, goal_z)
         return base_distance, base_env_reward
 
     @torch.inference_mode()
@@ -2985,7 +3039,7 @@ def train_rl_rerun_local_r3(
 
     @torch.inference_mode()
     def condition_and_bc() -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
-        distance = np.mean(np.square(current_z - goal_z), axis=-1).astype(np.float32)
+        distance = reward_distance(current_z, goal_z)
         remaining = np.full(
             (num_envs, 1),
             max(horizon - local_step, 1) / horizon,
@@ -3012,7 +3066,7 @@ def train_rl_rerun_local_r3(
         next_obs, env_reward, _terminated, _truncated, info = env.step(action)
         next_frames = _phase4_frame_inputs(next_obs, dino, int(config.get("dino.batch_size", 64)))
         next_z = _encode_rerun_frames(frozen, next_frames, device)
-        next_distance = np.mean(np.square(next_z - goal_z), axis=-1).astype(np.float32)
+        next_distance = reward_distance(next_z, goal_z)
         segment_end = local_step == horizon - 1
         env_reward_np = _to_numpy(env_reward).reshape(-1).astype(np.float32)
         reward = dense_progress_weight * (previous_distance - next_distance)

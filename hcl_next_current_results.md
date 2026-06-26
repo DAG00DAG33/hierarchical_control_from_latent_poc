@@ -1124,6 +1124,19 @@ the positive final-task-signal gate because final dense reward is negative.
 The comparison artifact is
 `results/rl_rerun/local_r3/n500/seed0/local_proxy_audit_comparison_n4096_taskreward_vs_taskhard.json`.
 
+I then added `D_phi` as an actual `train-local-r3` reward distance via
+`--reward-distance-metric reachability --reachability-checkpoint ...`, not just
+as an evaluation metric. A one-update 4096-env D_phi-reward smoke was stable and
+produced the first positive full-bank local task gate in this group: final
+reward delta `+0.0026`, max reward delta `+0.0005`, success delta `+0.0007`,
+raw-distance delta `+0.0002`, and `D_phi` delta `+0.0035`. However, learned-goal
+closed-loop validation did not transfer: on 500 episodes at `seed_start=4800000`
+the tuned policy reached `0.302` success versus frozen `0.306`, with final
+reward delta `-0.0046` and max reward delta `-0.0052`. This is still useful:
+`D_phi` is a better local reward than raw/task-hard variants under the full-bank
+proxy audit, but the resulting update is tiny and not yet a deployment
+improvement.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

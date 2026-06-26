@@ -648,6 +648,10 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 dense_progress_weight=args.dense_progress_weight,
                 task_reward_weight=args.task_reward_weight,
                 reward_mode=args.reward_mode,
+                reward_distance_metric=args.reward_distance_metric,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
                 learning_rate=args.learning_rate,
                 num_minibatches=args.num_minibatches,
                 initial_logstd=args.initial_logstd,
@@ -2477,6 +2481,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["progress", "paired", "task_paired"],
         default="progress",
     )
+    train_local_r3.add_argument(
+        "--reward-distance-metric",
+        choices=["raw_l2", "reachability"],
+        default="raw_l2",
+    )
+    train_local_r3.add_argument("--reachability-checkpoint")
     train_local_r3.add_argument("--learning-rate", type=float)
     train_local_r3.add_argument("--num-minibatches", type=int)
     train_local_r3.add_argument("--initial-logstd", type=float)
