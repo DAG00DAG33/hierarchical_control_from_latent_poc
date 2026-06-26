@@ -2350,7 +2350,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r1.add_argument("--oracle-segment-selector", action="store_true")
     eval_closed_loop_r1.add_argument(
         "--oracle-segment-selector-metric",
-        choices=["latent_distance", "env_reward"],
+        choices=["latent_distance", "env_reward", "env_max_reward", "success"],
         default="latent_distance",
     )
     eval_closed_loop_r1.add_argument("--diagnose-oracle-goals", action="store_true")
@@ -2417,7 +2417,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r2.add_argument("--oracle-segment-selector", action="store_true")
     eval_closed_loop_r2.add_argument(
         "--oracle-segment-selector-metric",
-        choices=["latent_distance", "env_reward"],
+        choices=["latent_distance", "env_reward", "env_max_reward", "success"],
         default="latent_distance",
     )
     eval_closed_loop_r2.add_argument("--diagnose-oracle-goals", action="store_true")
@@ -2478,7 +2478,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_closed_loop_r3.add_argument("--oracle-segment-selector", action="store_true")
     eval_closed_loop_r3.add_argument(
         "--oracle-segment-selector-metric",
-        choices=["latent_distance", "env_reward"],
+        choices=["latent_distance", "env_reward", "env_max_reward", "success"],
         default="latent_distance",
     )
     eval_closed_loop_r3.add_argument("--diagnose-oracle-goals", action="store_true")

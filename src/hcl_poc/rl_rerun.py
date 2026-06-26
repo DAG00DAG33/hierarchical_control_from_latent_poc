@@ -4469,9 +4469,15 @@ def evaluate_rl_rerun_closed_loop_r1(
             "Use at most one of step_selector_path, segment_selector_path, "
             "or oracle_segment_selector"
         )
-    if oracle_segment_selector_metric not in {"latent_distance", "env_reward"}:
+    if oracle_segment_selector_metric not in {
+        "latent_distance",
+        "env_reward",
+        "env_max_reward",
+        "success",
+    }:
         raise ValueError(
-            "oracle_segment_selector_metric must be 'latent_distance' or 'env_reward'"
+            "oracle_segment_selector_metric must be one of "
+            "'latent_distance', 'env_reward', 'env_max_reward', or 'success'"
         )
     need_oracle_branch = goal_source == "oracle" or diagnose_oracle_goals
     step_selector = (
@@ -4590,6 +4596,8 @@ def evaluate_rl_rerun_closed_loop_r1(
         oracle_segment_selector_decisions = 0
         oracle_segment_selector_latent_delta_l2: list[float] = []
         oracle_segment_selector_env_reward_delta: list[float] = []
+        oracle_segment_selector_env_max_reward_delta: list[float] = []
+        oracle_segment_selector_success_once_delta: list[float] = []
         oracle_segment_selector_trace = {
             "episode_index": [],
             "step_index": [],
@@ -4600,6 +4608,12 @@ def evaluate_rl_rerun_closed_loop_r1(
             "base_env_reward": [],
             "tuned_env_reward": [],
             "env_reward_delta": [],
+            "base_env_max_reward": [],
+            "tuned_env_max_reward": [],
+            "env_max_reward_delta": [],
+            "base_success_once": [],
+            "tuned_success_once": [],
+            "success_once_delta": [],
             "action_delta_l2_prefix_mean": [],
             "action_delta_l2_prefix_max": [],
             "policy_saturation_prefix_rate": [],
@@ -4745,6 +4759,8 @@ def evaluate_rl_rerun_closed_loop_r1(
                     branch_obs = start_obs
                     branch_previous_action = start_previous_action.copy()
                     terminal_reward = np.zeros(batch_envs, dtype=np.float32)
+                    max_reward = np.full(batch_envs, -np.inf, dtype=np.float32)
+                    success_once = np.zeros(batch_envs, dtype=np.float32)
                     for branch_step in range(frozen.update_period):
                         branch_frames = _phase4_frame_inputs(
                             branch_obs,
@@ -4836,6 +4852,14 @@ def evaluate_rl_rerun_closed_loop_r1(
                         terminal_reward = (
                             branch_reward.detach().cpu().numpy().astype(np.float32)
                         )
+                        max_reward = np.maximum(max_reward, terminal_reward)
+                        if "success" in _info:
+                            success_once = np.maximum(
+                                success_once,
+                                _to_numpy(_info["success"])
+                                .reshape(-1)
+                                .astype(np.float32),
+                            )
                         branch_previous_action = frozen.action_norm.transform(
                             branch_action.cpu().numpy().astype(np.float32)
                         )
@@ -4856,6 +4880,8 @@ def evaluate_rl_rerun_closed_loop_r1(
                             branch_final_z - goal, axis=-1
                         ).astype(np.float32),
                         "env_reward": terminal_reward,
+                        "env_max_reward": max_reward,
+                        "success": success_once,
                     }
 
                 for step_index in range(max_steps):
@@ -5049,10 +5075,20 @@ def evaluate_rl_rerun_closed_loop_r1(
                                     branch_tuned_outcome["latent_distance"][replan_indices]
                                     < branch_base_outcome["latent_distance"][replan_indices]
                                 )
-                            else:
+                            elif oracle_segment_selector_metric == "env_reward":
                                 choose_residual = (
                                     branch_tuned_outcome["env_reward"][replan_indices]
                                     > branch_base_outcome["env_reward"][replan_indices]
+                                )
+                            elif oracle_segment_selector_metric == "env_max_reward":
+                                choose_residual = (
+                                    branch_tuned_outcome["env_max_reward"][replan_indices]
+                                    > branch_base_outcome["env_max_reward"][replan_indices]
+                                )
+                            else:
+                                choose_residual = (
+                                    branch_tuned_outcome["success"][replan_indices]
+                                    > branch_base_outcome["success"][replan_indices]
                                 )
                             base_latent_distance = branch_base_outcome[
                                 "latent_distance"
@@ -5066,15 +5102,37 @@ def evaluate_rl_rerun_closed_loop_r1(
                             tuned_env_reward = branch_tuned_outcome["env_reward"][
                                 replan_indices
                             ]
+                            base_env_max_reward = branch_base_outcome[
+                                "env_max_reward"
+                            ][replan_indices]
+                            tuned_env_max_reward = branch_tuned_outcome[
+                                "env_max_reward"
+                            ][replan_indices]
+                            base_success_once = branch_base_outcome["success"][
+                                replan_indices
+                            ]
+                            tuned_success_once = branch_tuned_outcome["success"][
+                                replan_indices
+                            ]
                             latent_distance_delta = (
                                 base_latent_distance - tuned_latent_distance
                             )
                             env_reward_delta = tuned_env_reward - base_env_reward
+                            env_max_reward_delta = (
+                                tuned_env_max_reward - base_env_max_reward
+                            )
+                            success_once_delta = tuned_success_once - base_success_once
                             oracle_segment_selector_latent_delta_l2.extend(
                                 latent_distance_delta.astype(float).tolist()
                             )
                             oracle_segment_selector_env_reward_delta.extend(
                                 env_reward_delta.astype(float).tolist()
+                            )
+                            oracle_segment_selector_env_max_reward_delta.extend(
+                                env_max_reward_delta.astype(float).tolist()
+                            )
+                            oracle_segment_selector_success_once_delta.extend(
+                                success_once_delta.astype(float).tolist()
                             )
                             action_denominator = np.maximum(
                                 current_action_count[replan_indices], 1.0
@@ -5108,6 +5166,24 @@ def evaluate_rl_rerun_closed_loop_r1(
                             )
                             oracle_segment_selector_trace["env_reward_delta"].extend(
                                 env_reward_delta.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["base_env_max_reward"].extend(
+                                base_env_max_reward.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["tuned_env_max_reward"].extend(
+                                tuned_env_max_reward.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["env_max_reward_delta"].extend(
+                                env_max_reward_delta.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["base_success_once"].extend(
+                                base_success_once.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["tuned_success_once"].extend(
+                                tuned_success_once.astype(float).tolist()
+                            )
+                            oracle_segment_selector_trace["success_once_delta"].extend(
+                                success_once_delta.astype(float).tolist()
                             )
                             oracle_segment_selector_trace[
                                 "action_delta_l2_prefix_mean"
@@ -5624,6 +5700,16 @@ def evaluate_rl_rerun_closed_loop_r1(
             "oracle_segment_selector_env_reward_delta_mean": (
                 float(np.mean(oracle_segment_selector_env_reward_delta))
                 if oracle_segment_selector_env_reward_delta
+                else None
+            ),
+            "oracle_segment_selector_env_max_reward_delta_mean": (
+                float(np.mean(oracle_segment_selector_env_max_reward_delta))
+                if oracle_segment_selector_env_max_reward_delta
+                else None
+            ),
+            "oracle_segment_selector_success_once_delta_mean": (
+                float(np.mean(oracle_segment_selector_success_once_delta))
+                if oracle_segment_selector_success_once_delta
                 else None
             ),
             "mean_residual_norm": (

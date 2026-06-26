@@ -1047,6 +1047,16 @@ selected one-segment reward was still below the oracle by `0.00123`. The
 20-episode closed-loop validation was noisy-positive (`0.15 -> 0.20` success),
 but this is not credible given the chance-level oracle-imitation metric.
 
+I then widened the non-deployable oracle segment selector metric from terminal
+one-segment dense reward to also support one-segment max dense reward and
+success-within-segment. On a 20-episode smoke at `seed_start=5200000`,
+`env_max_reward` selected residual for `46.8%` of actions and had positive
+counterfactual branch deltas (`+0.0093` max reward, `+0.013` success-once), but
+closed-loop task success stayed tied with frozen (`0.45`) and max reward was
+slightly lower. The sparse `success` metric selected residual `0%` of the time
+on the same smoke. This suggests the currently available one-segment task
+signals are still too weak/sparse as an upper-bound selector.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

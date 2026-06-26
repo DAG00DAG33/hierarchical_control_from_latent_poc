@@ -14278,3 +14278,80 @@ that makes the branch effect larger and easier to classify. A larger trace-only
 dataset may still be useful for feature probing, but it should not be promoted
 to long closed-loop evaluation unless validation AUC moves clearly above
 chance.
+
+## 2026-06-26 - Max-reward and success oracle selector metrics
+
+### Hypothesis
+
+The previous task-reward oracle selector used only the terminal dense reward
+after one segment. A more deployment-aligned non-deployable selector might do
+better if it chooses by max dense reward within the segment or by whether either
+branch reaches task success during the segment.
+
+### Implementation
+
+I extended `--oracle-segment-selector-metric` with:
+
+```text
+env_max_reward
+success
+```
+
+The oracle branch trace now also records:
+
+```text
+base_env_max_reward
+tuned_env_max_reward
+env_max_reward_delta
+base_success_once
+tuned_success_once
+success_once_delta
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 5200000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_max_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envmaxreward_20_seed5200000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 20 \
+  --eval-seed-start 5200000 \
+  --num-envs 20 \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric success \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_success_20_seed5200000.json
+```
+
+### Results
+
+| selector metric | frozen success | selector success | success delta | max reward delta | residual action rate | decision residual rate | branch max-reward delta | branch success-once delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| env_max_reward | 0.450 | 0.450 | 0.000 | -0.0052 | 0.468 | 0.457 | +0.0093 | +0.013 |
+| success | 0.450 | 0.450 | 0.000 | 0.0000 | 0.000 | 0.000 | -0.0082 | -0.013 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envmaxreward_20_seed5200000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_success_20_seed5200000.json`
+
+### Interpretation
+
+The new metrics work mechanically and expose richer branch outcomes, but the
+smoke does not reveal a stronger oracle upper bound. `env_max_reward` sees
+positive one-segment counterfactual deltas but does not improve closed-loop
+success or max reward on this small window. `success` is too sparse: it chose
+the residual branch zero times. This reinforces the previous conclusion that
+one-segment branch selection signals are not the main missing ingredient for
+this checkpoint.
