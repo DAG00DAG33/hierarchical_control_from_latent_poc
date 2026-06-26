@@ -605,6 +605,20 @@ The aligned local eval was also nearly identical for `BC=1.0` and `BC=0.3`.
 So simple BC/sensitivity coefficient scaling is not enough; the next useful
 change should alter the target formulation or representation.
 
+I then combined cached paired reward with the sensitivity regularizer. It helped
+relative to paired-only locally, but still failed the frozen local gate:
+
+| policy | matched local final distance | reduction |
+| --- | ---: | ---: |
+| frozen n500 | 0.6020 | 0.4651 |
+| paired only | 0.6066 | 0.4605 |
+| paired + sensitivity | 0.6047 | 0.4624 |
+
+Because paired+sensitivity remained worse than frozen on the matched local
+manifest, I skipped closed-loop deployment for that checkpoint. The next useful
+change should be a stronger target or representation change, not a linear sum
+of the current paired and sensitivity losses.
+
 I added `--diagnose-oracle-goals` to `rl-rerun` closed-loop eval so learned-goal
 rollouts can record oracle branch goals without changing the deployed policy.
 On a 100-episode learned-goal diagnostic bank, predicted-vs-oracle goal distance

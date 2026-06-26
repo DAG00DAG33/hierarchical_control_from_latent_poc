@@ -10699,6 +10699,66 @@ and the deployment check flips negative on the same window where the original
 meaningful change should alter the target formulation or representation rather
 than just scale BC/sensitivity coefficients.
 
+## 2026-06-26 - Cached paired reward plus sensitivity local-gate check
+
+After coefficient scaling failed, I tested a target-formulation combination:
+cached paired terminal improvement plus the goal-swap sensitivity regularizer.
+This keeps the cached paired reward's exact-base local target, and adds the
+same sensitivity loss used in the harm-reduction diagnostic.
+
+Training command:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name paired_cached_n4096_1update_bc1_sensw10_m005 \
+  --steps 40960 \
+  --bc-weight 1.0 \
+  --terminal-weight 1.0 \
+  --reward-mode paired \
+  --num-minibatches 8 \
+  --checkpoint-every-updates 1 \
+  --goal-sensitivity-weight 10.0 \
+  --goal-sensitivity-margin 0.05
+```
+
+Training metrics after one update:
+
+| run | paired improvement | fraction improved | terminal distance | action delta L2 | goal-swap action sensitivity |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| paired only | -0.0098 | 0.4783 | 0.6089 | 0.029265 | - |
+| sensitivity only | - | - | 0.6089 | 0.029265 | 0.031907 |
+| paired + sensitivity | -0.0098 | 0.4783 | 0.6089 | 0.029265 | 0.031910 |
+
+Matched local validation on
+`results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json`:
+
+| policy | initial distance | final distance | reduction | reduction fraction | action delta L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frozen n500 | 1.0671 | 0.6020 | 0.4651 | 0.7969 | - |
+| paired only | 1.0671 | 0.6066 | 0.4605 | 0.7966 | 0.001230 |
+| paired + sensitivity | 1.0671 | 0.6047 | 0.4624 | 0.7959 | 0.001227 |
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_1update_bc1_sensw10_m005/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_1update_bc1_sensw10_m005/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/paired_cached_n4096_1update_bc1_sensw10_m005/eval_local_n4096_val_b1_manifest.json`
+
+Interpretation:
+
+Adding sensitivity regularization to cached paired reward slightly improves the
+paired-only local final distance (`0.6066 -> 0.6047`), but it remains worse
+than the frozen baseline (`0.6020`) on the matched validation manifest. The
+local gate therefore fails, so I did not spend a closed-loop deployment eval on
+this checkpoint. This is useful negative evidence: the paired target and
+sensitivity regularizer are not obviously conflicting, but their simple sum is
+still too weak to beat frozen local reaching.
+
 ## 2026-06-25 - Learned-vs-oracle goal diagnostics in rl-rerun
 
 I added a default-off closed-loop diagnostic flag:
