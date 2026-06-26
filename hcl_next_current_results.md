@@ -438,6 +438,30 @@ The online selector still slightly improved local raw reduction over frozen
 7 improved episodes, 9 regressed). The offline segment selector is therefore a
 useful diagnostic, not a deployable fix for this checkpoint.
 
+I then extended `fit-serial-segment-selector` to train on multiple exact serial
+windows and fit on the union of `4503000..4503049` plus `4506000..4506049`
+(`1000` aligned segments). Offline validation on a fresh exact window
+`4508000..4508049` still looked locally positive:
+
+| split | segments | base raw reduction | R3 raw reduction | selector raw reduction | selector use R3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| train 4503000+4506000 | 1000 | 0.433 | 0.439 | 0.497 | 0.690 |
+| validation 4508000 | 500 | 0.415 | 0.428 | 0.490 | 0.730 |
+
+But direct online deployment on `4508000..4508049` failed:
+
+| policy | success | max reward | raw-reduction delta vs frozen | segment use R3 |
+| --- | ---: | ---: | ---: | ---: |
+| frozen | 0.680 | 0.778 | - | - |
+| ungated R3 bc10 | 0.740 | 0.816 | +0.0126 | 1.000 |
+| multi-window segment selector | 0.660 | 0.765 | +0.0026 | 0.736 |
+
+The larger exact segment dataset did not fix the offline-to-online mismatch.
+This makes the selector conclusion stronger: selecting from completed segment
+outcomes is still not the right training target because the deployed selector
+changes later states/goals. A useful selector needs closed-loop intervention
+training or a much larger effect from the candidate policy.
+
 ### Lower BC paired reward did not fix the objective
 
 I retried paired R3 with a lower BC anchor (`bc_weight=1`, 2048 envs because the

@@ -703,6 +703,8 @@ def fit_serial_segment_selector(
     output: Path,
     validation_base_json: Path | None = None,
     validation_candidate_json: Path | None = None,
+    extra_base_jsons: list[Path] | None = None,
+    extra_candidate_jsons: list[Path] | None = None,
     ridge: float = 1.0,
     force: bool = False,
 ) -> Path:
@@ -780,10 +782,25 @@ def fit_serial_segment_selector(
         )
         return features, base_reduction, candidate_reduction, segment_ids
 
-    train_x, train_base_reduction, train_candidate_reduction, train_ids = load_pair(
-        base_json,
-        candidate_json,
+    extra_base_jsons = extra_base_jsons or []
+    extra_candidate_jsons = extra_candidate_jsons or []
+    if len(extra_base_jsons) != len(extra_candidate_jsons):
+        raise ValueError("extra base and candidate JSON counts must match")
+    train_pairs = [
+        (base_json, candidate_json),
+        *zip(extra_base_jsons, extra_candidate_jsons, strict=True),
+    ]
+    loaded_train_pairs = [load_pair(left, right) for left, right in train_pairs]
+    train_x = np.concatenate([item[0] for item in loaded_train_pairs], axis=0)
+    train_base_reduction = np.concatenate(
+        [item[1] for item in loaded_train_pairs],
+        axis=0,
     )
+    train_candidate_reduction = np.concatenate(
+        [item[2] for item in loaded_train_pairs],
+        axis=0,
+    )
+    train_ids = np.concatenate([item[3] for item in loaded_train_pairs], axis=0)
     delta = train_candidate_reduction - train_base_reduction
     helpful = delta > 0.0
     harmful = delta < 0.0
@@ -853,6 +870,8 @@ def fit_serial_segment_selector(
     payload: dict[str, Any] = {
         "base_json": str(base_json),
         "candidate_json": str(candidate_json),
+        "extra_base_jsons": [str(path) for path in extra_base_jsons],
+        "extra_candidate_jsons": [str(path) for path in extra_candidate_jsons],
         "feature_names": feature_names,
         "ridge": float(ridge),
         "weights": weights.astype(float).tolist(),

@@ -271,6 +271,10 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 validation_candidate_json=Path(args.validation_candidate_json)
                 if args.validation_candidate_json
                 else None,
+                extra_base_jsons=[Path(path) for path in args.extra_base_json],
+                extra_candidate_jsons=[
+                    Path(path) for path in args.extra_candidate_json
+                ],
                 ridge=args.ridge,
                 force=args.force,
             )
@@ -2043,6 +2047,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fit_serial_segment_selector_parser.add_argument("--base-json", required=True)
     fit_serial_segment_selector_parser.add_argument("--candidate-json", required=True)
+    fit_serial_segment_selector_parser.add_argument(
+        "--extra-base-json",
+        action="append",
+        default=[],
+    )
+    fit_serial_segment_selector_parser.add_argument(
+        "--extra-candidate-json",
+        action="append",
+        default=[],
+    )
     fit_serial_segment_selector_parser.add_argument("--validation-base-json")
     fit_serial_segment_selector_parser.add_argument("--validation-candidate-json")
     fit_serial_segment_selector_parser.add_argument("--output", required=True)
