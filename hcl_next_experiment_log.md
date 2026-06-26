@@ -12832,3 +12832,86 @@ correction, but the current final-layer R3 update is too small and too
 single-objective. A promotion candidate likely needs either a larger policy
 change with explicit preservation, or direct closed-loop outcome training rather
 than another filtered one-segment reward.
+
+## 2026-06-26: Three-update task-hard task-paired local R3
+
+### Hypothesis
+
+The task-hard `bc=0.3` one-update checkpoint gives the best held-out task-hard
+subset reward gain so far, but the action change is tiny. This run tests whether
+the same target scales with three PPO updates.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  train-local-r3 \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5 \
+  --steps 122880 \
+  --bc-weight 0.3 \
+  --terminal-weight 1 \
+  --dense-progress-weight 0 \
+  --task-reward-weight 0 \
+  --reward-mode task_paired \
+  --learning-rate 1e-5 \
+  --initial-logstd -5 \
+  --max-base-terminal-env-reward 0.45 \
+  --force
+```
+
+Enriched matched local validation:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --manifest results/rl_rerun/local_eval_manifest_n4096_val_b1_seed20260623.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
+```
+
+### Training Metrics
+
+| global step | active fraction | task-paired improvement | fraction task-improved | action delta L2 | task success diagnostic |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 40960 | 0.7629 | 0.03577 | 0.5219 | 0.01088 | 0.0643 |
+| 81920 | 0.7629 | 0.03815 | 0.5277 | 0.01086 | 0.0636 |
+| 122880 | 0.7632 | 0.03671 | 0.5186 | 0.01088 | 0.0679 |
+
+### Held-Out Local Validation
+
+Tuned minus frozen:
+
+| policy | all reward delta | all success delta | task-hard reward delta | task-hard success delta | latent-hard reduction delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| task-hard bc0.3 1 update | +0.0009 | +0.0037 | +0.0314 | +0.0225 | +0.0528 |
+| task-hard bc0.3 3 updates | -0.0034 | -0.0037 | +0.0293 | +0.0159 | +0.0625 |
+
+Action delta on the full validation bank increased only from `0.00046` to
+`0.00067`.
+
+Artifacts:
+
+- `artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/latest.pt`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/history.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json`
+
+### Interpretation
+
+Three updates do not turn the task-hard local objective into a promotion
+candidate. The training task-paired metric does not scale meaningfully, action
+changes remain tiny, and held-out validation shifts the tradeoff: latent-hard
+reduction improves, but the target task-hard reward/success gains shrink and
+the aggregate reward/success deltas become negative.
+
+This makes the next useful direction clearer: stop extending the same
+one-segment terminal reward target. Either make a larger policy change with an
+explicit preservation objective, or train against closed-loop outcome labels.

@@ -941,6 +941,23 @@ latent-hard subset loses task reward. This is still not a deployment candidate;
 it is evidence that local task-reward filtering can shape a very small
 task-specific correction but not a robust low-level improvement.
 
+I then ran the best-looking task-hard setup for three PPO updates instead of
+one (`bc=0.3`, `max_base_terminal_env_reward=0.45`). Training did not scale the
+target signal much: task-paired improvement stayed around `0.036-0.038`,
+fraction improved stayed near `0.52`, and action deltas remained tiny. Enriched
+held-out validation showed a tradeoff shift rather than a promotion:
+
+| policy | all reward delta | all success delta | task-hard reward delta | task-hard success delta | latent-hard reduction delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| task-hard bc0.3 1 update | +0.0009 | +0.0037 | +0.0314 | +0.0225 | +0.0528 |
+| task-hard bc0.3 3 updates | -0.0034 | -0.0037 | +0.0293 | +0.0159 | +0.0625 |
+
+Longer training increased action delta only slightly (`0.00046 -> 0.00067`)
+and improved latent-hard reduction, but it gave back task reward and success on
+the target task-hard subset. This reinforces that repeatedly optimizing the same
+one-segment task-paired target changes the local tradeoff; it still does not
+produce a robust low-level improvement.
+
 I also tested whether the strong non-deployable full-episode summary selector
 could be made deployable by using online prefix approximations of its features
 (`action_delta_l2` mean/max so far, saturation rate so far, goal-L2 mean so far,
@@ -1027,7 +1044,9 @@ The next useful directions are:
    target recovered some local validation performance but still stayed below
    frozen with tiny action changes. Targeted held-out subset validation shows
    task-hard local R3 does improve the task-hard subset's terminal task reward,
-   but only slightly and with a latent-hard tradeoff.
+   but only slightly and with a latent-hard tradeoff. Extending the best
+   task-hard setup to three updates increases latent-hard reduction but reduces
+   task-hard reward/success gains.
    The next objective check should change the target regime, not simply scale
    the same formulation: move toward a stronger deployment-aligned signal than
    one-segment local reachability or local task reward alone.
@@ -1115,6 +1134,9 @@ results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1upd
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_1update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
+artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/latest.pt
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/history.json
+results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_taskhard045_n4096_3update_bc03_lr1e5_logstd5/eval_local_n4096_val_b1_manifest_with_base.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_hierarchy_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_base_clean_n1800_oracle_seed9900000_200eps.json
 results/hcl_next_phase1/privileged_z_closed_loop_residual_alpha025_n1800_hierarchy_seed9900000_200eps.json
