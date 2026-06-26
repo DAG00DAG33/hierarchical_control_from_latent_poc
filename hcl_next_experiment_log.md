@@ -14356,6 +14356,57 @@ the residual branch zero times. This reinforces the previous conclusion that
 one-segment branch selection signals are not the main missing ingredient for
 this checkpoint.
 
+## 2026-06-26 - Full-window max-reward oracle selector validation
+
+### Hypothesis
+
+The 20-episode max-reward oracle selector smoke was inconclusive. A 500-episode
+window should tell whether choosing the tuned branch by one-segment max dense
+reward is a real upper-bound branch-selection signal.
+
+### Command
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 500 \
+  --eval-seed-start 4800000 \
+  --num-envs 64 \
+  --oracle-copy-mode state_dict \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_max_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envmaxreward_500_seed4800000.json
+```
+
+### Results
+
+| metric | frozen | max-reward oracle selector | delta |
+| --- | ---: | ---: | ---: |
+| success | 0.306 | 0.294 | -0.012 |
+| final dense reward | 0.4642 | 0.4555 | -0.0087 |
+| max dense reward | 0.4954 | 0.4859 | -0.0095 |
+
+Selector diagnostics:
+
+| residual action rate | decision residual rate | decisions | branch max-reward delta | branch reward delta | branch success-once delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.476 | 0.472 | 4309 | +0.0010 | +0.0008 | +0.0012 |
+
+Artifact:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envmaxreward_500_seed4800000.json`
+
+### Interpretation
+
+The full-window validation rejects the max-reward oracle selector for this
+checkpoint. Even with non-deployable branch rollouts, the selected tuned branch
+has slightly positive one-segment counterfactual deltas but worse closed-loop
+success, final reward, and max reward. This closes the simple one-segment
+max-reward upper-bound selector path; the next objective/selector work needs a
+longer-horizon or directly closed-loop training signal.
+
 ## 2026-06-26 - Per-sample local eval export for proxy analysis
 
 ### Hypothesis

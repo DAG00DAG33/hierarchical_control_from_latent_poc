@@ -1055,7 +1055,13 @@ counterfactual branch deltas (`+0.0093` max reward, `+0.013` success-once), but
 closed-loop task success stayed tied with frozen (`0.45`) and max reward was
 slightly lower. The sparse `success` metric selected residual `0%` of the time
 on the same smoke. This suggests the currently available one-segment task
-signals are still too weak/sparse as an upper-bound selector.
+signals are still too weak/sparse as an upper-bound selector. A 500-episode
+`env_max_reward` validation at `seed_start=4800000` confirmed that diagnosis:
+the selector reached `0.294` success versus frozen `0.306`, with final reward
+delta `-0.0087` and max reward delta `-0.0095`, despite positive one-segment
+counterfactual deltas inside the selector trace. Optimizing one-segment max
+reward is therefore not a stronger upper-bound branch selector for this
+checkpoint.
 
 To make local-to-task proxy checks less indirect, I added
 `eval-local-r{1,2,3} --include-samples`, which exports per-sample local
