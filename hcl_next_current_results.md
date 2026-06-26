@@ -1102,6 +1102,14 @@ distance delta `-0.0071`, and `D_phi` delta `-0.0042`, with success almost tied
 larger same-sample proxy audit agrees with the broader conclusion that this
 checkpoint is not a robust promotion candidate.
 
+I also ran the full 4096-env same-sample audit for the task-reward-debug
+checkpoint to make the comparison symmetric. It was also slightly negative:
+final reward delta `-0.0020`, max reward delta `-0.0008`, success delta
+`-0.0012`, raw distance delta `-0.0020`, and `D_phi` delta `+0.0005`. Raw and
+`D_phi` success AUCs were `0.531` and `0.503`. With both candidate checkpoints
+on the full bank, neither local raw L2 nor learned `D_phi` provides a reliable
+promotion signal.
+
 I then added a `task_paired` local-R3 reward mode. It reuses the cached frozen
 same-state rollout, but compares terminal ManiSkill dense reward instead of
 terminal latent distance:

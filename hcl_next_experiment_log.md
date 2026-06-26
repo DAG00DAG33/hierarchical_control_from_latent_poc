@@ -14734,3 +14734,65 @@ Proxy AUCs are only weakly above chance. This is a useful correction: the
 same-sample audit should be run at the full validation-bank scale before using a
 checkpoint as evidence for a better local objective or before promoting it to
 closed-loop evaluation.
+
+## 2026-06-26 - Full-bank task-reward-debug proxy audit
+
+### Hypothesis
+
+The task-hard full-bank result should be compared against the task-reward-debug
+checkpoint on the same 4096-env validation bank. Otherwise the comparison mixes
+full-bank evidence for one checkpoint with 512-bank smoke evidence for the
+other.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml eval-local-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_val_b1.h5 \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 1 \
+  --include-samples \
+  --reachability-checkpoint artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json
+
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml audit-local-sample-proxies \
+  --local-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json \
+  --force
+```
+
+### Results
+
+Full 4096-bank comparison:
+
+| checkpoint | final reward delta | max reward delta | success delta counts | raw delta | D_phi delta | raw success AUC | D_phi success AUC |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| task-reward debug | -0.0020 | -0.0008 | `-1: 90`, `0: 3921`, `+1: 85` | -0.0020 | +0.0005 | 0.531 | 0.503 |
+| task-hard bc0.3 | -0.0024 | +0.0010 | `-1: 88`, `0: 3914`, `+1: 94` | -0.0071 | -0.0042 | 0.562 | 0.526 |
+
+Task-reward-debug full-bank proxy correlations:
+
+| proxy | corr final reward delta | corr max reward delta | success-delta AUC |
+| --- | ---: | ---: | ---: |
+| raw-distance delta | 0.0987 | 0.0165 | 0.531 |
+| D_phi delta | 0.0534 | 0.0166 | 0.503 |
+| mean action delta | 0.0220 | 0.0181 | 0.549 |
+| initial raw distance | -0.0086 | -0.0092 | 0.462 |
+| frozen final raw distance | 0.0250 | -0.0009 | 0.523 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_1_seed0.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/local_eval_samples_n4096_dphi_proxy_audit.json`
+
+### Interpretation
+
+The symmetric full-bank comparison closes the apparent local positives for both
+candidate checkpoints. Task-reward-debug is slightly negative on final reward,
+max reward, and success; task-hard is slightly negative on final reward and
+local distances, with only a tiny success edge. Raw L2 and D_phi have weak
+proxy value at best. This points away from selecting among these checkpoints
+with scalar local metrics and toward changing the objective or using richer
+deployment-aligned proxy features.
