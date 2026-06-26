@@ -18203,3 +18203,104 @@ signal. Since the bc10 best checkpoint already failed serial deployment, and bc1
 is nearly identical at the selected step, I skipped another serial evaluation.
 The next objective change needs to alter the target/regime more substantially
 than just reducing the final-layer BC coefficient.
+
+## 2026-06-26 - Dense task-reward diagnostic on high-action direct-low R3
+
+### Hypothesis
+
+The learned reachability rewards may be the bottleneck. As a diagnostic only,
+train the same high-action direct-low R3 update against privileged dense task
+reward with local distance rewards disabled. If even the task reward cannot
+produce a useful update in this local setup, the issue is the local update
+formulation rather than just the learned reachability metric.
+
+### Commands
+
+Training:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  train-r3 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --n-demo 500 \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_taskreward_2048_40k_bc1 \
+  --steps 40960 \
+  --num-envs 2048 \
+  --rollout-steps 10 \
+  --num-minibatches 16 \
+  --update-epochs 3 \
+  --learning-rate 1e-4 \
+  --initial-logstd -1.8 \
+  --bc-weight 1.0 \
+  --terminal-weight 0.0 \
+  --distance-progress-weight 0.0 \
+  --task-reward-weight 1.0 \
+  --task-progress-weight 0.0 \
+  --reward-mode absolute \
+  --distance-metric reachability \
+  --reachability-checkpoint artifacts/incremental/reachability_distance/effect32_film/seed0/d_phi.pt \
+  --force
+```
+
+Serial eval used `latest.pt`, not `best_train_latent.pt`, because the generic
+direct-low checkpoint selector still ranks by terminal reachability distance,
+while this diagnostic optimizes dense task reward:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_strong \
+  --seed 0 \
+  --run-name hcl_next_highact_strong_r3_taskreward_2048_40k_bc1_latest_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --checkpoint artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_40k_bc1/latest.pt \
+  --force
+```
+
+### Training Metrics
+
+| step | mean reward | terminal D_phi | direct delta L2 | saturation | bc loss |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 20480 | 0.1285 | 0.4029 | 0.2650 | 0.4062 | 0.000047 |
+| 40960 | 0.1865 | 0.5885 | 0.2640 | 0.1956 | 0.000130 |
+
+The in-training dense reward increased, but the terminal reachability distance
+got worse. This is expected because the local distance reward was disabled.
+
+### Serial Result
+
+First 100-seed learned-goal window, `seed_start=3500000`:
+
+| policy | success | final reward | max reward | segment reach | segment final distance | residual L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| frozen highact_strong | 0.670 | 0.7092 | 0.7566 | 0.722 | 0.5225 | 0.00000 |
+| pairedsync D_phi R3 | 0.640 | 0.6469 | 0.7428 | 0.747 | 0.5974 | 0.00579 |
+| task-reward latest | 0.580 | 0.6101 | 0.6976 | 0.693 | 0.6211 | 0.01051 |
+
+Paired final-reward counts versus frozen:
+
+| candidate | wins | losses | ties |
+| --- | ---: | ---: | ---: |
+| pairedsync D_phi R3 | 25 | 31 | 44 |
+| task-reward latest | 30 | 36 | 34 |
+
+Artifacts:
+
+- `artifacts/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_40k_bc1/latest.pt`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_40k_bc1/train_metrics.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_strong/seed0/hcl_next_highact_strong_r3_taskreward_2048_40k_bc1_latest_serial100_seed3500000/serial_eval_100_seed3500000.json`
+
+### Interpretation
+
+Reject this local direct-low task-reward update. It creates a larger serial
+residual than the paired `D_phi` checkpoint, but the larger changes hurt task
+success, final reward, max reward, and segment reach. The failure is therefore
+not simply that `D_phi` is the wrong scalar reward; the current local direct-low
+update can also overfit or misapply privileged dense task reward. A useful next
+target likely needs longer-horizon/closed-loop intervention training or a
+different policy update structure, not another one-segment scalar target.

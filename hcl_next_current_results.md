@@ -661,6 +661,15 @@ checkpoint parameters differed only slightly from bc10 (`max_abs` tensor delta
 about `4.8e-4`). I skipped serial deployment because this did not create a
 meaningfully different policy.
 
+As a stronger target-regime diagnostic, I trained high-action direct-low R3 on
+dense task reward only (`task_reward_weight=1.0`, local distance weights zero).
+The latest checkpoint increased in-training mean reward (`0.1285 -> 0.1865`)
+and produced a larger serial residual (`0.0105` L2), but it failed deployment on
+the first 100-seed window: success `0.580`, final reward `0.6101`, max reward
+`0.6976`, versus frozen `0.670 / 0.7092 / 0.7566`. Even a privileged dense task
+reward in this local direct-low setup is therefore not enough; it makes larger
+changes, but not useful closed-loop changes.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
