@@ -2389,8 +2389,6 @@ def train_learned_interface_hierarchy(
     high_action_loss_weight = float(spec.get("high_action_loss_weight", 0.0))
     if high_action_loss_weight < 0.0:
         raise ValueError("high_action_loss_weight must be non-negative")
-    if high_action_loss_weight > 0.0 and not freeze_low_policy:
-        raise ValueError("high_action_loss_weight requires freeze_low_policy")
     if high_action_loss_weight > 0.0 and conditioning == "relation":
         raise ValueError("high_action_loss_weight does not support relation conditioning")
     goal_sensitivity_weight = float(spec.get("goal_sensitivity_weight", 0.0))
@@ -2422,6 +2420,23 @@ def train_learned_interface_hierarchy(
                     : frame_dim - low_frame_dropout_aux_keep_tail_dim,
                 ] = 0.0
         return dropped
+
+    def low_action_for_high_loss(x: torch.Tensor) -> torch.Tensor:
+        if low_optimizer is None:
+            return low_model(x)
+        parameters = list(low_model.parameters())
+        previous_flags = [parameter.requires_grad for parameter in parameters]
+        try:
+            for parameter in parameters:
+                parameter.requires_grad_(False)
+            return low_model(x)
+        finally:
+            for parameter, previous_flag in zip(
+                parameters,
+                previous_flags,
+                strict=True,
+            ):
+                parameter.requires_grad_(previous_flag)
 
     high_optimizer = (
         None
@@ -2467,7 +2482,11 @@ def train_learned_interface_hierarchy(
                     predicted_low_x = high_low_x.clone()
                     predicted_low_x[:, goal_slice] = predicted_goal
                     high_action_loss = torch.mean(
-                        (low_model(predicted_low_x) - high_action_y) ** 2
+                        (
+                            low_action_for_high_loss(predicted_low_x)
+                            - high_action_y
+                        )
+                        ** 2
                     )
                     high_loss = high_loss + (
                         high_action_loss_weight * high_action_loss

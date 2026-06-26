@@ -17076,3 +17076,132 @@ Do not promote this R3 checkpoint. The current best deployable candidate remains
 the frozen `effect32_film_gsens_ft_highact_strong` learned-interface policy.
 The next useful implementation direction is deployment-coupled high/low
 training, not another scalar terminal-D_phi R3 residual.
+
+## 2026-06-26 - Joint high/low action-through-low fine-tune
+
+### Hypothesis
+
+The high-only action-through-low candidate recovered learned-goal deployment for
+the more goal-sensitive low level, but it froze the low policy. A small joint
+variant may improve further if the high level keeps the action-through-low loss
+while the low level continues a gentle BC plus goal-sensitivity update from the
+same initialized low policy.
+
+### Implementation
+
+Changed `train_learned_interface_hierarchy` so `high_action_loss_weight` no
+longer requires `freeze_low_policy`. When the low policy is trainable, the
+trainer temporarily sets the low-policy parameters to `requires_grad=False`
+inside the high-level action-through-low loss. This preserves gradients from the
+low-policy output back to the predicted high-level goal, but prevents that loss
+from updating low-policy parameters. The low policy is then updated separately
+by its BC, frame-dropout auxiliary, and goal-sensitivity losses.
+
+Added candidate:
+
+```yaml
+effect32_film_gsens_ft_highact_joint:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32_film_gsens_ft_highact_joint
+  conditioning: film
+  high_init_candidate: effect32
+  low_init_candidate: effect32_film_gsens_ft
+  high_goal_mse_weight: 0.3
+  high_action_loss_weight: 300.0
+  goal_sensitivity_weight: 0.02
+  goal_sensitivity_margin: 0.2
+  policy_lr: 1.0e-5
+  policy_epochs: 20
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_joint \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_joint \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_joint \
+  --goal-source oracle \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_joint \
+  --seed 0 \
+  --samples 4096 \
+  --horizons 2,5,10,20 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft_highact_joint/diagnostics.json \
+  --force
+```
+
+### Training Metrics
+
+Best epoch: `18`.
+
+| metric | value |
+| --- | ---: |
+| validation normalized goal L2 | 2.5281 |
+| validation oracle action MAE | 0.0361 |
+| validation predicted action MAE | 0.0363 |
+| validation prediction-induced action L2 | 0.0110 |
+| last low train MSE | 0.000731 |
+| last low goal-sensitivity loss | 0.00585 |
+
+### Closed-Loop Results
+
+Matched 200-episode window, `seed_start=3500000`:
+
+| candidate | learned success | learned final | learned max | learned teacher MAE | oracle success | oracle final | oracle max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 0.645 | 0.7347 | 0.7420 | 0.1073 | 0.645 | 0.7399 | 0.7464 |
+| effect32_film_gsens_ft | 0.550 | 0.6662 | 0.6793 | 0.1026 | 0.675 | 0.7657 | 0.7733 |
+| effect32_film_gsens_ft_highact_strong | 0.640 | 0.7316 | 0.7403 | 0.0958 | 0.675 | 0.7657 | 0.7733 |
+| effect32_film_gsens_ft_highact_joint | 0.635 | 0.7260 | 0.7358 | 0.1034 | 0.615 | 0.7173 | 0.7270 |
+
+Goal-use diagnostic:
+
+| candidate | frame shuffle L2 | goal shuffle L2 | max goal sensitivity L2 |
+| --- | ---: | ---: | ---: |
+| highact strong | 0.9386 | 0.0919 | 0.0399 |
+| highact joint | 0.9381 | 0.0812 | 0.0598 |
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_joint/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_joint/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_joint/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_joint/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_gsens_ft_highact_joint/diagnostics.json`
+
+### Interpretation
+
+Reject this joint recipe. It does not improve learned-goal deployment over
+`highact_strong`, and it damages the oracle-goal low-level result substantially
+(`0.675 -> 0.615`). The goal diagnostic also does not show a cleaner
+goal-conditioned low policy: goal-shuffle L2 drops from `0.0919` to `0.0812`,
+still below the gate threshold.
+
+The failure is useful: simply unfreezing the low policy under the same
+BC+sensitivity objective is too weak a constraint. The current best candidate
+remains frozen `effect32_film_gsens_ft_highact_strong`. A better next joint
+variant should anchor the low policy's oracle-goal action/closed-loop behavior
+while tuning high-level compatibility, instead of letting low-level BC drift
+erase the oracle-goal improvement.

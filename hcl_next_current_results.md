@@ -485,6 +485,28 @@ hurting deployment robustness. The current best path remains the frozen
 next implementation work should move toward a deployment-coupled high/low
 objective rather than another scalar terminal-D_phi R3 residual.
 
+I added the first small deployment-coupled joint trainer variant by allowing the
+action-through-low high-level loss to run while the low-level policy is still
+trainable on BC plus goal-sensitivity regularization. During the high-level
+action loss, low-level parameters are temporarily frozen so the loss updates the
+predicted goal, not the low-policy weights. The first config,
+`effect32_film_gsens_ft_highact_joint`, did not improve:
+
+| candidate | learned success 200 | oracle success 200 | learned max reward | oracle max reward | teacher MAE learned |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 0.645 | 0.645 | 0.7420 | 0.7464 | 0.1073 |
+| effect32_film_gsens_ft_highact_strong | 0.640 | 0.675 | 0.7403 | 0.7733 | 0.0958 |
+| effect32_film_gsens_ft_highact_joint | 0.635 | 0.615 | 0.7358 | 0.7270 | 0.1034 |
+
+The joint candidate also still fails the low-level goal-use gate:
+goal-shuffle action L2 is `0.0812`, below the `0.1` threshold and below the
+frozen high-action candidate's `0.0919`. This rejects the naive joint recipe:
+continuing to train the low-level with the same BC+sensitivity losses erodes the
+oracle-goal low-level behavior that made `highact_strong` useful. A better next
+joint objective should constrain low-policy drift more directly, for example by
+anchoring oracle-goal closed-loop/action behavior while training the high-level
+action compatibility term.
+
 I then tested an effect32 "base + goal residual" low-level architecture,
 `effect32_goal_residual`, where a no-goal base policy predicts the action and a
 zero-initialized goal-conditioned residual can correct it. This preserved a
