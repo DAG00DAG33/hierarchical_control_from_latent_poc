@@ -12,7 +12,10 @@ from rich.console import Console
 from hcl_poc.config import Config, load_config
 from hcl_poc.data import prepare_dataset
 from hcl_poc.eval import evaluate, horizon_steps, record_videos
-from hcl_poc.goal_diagnostics import learned_interface_goal_diagnostics
+from hcl_poc.goal_diagnostics import (
+    aggregate_goal_diagnostics,
+    learned_interface_goal_diagnostics,
+)
 from hcl_poc.incremental import (
     collect_phase1_query_dataset,
     collect_phase2_dagger_queries,
@@ -994,6 +997,16 @@ def rl_rerun_cmd(args: argparse.Namespace) -> None:
                 samples=args.samples,
                 horizons=horizons,
                 output_path=Path(args.output) if args.output else None,
+                force=args.force,
+            )
+        )
+    elif args.rl_rerun_command == "aggregate-goal-diagnostics":
+        console.print(
+            aggregate_goal_diagnostics(
+                args.input_glob,
+                output_path=Path(args.output),
+                min_goal_shuffle_l2=args.min_goal_shuffle_l2,
+                min_goal_sensitivity_l2=args.min_goal_sensitivity_l2,
                 force=args.force,
             )
         )
@@ -2818,6 +2831,16 @@ def build_parser() -> argparse.ArgumentParser:
     goal_diag.add_argument("--output")
     goal_diag.add_argument("--force", action="store_true")
     goal_diag.set_defaults(func=rl_rerun_cmd)
+    aggregate_goal_diag = rl_rerun_sub.add_parser("aggregate-goal-diagnostics")
+    aggregate_goal_diag.add_argument(
+        "--input-glob",
+        default="results/incremental/goal_diagnostics/**/diagnostics.json",
+    )
+    aggregate_goal_diag.add_argument("--output", required=True)
+    aggregate_goal_diag.add_argument("--min-goal-shuffle-l2", type=float, default=0.1)
+    aggregate_goal_diag.add_argument("--min-goal-sensitivity-l2", type=float, default=0.1)
+    aggregate_goal_diag.add_argument("--force", action="store_true")
+    aggregate_goal_diag.set_defaults(func=rl_rerun_cmd)
     throughput = rl_rerun_sub.add_parser("throughput-benchmark")
     throughput.add_argument(
         "--num-envs",

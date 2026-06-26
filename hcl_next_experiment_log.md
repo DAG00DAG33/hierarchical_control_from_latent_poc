@@ -13224,3 +13224,82 @@ was much worse in closed loop. This is important for Phase 2 gating:
 goal-identifiability is a necessary rejection gate, not a promotion criterion.
 The candidate also has to preserve closed-loop imitation quality under its
 training/deployment horizon.
+
+## 2026-06-26: Aggregate goal-diagnostics gate
+
+### Hypothesis
+
+Per-candidate goal diagnostics are useful but easy to overread. I added an
+aggregate gate report so future PPO branches can be rejected consistently before
+expensive training.
+
+### Code Change
+
+Added:
+
+```text
+rl-rerun aggregate-goal-diagnostics
+```
+
+The command reads diagnostic JSON files, writes a JSON and Markdown table, and
+classifies candidates with:
+
+```text
+offline_goal_use_pass if:
+  goal_shuffle_action_change_l2 >= 0.1
+  or max_goal_sensitivity_l2 >= 0.1
+otherwise:
+  reject_low_goal_use
+```
+
+This is intentionally a rejection gate only. Passing candidates still need
+closed-loop imitation quality and local-to-task transfer evidence.
+
+### Command
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  aggregate-goal-diagnostics \
+  --input-glob 'results/incremental/goal_diagnostics/**/diagnostics.json' \
+  --output results/incremental/goal_diagnostics/gate_report.json \
+  --force
+```
+
+### Result
+
+| candidate | N | gate status | goal shuffle L2 | max horizon sensitivity L2 |
+| --- | ---: | --- | ---: | ---: |
+| effect32_film | 500 | reject_low_goal_use | 0.0622 | 0.0368 |
+| effect32_film_h2 | 500 | reject_low_goal_use | 0.0994 | 0.0810 |
+| effect32_film_h5 | 500 | reject_low_goal_use | 0.0662 | 0.0419 |
+| ae256_film | 1800 | offline_goal_use_pass | 0.2506 | 0.0937 |
+| dae256_n010 | 1800 | reject_low_goal_use | 0.0772 | 0.0286 |
+| effect32 | 1800 | reject_low_goal_use | 0.0279 | 0.0178 |
+| effect32_film | 1800 | reject_low_goal_use | 0.0622 | 0.0368 |
+| effect32_scene_film | 1800 | reject_low_goal_use | 0.0630 | 0.0352 |
+| jepa256_r01_v1_c01 | 1800 | reject_low_goal_use | 0.0408 | 0.0246 |
+| vae256_b1e5 | 1800 | reject_low_goal_use | 0.0405 | 0.0205 |
+| vae512_b1e6_film | 1800 | offline_goal_use_pass | 0.2783 | 0.1266 |
+
+Counts:
+
+```text
+total: 11
+offline_goal_use_pass: 2
+reject_low_goal_use: 9
+```
+
+Artifacts:
+
+- `results/incremental/goal_diagnostics/gate_report.json`
+- `results/incremental/goal_diagnostics/gate_report.md`
+
+### Interpretation
+
+The aggregate makes the current tradeoff explicit. Effect32 is the best observed
+deployment base but fails the strict offline goal-use gate. AE/VAE FiLM variants
+pass the gate but were weaker deployment bases in previous closed-loop checks.
+The next candidate worth serious PPO should satisfy both requirements: stronger
+goal-use than effect32 and closed-loop imitation quality near or above
+effect32_film.

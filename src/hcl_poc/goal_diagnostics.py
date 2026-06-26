@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import glob
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +25,142 @@ from hcl_poc.utils import Standardizer, default_device, ensure_dir, write_json
 from hcl_poc.vae_scaling import VAE_CANDIDATE, vae_scaling_config
 
 console = Console()
+
+
+def summarize_goal_diagnostics(
+    payload: dict[str, Any],
+    *,
+    min_goal_shuffle_l2: float = 0.1,
+    min_goal_sensitivity_l2: float = 0.1,
+) -> dict[str, Any]:
+    summary = dict(payload["summary"])
+    frame_shuffle = float(summary["frame_shuffle_action_change_l2"])
+    goal_shuffle = float(summary["goal_shuffle_action_change_l2"])
+    max_goal_sensitivity = float(summary["max_goal_sensitivity_l2"])
+    goal_to_frame_ratio = goal_shuffle / max(frame_shuffle, 1e-8)
+    offline_goal_use_pass = (
+        goal_shuffle >= min_goal_shuffle_l2
+        or max_goal_sensitivity >= min_goal_sensitivity_l2
+    )
+    gate_status = (
+        "offline_goal_use_pass"
+        if offline_goal_use_pass
+        else "reject_low_goal_use"
+    )
+    return {
+        "representation": payload["representation"],
+        "n_demo": payload.get("n_demo"),
+        "seed": payload.get("seed"),
+        "samples": payload.get("samples"),
+        "conditioning": payload.get("conditioning"),
+        "hierarchy_checkpoint": payload.get("hierarchy_checkpoint"),
+        "goal_shuffle_action_change_l2": goal_shuffle,
+        "frame_shuffle_action_change_l2": frame_shuffle,
+        "goal_to_frame_action_change_ratio": float(goal_to_frame_ratio),
+        "previous_action_shuffle_action_change_l2": float(
+            summary["previous_action_shuffle_action_change_l2"]
+        ),
+        "max_goal_sensitivity_l2": max_goal_sensitivity,
+        "goal_shuffle_mae_gap": float(summary["goal_shuffle_mae_gap"]),
+        "offline_goal_use_pass": offline_goal_use_pass,
+        "gate_status": gate_status,
+        "gate_note": (
+            "Goal-use diagnostics are only a rejection gate; candidates that pass "
+            "still need closed-loop imitation quality and local-to-task transfer."
+        ),
+    }
+
+
+def _diagnostic_sort_key(row: dict[str, Any]) -> tuple[int, str]:
+    n_demo = row["n_demo"]
+    n_value = int(n_demo) if n_demo is not None else -1
+    return n_value, str(row["representation"])
+
+
+def _write_goal_diagnostics_markdown(output_path: Path, rows: list[dict[str, Any]]) -> None:
+    markdown_path = output_path.with_suffix(".md")
+    lines = [
+        "# Goal Diagnostics Gate",
+        "",
+        "| representation | N | status | goal shuffle L2 | frame shuffle L2 | goal/frame | max horizon sensitivity | goal MAE gap |",
+        "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        lines.append(
+            "| {representation} | {n_demo} | {gate_status} | {goal:.4f} | {frame:.4f} | "
+            "{ratio:.4f} | {sensitivity:.4f} | {mae:.4f} |".format(
+                representation=row["representation"],
+                n_demo=row["n_demo"],
+                gate_status=row["gate_status"],
+                goal=row["goal_shuffle_action_change_l2"],
+                frame=row["frame_shuffle_action_change_l2"],
+                ratio=row["goal_to_frame_action_change_ratio"],
+                sensitivity=row["max_goal_sensitivity_l2"],
+                mae=row["goal_shuffle_mae_gap"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "Passing this offline gate is not a promotion criterion. It only means the low-level policy reacts enough to goals to justify later closed-loop checks.",
+            "",
+        ]
+    )
+    markdown_path.write_text("\n".join(lines))
+
+
+def aggregate_goal_diagnostics(
+    input_glob: str,
+    *,
+    output_path: Path,
+    min_goal_shuffle_l2: float = 0.1,
+    min_goal_sensitivity_l2: float = 0.1,
+    force: bool = False,
+) -> Path:
+    if output_path.exists() and not force:
+        console.print(f"Goal diagnostics aggregate exists: {output_path}")
+        return output_path
+    input_paths = sorted(Path(path) for path in glob.glob(input_glob, recursive=True))
+    if not input_paths:
+        raise ValueError(f"No goal diagnostics matched: {input_glob}")
+    rows = []
+    for path in input_paths:
+        payload = json.loads(path.read_text())
+        if payload.get("method") != "learned_interface_goal_diagnostics":
+            raise ValueError(f"Unexpected goal diagnostics method in {path}")
+        row = summarize_goal_diagnostics(
+            payload,
+            min_goal_shuffle_l2=min_goal_shuffle_l2,
+            min_goal_sensitivity_l2=min_goal_sensitivity_l2,
+        )
+        row["path"] = str(path)
+        rows.append(row)
+    rows.sort(key=_diagnostic_sort_key)
+    output_payload = {
+        "method": "aggregate_goal_diagnostics",
+        "input_glob": input_glob,
+        "min_goal_shuffle_l2": min_goal_shuffle_l2,
+        "min_goal_sensitivity_l2": min_goal_sensitivity_l2,
+        "rows": rows,
+        "counts": {
+            "total": len(rows),
+            "offline_goal_use_pass": int(
+                sum(bool(row["offline_goal_use_pass"]) for row in rows)
+            ),
+            "reject_low_goal_use": int(
+                sum(row["gate_status"] == "reject_low_goal_use" for row in rows)
+            ),
+        },
+        "note": (
+            "This aggregate is a hard rejection gate for low goal-use only. "
+            "Passing candidates still require closed-loop imitation and local-to-task "
+            "transfer checks before PPO scaling."
+        ),
+    }
+    write_json(output_path, output_payload)
+    _write_goal_diagnostics_markdown(output_path, rows)
+    console.print(output_payload)
+    return output_path
 
 
 def _result_dir(config: Config, n_demo: int, seed: int, candidate: str) -> Path:

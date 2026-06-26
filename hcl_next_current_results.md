@@ -225,6 +225,27 @@ So goal-use diagnostics should be treated as a hard rejection gate, not a
 promotion criterion. A candidate still needs closed-loop imitation quality and
 local-to-task transfer before PPO is worth scaling.
 
+I added an aggregate diagnostics gate command that applies this conservative
+rule across all diagnostic JSONs:
+
+```text
+offline_goal_use_pass if goal_shuffle_action_change_l2 >= 0.1
+or max_goal_sensitivity_l2 >= 0.1
+```
+
+On the current archive, only two of eleven diagnostics pass:
+
+| status | candidates |
+| --- | --- |
+| offline goal-use pass | `ae256_film`, `vae512_b1e6_film` |
+| reject low goal-use | `effect32_film`, `effect32_film_h2`, `effect32_film_h5`, `dae256_n010`, `effect32`, `effect32_scene_film`, `jepa256_r01_v1_c01`, `vae256_b1e5` |
+
+This formalizes the current decision rule. Effect32 remains the best observed
+deployment base, but it fails the strict offline goal-use gate; AE/VAE FiLM
+pass the gate but were weaker deployment bases in prior checks. The next
+candidate worth serious PPO needs both: pass this gate and preserve closed-loop
+imitation quality.
+
 I added candidate-level `horizon_steps` / `update_period` overrides for learned
 interfaces and trained short-horizon aliases of the effect32 FiLM interface:
 
@@ -1211,6 +1232,8 @@ results/incremental/goal_diagnostics/n500/seed0/effect32_film_h5/diagnostics.jso
 artifacts/incremental/learned_interface/effect32_film_h2/seed0/hierarchy.pt
 results/incremental/learned_interface/effect32_film_h2/seed0/learned_hierarchy_eval_200_seed3500000.json
 results/incremental/goal_diagnostics/n500/seed0/effect32_film_h2/diagnostics.json
+results/incremental/goal_diagnostics/gate_report.json
+results/incremental/goal_diagnostics/gate_report.md
 artifacts/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/latest.pt
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/history.json
 results/rl_rerun/local_r3/n500/seed0/task_paired_terminal_hard06_n4096_1update_bc1_lr1e5_logstd5/eval_local_n4096_val_b1_manifest.json
