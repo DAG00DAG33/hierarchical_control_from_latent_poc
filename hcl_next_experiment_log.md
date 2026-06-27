@@ -20085,3 +20085,128 @@ or temporal jitter from issuing new effect goals too often. This rejects the
 simple stale-held-goal hypothesis as the next lever. A useful effect-code fix
 would need a different training/deployment interface, not just a shorter update
 period.
+
+## 2026-06-27 - Effect32 FiLM current-horizon low training
+
+### Hypothesis
+
+The previous `u1` alias copied a low policy trained for held segment goals, then
+deployed it with fresh high-level goals every step. That tested update-period
+jitter, but not whether a low policy trained directly on the stepwise interface
+can use current-to-horizon effect goals better. This run trains the low level on
+the current frame, the effect32 goal from that current frame to `t+10`, previous
+action, and the deployed `remaining=1/10` input.
+
+### Code Change
+
+Added opt-in learned-interface low-goal mode:
+
+```text
+low_goal_mode: held_segment | current_horizon
+```
+
+`held_segment` is the existing behavior. `current_horizon` samples the low-level
+training row at time `t`, uses `goals[t + horizon]` as the future goal, and uses
+`update_period / horizon` as the remaining-time input. I also updated
+goal-diagnostics to read `low_goal_mode` and `update_period` from the hierarchy
+checkpoint so diagnostics use the deployed remaining-time convention for
+current-horizon candidates.
+
+Candidate:
+
+```yaml
+effect32_film_u1_current:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  low_init_candidate: effect32_film
+  low_goal_mode: current_horizon
+  update_period: 1
+  policy_lr: 1.0e-5
+  policy_epochs: 10
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_u1_current \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_u1_current \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_film_u1_current \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_film_u1_current/diagnostics.json \
+  --force
+```
+
+### Results
+
+Current-horizon validation selected epoch 10:
+
+| metric | value |
+| --- | ---: |
+| normalized goal L2 | 2.5896 |
+| oracle action MAE | 0.0389 |
+| predicted action MAE | 0.0394 |
+| prediction-induced action L2 | 0.0119 |
+
+Matched 200-episode learned-goal window at `seed_start=3500000`:
+
+| candidate | update | low training | success | final reward | max reward | decisions / ep | teacher MAE |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| effect32_film | 10 | held segment | 0.645 | 0.7347 | 0.7420 | 7.04 | 0.1073 |
+| effect32_film_u1 | 1 | held segment copy | 0.590 | 0.6947 | 0.7063 | 69.14 | 0.1067 |
+| effect32_film_u1_current | 1 | current horizon | 0.610 | 0.7111 | 0.7226 | 68.17 | 0.0999 |
+
+Goal diagnostics:
+
+| candidate | goal shuffle L2 | frame shuffle L2 | max same-state sensitivity | goal MAE gap | gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| effect32_film | 0.0622 | 0.9503 | 0.0368 | 0.0102 | reject |
+| effect32_film_u1_current | 0.0598 | 0.9521 | 0.0361 | 0.0099 | reject |
+
+The aggregate gate report is now `5` pass, `35` reject, `40` total.
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_u1_current/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_u1_current/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_u1_current/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_film_u1_current/diagnostics.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+
+### Verification
+
+```bash
+uv run ruff check src/hcl_poc/learned_interface.py src/hcl_poc/goal_diagnostics.py --select F
+uv run python -m compileall -q src/hcl_poc/learned_interface.py src/hcl_poc/goal_diagnostics.py
+```
+
+### Interpretation
+
+Training the low policy directly on current-to-horizon effect goals improves
+the copied stepwise policy (`0.590 -> 0.610` success) and reduces teacher MAE
+(`0.1067 -> 0.0999`), so the interface mismatch mattered. But it still trails
+the original held-goal baseline on success, final reward, and max reward, and it
+does not increase same-state goal sensitivity. This rejects simple
+current-horizon supervised retraining as a fix. The next useful effect-code
+change needs a stronger action-relevant or closed-loop signal, not just matching
+the low-level supervised distribution to `update_period=1`.

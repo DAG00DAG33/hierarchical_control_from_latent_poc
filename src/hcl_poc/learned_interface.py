@@ -1715,15 +1715,21 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
         conditioning: str = "concat",
         frame_dropout_prob: float = 0.0,
         frame_dropout_keep_tail_dim: int = 0,
+        low_goal_mode: str = "held_segment",
+        update_period: int | None = None,
     ) -> None:
         if mode not in {"high", "low"}:
             raise ValueError(f"Unknown held-goal mode: {mode}")
         if conditioning not in {"concat", "delta", "relation", "film", "goal_residual"}:
             raise ValueError(f"Unknown goal conditioning: {conditioning}")
+        if low_goal_mode not in {"held_segment", "current_horizon"}:
+            raise ValueError(f"Unknown low goal mode: {low_goal_mode}")
         if frame_dropout_prob < 0.0 or frame_dropout_prob > 1.0:
             raise ValueError("frame_dropout_prob must be in [0, 1]")
         if frame_dropout_keep_tail_dim < 0:
             raise ValueError("frame_dropout_keep_tail_dim must be non-negative")
+        if update_period is not None and update_period < 1:
+            raise ValueError("update_period must be positive")
         self.episodes = [
             episode
             for episode in episodes
@@ -1738,6 +1744,8 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
         self.conditioning = conditioning
         self.frame_dropout_prob = frame_dropout_prob
         self.frame_dropout_keep_tail_dim = frame_dropout_keep_tail_dim
+        self.low_goal_mode = low_goal_mode
+        self.update_period = update_period or horizon_steps
         self.zero_action = action_norm.transform(
             np.zeros((1, 3), dtype=np.float32)
         )[0]
@@ -1772,8 +1780,21 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
                 ]
             )[0]
         else:
-            offset = int(np.random.randint(0, self.horizon_steps))
-            current = base + offset
+            if self.low_goal_mode == "current_horizon":
+                current = int(
+                    np.random.randint(
+                        0, len(episode["actions"]) - self.horizon_steps
+                    )
+                )
+                goal_index = current + self.horizon_steps
+                remaining_fraction = self.update_period / self.horizon_steps
+            else:
+                offset = int(np.random.randint(0, self.horizon_steps))
+                current = base + offset
+                goal_index = base + self.horizon_steps
+                remaining_fraction = (
+                    self.horizon_steps - offset
+                ) / self.horizon_steps
             previous = (
                 self.action_norm.transform(
                     episode["actions"][current - 1 : current]
@@ -1801,15 +1822,10 @@ class _HeldGoalDataset(torch.utils.data.Dataset):
                 episode["goals"][current : current + 1]
             )
             future_goal = self.goal_norm.transform(
-                episode["goals"][
-                    base
-                    + self.horizon_steps : base
-                    + self.horizon_steps
-                    + 1
-                ]
+                episode["goals"][goal_index : goal_index + 1]
             )
             remaining = np.asarray(
-                [[(self.horizon_steps - offset) / self.horizon_steps]],
+                [[remaining_fraction]],
                 dtype=np.float32,
             )
             condition = _low_condition_array(
@@ -2051,10 +2067,17 @@ def _hierarchy_validation_metrics(
     samples: int,
     seed: int,
     conditioning: str,
+    low_goal_mode: str = "held_segment",
+    update_period: int | None = None,
 ) -> dict[str, float]:
+    if low_goal_mode not in {"held_segment", "current_horizon"}:
+        raise ValueError(f"Unknown low_goal_mode: {low_goal_mode}")
+    if update_period is not None and update_period < 1:
+        raise ValueError("update_period must be positive")
     device = next(high_model.parameters()).device
     rng = np.random.default_rng(seed)
     zero_action = action_norm.transform(np.zeros((1, 3), dtype=np.float32))[0]
+    effective_update_period = update_period or horizon_steps
     high_conditions = []
     oracle_goals = []
     current_frames = []
@@ -2064,12 +2087,24 @@ def _hierarchy_validation_metrics(
     remaining_values = []
     for _ in range(samples):
         episode = episodes[int(rng.integers(0, len(episodes)))]
-        base = int(rng.integers(0, len(episode["actions"]) - horizon_steps))
-        offset = int(rng.integers(0, horizon_steps))
-        current = base + offset
+        if low_goal_mode == "current_horizon":
+            base = int(rng.integers(0, len(episode["actions"]) - horizon_steps))
+            current = base
+            high_index = current
+            goal_index = current + horizon_steps
+            remaining_fraction = effective_update_period / horizon_steps
+        else:
+            base = int(rng.integers(0, len(episode["actions"]) - horizon_steps))
+            offset = int(rng.integers(0, horizon_steps))
+            current = base + offset
+            high_index = base
+            goal_index = base + horizon_steps
+            remaining_fraction = (horizon_steps - offset) / horizon_steps
         high_previous = (
-            action_norm.transform(episode["actions"][base - 1 : base])[0]
-            if base > 0
+            action_norm.transform(
+                episode["actions"][high_index - 1 : high_index]
+            )[0]
+            if high_index > 0
             else zero_action
         )
         previous = (
@@ -2083,7 +2118,7 @@ def _hierarchy_validation_metrics(
             np.concatenate(
                 [
                     frame_norm.transform(
-                        episode["frames"][base : base + 1]
+                        episode["frames"][high_index : high_index + 1]
                     )[0],
                     high_previous,
                 ]
@@ -2091,9 +2126,7 @@ def _hierarchy_validation_metrics(
         )
         oracle_goals.append(
             goal_norm.transform(
-                episode["goals"][
-                    base + horizon_steps : base + horizon_steps + 1
-                ]
+                episode["goals"][goal_index : goal_index + 1]
             )[0]
         )
         current_frames.append(
@@ -2108,7 +2141,7 @@ def _hierarchy_validation_metrics(
         )
         previous_actions.append(previous)
         target_actions.append(episode["actions"][current])
-        remaining_values.append((horizon_steps - offset) / horizon_steps)
+        remaining_values.append(remaining_fraction)
     high_conditions_np = np.asarray(high_conditions, dtype=np.float32)
     oracle_goals_np = np.asarray(oracle_goals, dtype=np.float32)
     predicted_goals = high_model(
@@ -2218,6 +2251,9 @@ def train_learned_interface_hierarchy(
     )
     spec = learned_interface_candidate_spec(config, candidate)
     conditioning = str(spec["conditioning"])
+    low_goal_mode = str(spec.get("low_goal_mode", "held_segment"))
+    if low_goal_mode not in {"held_segment", "current_horizon"}:
+        raise ValueError(f"Unknown low_goal_mode: {low_goal_mode}")
     batch_size = int(
         spec.get(
             "policy_batch_size",
@@ -2258,6 +2294,8 @@ def train_learned_interface_hierarchy(
         frame_dropout_keep_tail_dim=int(
             spec.get("low_frame_dropout_keep_tail_dim", 0)
         ),
+        low_goal_mode=low_goal_mode,
+        update_period=_candidate_update_period(config, candidate),
     )
     high_loader = DataLoader(
         high_dataset,
@@ -2601,6 +2639,8 @@ def train_learned_interface_hierarchy(
             validation_samples,
             seed + 3000,
             conditioning,
+            low_goal_mode=low_goal_mode,
+            update_period=_candidate_update_period(config, candidate),
         )
         history.append(
             {
@@ -2638,6 +2678,7 @@ def train_learned_interface_hierarchy(
         "goal_dim": goal_dim,
         "hidden_dim": hidden_dim,
         "conditioning": conditioning,
+        "low_goal_mode": low_goal_mode,
         "high_level_candidate": high_level_candidate,
         "high_init_candidate": high_init_candidate,
         "low_init_candidate": low_init_candidate,

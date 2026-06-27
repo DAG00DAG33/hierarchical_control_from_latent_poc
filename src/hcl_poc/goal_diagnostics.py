@@ -244,6 +244,8 @@ def _load_candidate_frozen(
             goal_norm=Standardizer.from_state_dict(checkpoint["goal_norm"]),
             action_norm=Standardizer.from_state_dict(checkpoint["action_norm"]),
             horizon_steps=int(checkpoint["horizon_steps"]),
+            update_period=int(checkpoint["update_period"]),
+            low_goal_mode=str(checkpoint.get("low_goal_mode", "held_segment")),
             conditioning=str(checkpoint.get("conditioning", "concat")),
             frame_dim=int(checkpoint["frame_dim"]),
             goal_dim=int(checkpoint["goal_dim"]),
@@ -336,6 +338,7 @@ def _build_conditions(
     encoder: torch.nn.Module | None = None,
     representation_frame_norm: Standardizer | None = None,
     device: torch.device | None = None,
+    remaining_fraction: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if encoder_type == "effect" and conditioning not in {
         "concat",
@@ -368,9 +371,11 @@ def _build_conditions(
         else:
             previous_actions.append(episode["actions"][t - 1])
         targets.append(episode["actions"][t])
-        remaining.append(
-            [np.clip(max(horizon, 1) / max(base_horizon, 1), 0.0, 1.0)]
-        )
+        if remaining_fraction is None:
+            value = np.clip(max(horizon, 1) / max(base_horizon, 1), 0.0, 1.0)
+        else:
+            value = remaining_fraction
+        remaining.append([value])
     frame_np = frame_norm.transform(np.asarray(frames, dtype=np.float32))
     current_np = goal_norm.transform(np.asarray(current_latents, dtype=np.float32))
     if encoder_type == "effect":
@@ -416,6 +421,7 @@ def _build_mixed_horizon_conditions(
     encoder: torch.nn.Module | None = None,
     representation_frame_norm: Standardizer | None = None,
     device: torch.device | None = None,
+    remaining_fraction: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if encoder_type == "effect" and conditioning not in {
         "concat",
@@ -450,9 +456,11 @@ def _build_mixed_horizon_conditions(
         else:
             previous_actions.append(episode["actions"][t - 1])
         targets.append(episode["actions"][t])
-        remaining.append(
-            [np.clip(max(horizon, 1) / max(base_horizon, 1), 0.0, 1.0)]
-        )
+        if remaining_fraction is None:
+            value = np.clip(max(horizon, 1) / max(base_horizon, 1), 0.0, 1.0)
+        else:
+            value = remaining_fraction
+        remaining.append([value])
     frame_np = frame_norm.transform(np.asarray(frames, dtype=np.float32))
     current_np = goal_norm.transform(np.asarray(current_latents, dtype=np.float32))
     if encoder_type == "effect":
@@ -504,12 +512,15 @@ def learned_interface_goal_diagnostics(
     encoder_type = str(getattr(frozen, "encoder_type", "state"))
     encoder = getattr(frozen, "encoder", None)
     representation_frame_norm = getattr(frozen, "representation_frame_norm", None)
+    low_goal_mode = str(getattr(frozen, "low_goal_mode", "held_segment"))
+    update_period = int(getattr(frozen, "update_period", frozen.horizon_steps))
+    remaining_fraction = (
+        update_period / frozen.horizon_steps
+        if low_goal_mode == "current_horizon"
+        else None
+    )
     _train, validation, _metadata = _load_phase6_train_episodes(point_config)
     validation_goals_raw = _load_encoded_validation_goals(config, n_demo, seed, candidate)
-    validation_goals = [
-        frozen.goal_norm.transform(goals).astype(np.float32)
-        for goals in validation_goals_raw
-    ]
     rng = np.random.default_rng(seed + 24_681)
     rows = _sample_validation_rows(
         validation,
@@ -540,6 +551,7 @@ def learned_interface_goal_diagnostics(
             encoder=encoder,
             representation_frame_norm=representation_frame_norm,
             device=device,
+            remaining_fraction=remaining_fraction,
         )
         pred = _predict_actions(
             frozen.low_model, action_mean, action_std, condition_np, device
@@ -577,6 +589,7 @@ def learned_interface_goal_diagnostics(
         encoder=encoder,
         representation_frame_norm=representation_frame_norm,
         device=device,
+        remaining_fraction=remaining_fraction,
     )
     reference_prediction = _predict_actions(
         frozen.low_model, action_mean, action_std, reference_condition, device
@@ -613,6 +626,8 @@ def learned_interface_goal_diagnostics(
         "shuffle_reference": "mixed_horizons",
         "hierarchy_checkpoint": str(frozen.checkpoint_path),
         "conditioning": frozen.conditioning,
+        "low_goal_mode": low_goal_mode,
+        "update_period": update_period,
         "by_horizon": by_horizon,
         "same_state_goal_sensitivity_l2": sensitivity,
         "condition_block_shuffle": shuffle,

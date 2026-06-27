@@ -2129,6 +2129,15 @@ The next useful directions are:
    reward, `69.14` decisions/episode). The low-level weights were copied from
    `effect32_film`, so this rejects simple more-frequent replanning as a fix
    for stale held effect goals.
+   I then trained a low policy directly for the stepwise current-to-horizon
+   interface (`effect32_film_u1_current`, `low_goal_mode=current_horizon`).
+   It improved over copied u1 (`0.610` vs `0.590` success and `0.7111` vs
+   `0.6947` final reward) and reduced teacher MAE, but it still trailed the
+   original held-goal baseline and did not improve the goal-use gate
+   (`goal_shuffle_l2=0.0598`, `max_same_state_sensitivity=0.0361`). Matching
+   the supervised low-level distribution to `update_period=1` is therefore not
+   enough; the next effect-code change needs a stronger action-relevant or
+   closed-loop signal.
 
 ## Key Artifacts
 

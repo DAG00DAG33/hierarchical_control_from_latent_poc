@@ -736,6 +736,16 @@ learned_interface:
       freeze_low_policy: true
       update_period: 5
       policy_epochs: 1
+    effect32_film_u1_current:
+      family: conditioning_ablation
+      representation_candidate: effect32
+      high_level_candidate: effect32
+      conditioning: film
+      low_init_candidate: effect32_film
+      low_goal_mode: current_horizon
+      update_period: 1
+      policy_lr: 1.0e-5
+      policy_epochs: 10
     effect32_goal_residual:
       family: conditioning_ablation
       representation_candidate: effect32
