@@ -19590,3 +19590,64 @@ held-goal data is not enough to preserve closed-loop/serial behavior. The
 conservative serial/RL base remains `effect32_film_gsens_ft_highact_strong`.
 The next coupled objective needs a stronger deployment-level signal, not another
 one-step action-space anchor.
+
+## 2026-06-27 - Prefix counterfactual selector grouped-loss check
+
+### Hypothesis
+
+The prefix-feature counterfactual branch selector previously used return
+regression on each candidate. Since deployment chooses one candidate per query,
+a grouped best-candidate cross-entropy objective might better match the branch
+selection problem.
+
+### Command
+
+I trained five seeds on the existing prefix counterfactual bank:
+
+```bash
+for s in 0 1 2 3 4; do
+  TQDM_DISABLE=1 uv run scripts/train_privileged_z_counterfactual_selector.py \
+    --input data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9963000_q128_k8_prefix.npz \
+    --output artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_bestce_seed${s}.pt \
+    --seed ${s} \
+    --epochs 200 \
+    --batch-size 1024 \
+    --hidden-dim 128 \
+    --depth 2 \
+    --learning-rate 1e-3 \
+    --loss best_ce
+done
+```
+
+### Results
+
+Validation metrics across five random query splits:
+
+| seed | selected return delta | selected success delta | nearest return delta | nearest success delta | oracle return delta | oracle success delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | -5.387 | -0.062 | -1.266 | +0.094 | +13.002 | +0.250 |
+| 1 | +2.606 | +0.031 | +1.551 | +0.000 | +18.778 | +0.281 |
+| 2 | -0.821 | -0.031 | +3.524 | +0.000 | +18.848 | +0.250 |
+| 3 | +1.893 | +0.062 | +8.922 | +0.156 | +16.651 | +0.281 |
+| 4 | -0.361 | -0.062 | -2.383 | -0.094 | +10.373 | +0.125 |
+| mean | -0.414 | -0.013 | +2.070 | +0.031 | +15.530 | +0.237 |
+
+Artifacts:
+
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_bestce_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_bestce_seed1.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_bestce_seed2.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_bestce_seed3.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q128_k8_prefix_bestce_seed4.pt`
+
+### Interpretation
+
+Grouped best-candidate training does not rescue the prefix-feature static
+selector. It is marginally better than the previous regression selector on
+mean selected return (`-0.414` versus `-0.517`), but selected success remains
+negative and it still loses clearly to nearest-candidate selection. The large
+oracle best-of-8 gap remains, so the candidate set has useful alternatives, but
+this small offline scorer cannot choose them reliably. This further supports
+the current direction: branch/counterfactual work needs broader query coverage,
+different candidate generation, or an online/intervention-trained selector,
+not another static per-candidate scoring loss on this bank.

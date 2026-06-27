@@ -1129,10 +1129,22 @@ MLP selector did not extract it:
 | nearest candidate | +2.070 | +0.031 |
 | oracle best-of-8 | +15.530 | +0.237 |
 
-So prefix/end-state features are not sufficient in the current static selector
-form. The remaining privileged branch-goal direction would need a better
-candidate-generation distribution, more query coverage, or a selector trained
-as an online/intervention policy rather than another small offline scorer.
+I then trained the same prefix-feature selector with grouped best-candidate
+cross-entropy instead of return regression. This matched the per-query choice
+structure better, but did not change the conclusion:
+
+| selector objective over 5 query-split seeds | validation return delta | validation success delta |
+| --- | ---: | ---: |
+| prefix return regression | -0.517 | -0.013 |
+| prefix grouped best-candidate CE | -0.414 | -0.013 |
+| nearest candidate | +2.070 | +0.031 |
+| oracle best-of-8 | +15.530 | +0.237 |
+
+So prefix/end-state features and a grouped selection loss are not sufficient in
+the current static selector form. The remaining privileged branch-goal direction
+would need a better candidate-generation distribution, more query coverage, or a
+selector trained as an online/intervention policy rather than another small
+offline scorer on this bank.
 
 ### Multifeature segment gating has local signal
 
