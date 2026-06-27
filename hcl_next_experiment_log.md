@@ -19651,3 +19651,90 @@ this small offline scorer cannot choose them reliably. This further supports
 the current direction: branch/counterfactual work needs broader query coverage,
 different candidate generation, or an online/intervention-trained selector,
 not another static per-candidate scoring loss on this bank.
+
+## 2026-06-27 - Larger prefix counterfactual selector bank
+
+### Hypothesis
+
+The `q128/k8` prefix-feature bank may be too small for the selector to learn
+which query-specific branch goal is useful. I collected a fresh `q256/k8` bank
+with the same prefix/end-state features, then trained both return regression
+and grouped best-candidate CE selectors across five random query splits.
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run scripts/collect_privileged_z_branch_counterfactuals.py \
+  --config configs/pusht_incremental.yaml \
+  --checkpoint artifacts/incremental/privileged_z/clean_disturbed_multioffset/n1800/seed0/privileged_z_k10.pt \
+  --residual-checkpoint artifacts/incremental/privileged_z_direct_distill/hcl_next_oracle_low_level_oraclegoal_branch_return_ge5_seed9940000_imp01_preserve_npz1_final_layer_lr1e4_e200/seed0/latest.pt \
+  --branch-bank data/manifests/privileged_z_branch_outcome_oracle_low_level_oraclegoal_all_seed9950000_200eps_b10.npz \
+  --output data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9964000_q256_k8_prefix.npz \
+  --seed-start 9964000 \
+  --num-envs 64 \
+  --query-batches 4 \
+  --candidates-per-query 8 \
+  --max-rollout-steps 120
+```
+
+Selector training:
+
+```bash
+for loss in mse best_ce; do
+  for s in 0 1 2 3 4; do
+    TQDM_DISABLE=1 uv run scripts/train_privileged_z_counterfactual_selector.py \
+      --input data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9964000_q256_k8_prefix.npz \
+      --output artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_${loss}_seed${s}.pt \
+      --seed ${s} \
+      --epochs 200 \
+      --batch-size 1024 \
+      --hidden-dim 128 \
+      --depth 2 \
+      --learning-rate 1e-3 \
+      --loss ${loss}
+  done
+done
+```
+
+### Counterfactual Bank
+
+| bank | queries | candidates/query | base success | base return | nearest return delta | oracle return delta | positive best > 5 | oracle success delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `seed9964000_q256_k8_prefix` | 256 | 8 | 0.531 | 46.09 | -4.57 | +10.85 | 0.430 | +0.133 |
+
+### Selector Results
+
+Validation metrics across five random query splits:
+
+| selector objective | selected return delta | selected success delta | nearest return delta | nearest success delta | oracle return delta | oracle success delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| return regression | -1.660 | -0.056 | -5.519 | -0.069 | +10.928 | +0.100 |
+| grouped best-candidate CE | -0.549 | -0.028 | -5.519 | -0.069 | +10.928 | +0.100 |
+
+Artifacts:
+
+- `data/manifests/privileged_z_branch_counterfactuals_dense2000_seed9964000_q256_k8_prefix.npz`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_mse_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_mse_seed1.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_mse_seed2.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_mse_seed3.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_mse_seed4.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_best_ce_seed0.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_best_ce_seed1.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_best_ce_seed2.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_best_ce_seed3.pt`
+- `artifacts/incremental/privileged_z_branch_selector/hcl_next_counterfactual_q256_k8_prefix_best_ce_seed4.pt`
+
+### Interpretation
+
+Increasing query coverage and adding prefix/end-state features helps relative
+to nearest-candidate selection on this harder fresh bank, where nearest is
+strongly negative. But both learned static selectors still choose candidates
+with negative average return and success deltas, and they capture only a small
+fraction of the oracle best-of-8 upside. The grouped CE objective is again
+better than regression on return but still not good enough for closed-loop
+promotion. This rejects "q256 prefix coverage plus current static scorer" as
+the missing branch-selector ingredient. The remaining branch direction needs a
+different candidate-generation distribution, more expressive/history-aware
+selector, or online/intervention-trained policy rather than more of the same
+static query-candidate scoring.

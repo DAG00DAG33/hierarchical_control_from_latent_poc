@@ -1140,11 +1140,27 @@ structure better, but did not change the conclusion:
 | nearest candidate | +2.070 | +0.031 |
 | oracle best-of-8 | +15.530 | +0.237 |
 
-So prefix/end-state features and a grouped selection loss are not sufficient in
-the current static selector form. The remaining privileged branch-goal direction
-would need a better candidate-generation distribution, more query coverage, or a
-selector trained as an online/intervention policy rather than another small
-offline scorer on this bank.
+I also collected a larger fresh `q256/k8` prefix bank. The candidate set again
+had large oracle upside and nearest selection was harmful:
+
+| bank | nearest return delta | oracle return delta | oracle success delta |
+| --- | ---: | ---: | ---: |
+| `seed9964000_q256_k8_prefix` | -4.57 | +10.85 | +0.133 |
+
+Training five-seed selectors on that bank improved relative to nearest but
+still chose bad candidates on average:
+
+| selector objective | validation return delta | validation success delta | nearest return delta | oracle return delta |
+| --- | ---: | ---: | ---: | ---: |
+| return regression | -1.660 | -0.056 | -5.519 | +10.928 |
+| grouped best-candidate CE | -0.549 | -0.028 | -5.519 | +10.928 |
+
+So prefix/end-state features, more query coverage, and a grouped selection loss
+are not sufficient in the current static selector form. The remaining privileged
+branch-goal direction would need a better candidate-generation distribution,
+more expressive/history-aware features, or a selector trained as an
+online/intervention policy rather than another small offline scorer on this
+bank.
 
 ### Multifeature segment gating has local signal
 
