@@ -19738,3 +19738,114 @@ the missing branch-selector ingredient. The remaining branch direction needs a
 different candidate-generation distribution, more expressive/history-aware
 selector, or online/intervention-trained policy rather than more of the same
 static query-candidate scoring.
+
+## 2026-06-27 - Larger oracle-segment trace selector check
+
+### Hypothesis
+
+The previous trace-fitted deployable segment selector was trained on only a
+20-episode oracle trace. A larger trace and a slightly richer online feature set
+may reveal whether the env-reward oracle branch choices are predictable from
+deployable prefix context.
+
+### Code Change
+
+`rl-rerun fit-oracle-segment-selector` can now use `step_index` as an online
+selector feature. The trace already saved this field; I added it to
+`ONLINE_STEP_SELECTOR_FEATURES` and to the default oracle-trace selector feature
+list. `eval-closed-loop-r{1,2,3} --segment-selector` now provides `step_index`
+when scoring at replan time.
+
+### Commands
+
+Collect two fresh 100-episode env-reward oracle-selector traces:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 5300000 \
+  --num-envs 50 \
+  --oracle-copy-mode state_dict \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_100_seed5300000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 5400000 \
+  --num-envs 50 \
+  --oracle-copy-mode state_dict \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_100_seed5400000.json
+```
+
+Fit the richer default selector:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  fit-oracle-segment-selector \
+  --train-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_100_seed5300000.json \
+  --validation-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_100_seed5400000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_stepidx_train100_5300000_valid100_5400000.json \
+  --force
+```
+
+### Results
+
+The non-deployable env-reward oracle selector itself was mildly positive on
+both trace windows:
+
+| seed start | frozen success | oracle-selector success | success delta | decisions | oracle residual rate |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5300000 | 0.230 | 0.250 | +0.020 | 899 | 0.483 |
+| 5400000 | 0.280 | 0.300 | +0.020 | 868 | 0.468 |
+
+The deployable fitted selector still did not validate:
+
+| fit | validation AUC | validation accuracy | selector residual rate | selector reward gap vs oracle |
+| --- | ---: | ---: | ---: | ---: |
+| 20-episode six-feature trace | 0.507 | 0.505 | 0.299 | -0.00123 |
+| 100-episode six-feature trace | 0.501 | 0.513 | 0.268 | -0.00293 |
+| 100-episode + `step_index` | 0.501 | 0.513 | 0.268 | -0.00293 |
+
+Artifacts:
+
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_100_seed5300000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_100_seed5400000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_sixfeat_train100_5300000_valid100_5400000.json`
+- `results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_stepidx_train100_5300000_valid100_5400000.json`
+
+### Verification
+
+```bash
+uv run ruff check src/hcl_poc/rl_rerun.py --select F
+uv run python -m compileall -q src/hcl_poc/rl_rerun.py src/hcl_poc/cli.py
+```
+
+`ruff --select F` and `compileall` passed. `ruff --select F,E501` still reports
+pre-existing long lines in `src/hcl_poc/rl_rerun.py`; I did not reformat the
+file in this experiment.
+
+### Interpretation
+
+The larger trace confirms that the env-reward oracle branch choice has a small
+non-deployable upside, but the current deployable prefix features cannot predict
+it on a fresh trace. Adding `step_index` and increasing trace size from 20 to
+100 episodes leaves validation AUC at chance. This rejects "more rows plus
+step/time context" as the missing selector ingredient for this checkpoint.
+Further selector work should change the feature source substantially, for
+example using richer current observation/latent context or training the
+selector directly online, rather than fitting another linear selector to the
+same prefix scalars.

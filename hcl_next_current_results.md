@@ -1668,6 +1668,23 @@ checkpoint. A matching 500-episode `success` selector was essentially inactive
 negative reward deltas. The sparse success branch signal also does not provide
 a useful upper bound.
 
+I then tested whether the env-reward oracle branch labels become learnable from
+a larger trace. I added `step_index` as a supported online selector feature and
+collected two fresh 100-episode env-reward oracle-selector traces. The
+non-deployable oracle selector was mildly positive on both windows (`+0.020`
+success each), but the deployable fitted selector still validated at chance:
+
+| fit | validation AUC | validation accuracy | selector reward gap vs oracle |
+| --- | ---: | ---: | ---: |
+| 20-episode six-feature trace | 0.507 | 0.505 | -0.00123 |
+| 100-episode six-feature trace | 0.501 | 0.513 | -0.00293 |
+| 100-episode + `step_index` | 0.501 | 0.513 | -0.00293 |
+
+So larger trace-only fitting and simple time context do not rescue this
+deployable selector. The selector direction now needs richer current
+observation/latent context or direct online/intervention training, not another
+linear model over the same prefix scalars.
+
 To make local-to-task proxy checks less indirect, I added
 `eval-local-r{1,2,3} --include-samples`, which exports per-sample local
 distances, dense rewards, success flags, and action deltas under

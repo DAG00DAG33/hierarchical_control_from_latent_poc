@@ -4290,6 +4290,7 @@ DEFAULT_CLOSED_LOOP_SELECTOR_FEATURES = [
 ]
 
 DEFAULT_ORACLE_SEGMENT_TRACE_SELECTOR_FEATURES = [
+    "step_index",
     "episode_action_delta_l2_mean",
     "episode_action_delta_l2_max",
     "episode_policy_saturation_rate",
@@ -4299,6 +4300,7 @@ DEFAULT_ORACLE_SEGMENT_TRACE_SELECTOR_FEATURES = [
 ]
 
 ONLINE_STEP_SELECTOR_FEATURES = {
+    "step_index": "step_index",
     "episode_action_delta_l2_initial": "action_delta_l2",
     "episode_action_delta_l2_mean": "action_delta_l2_prefix_mean",
     "episode_action_delta_l2_max": "action_delta_l2_prefix_max",
@@ -5538,6 +5540,11 @@ def evaluate_rl_rerun_closed_loop_r1(
                                 current_goal_l2_count[replan_indices], 1.0
                             )
                             selector_feature_values = {
+                                "step_index": np.full(
+                                    len(replan_indices),
+                                    float(step_index),
+                                    dtype=np.float32,
+                                ),
                                 "action_delta_l2_prefix_mean": (
                                     current_action_delta_sum[replan_indices]
                                     / action_denominator
