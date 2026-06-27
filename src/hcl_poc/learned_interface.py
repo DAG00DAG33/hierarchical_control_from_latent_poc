@@ -2398,8 +2398,21 @@ def train_learned_interface_hierarchy(
     high_action_loss_weight = float(spec.get("high_action_loss_weight", 0.0))
     if high_action_loss_weight < 0.0:
         raise ValueError("high_action_loss_weight must be non-negative")
+    high_oracle_action_anchor_weight = float(
+        spec.get("high_oracle_action_anchor_weight", 0.0)
+    )
+    if high_oracle_action_anchor_weight < 0.0:
+        raise ValueError("high_oracle_action_anchor_weight must be non-negative")
     if high_action_loss_weight > 0.0 and conditioning == "relation":
         raise ValueError("high_action_loss_weight does not support relation conditioning")
+    if high_oracle_action_anchor_weight > 0.0 and conditioning == "relation":
+        raise ValueError(
+            "high_oracle_action_anchor_weight does not support relation conditioning"
+        )
+    if high_oracle_action_anchor_weight > 0.0 and high_action_loss_weight <= 0.0:
+        raise ValueError(
+            "high_oracle_action_anchor_weight requires high_action_loss_weight > 0"
+        )
     goal_sensitivity_weight = float(spec.get("goal_sensitivity_weight", 0.0))
     goal_sensitivity_margin = float(spec.get("goal_sensitivity_margin", 0.0))
     if goal_sensitivity_weight < 0.0:
@@ -2477,6 +2490,9 @@ def train_learned_interface_hierarchy(
         anchor_sum = 0.0
         sensitivity_sum = 0.0
         frame_dropout_aux_sum = 0.0
+        high_goal_sum = 0.0
+        high_action_sum = 0.0
+        high_oracle_action_anchor_sum = 0.0
         for (high_x, high_y, high_low_x, high_action_y), (low_x, low_y) in zip(
             high_loader, low_loader, strict=True
         ):
@@ -2486,25 +2502,39 @@ def train_learned_interface_hierarchy(
                 predicted_goal = high_model(high_x)
                 high_goal_loss = torch.mean((predicted_goal - high_y) ** 2)
                 high_loss = high_goal_mse_weight * high_goal_loss
+                high_goal_sum += float(high_goal_loss.detach().cpu())
+                high_action_loss = high_goal_loss.new_tensor(0.0)
+                high_oracle_action_anchor_loss = high_goal_loss.new_tensor(0.0)
                 if high_action_loss_weight > 0.0:
                     high_low_x = high_low_x.to(device, non_blocking=True)
                     high_action_y = high_action_y.to(device, non_blocking=True)
                     predicted_low_x = high_low_x.clone()
                     predicted_low_x[:, goal_slice] = predicted_goal
+                    predicted_low_action = low_action_for_high_loss(predicted_low_x)
                     high_action_loss = torch.mean(
-                        (
-                            low_action_for_high_loss(predicted_low_x)
-                            - high_action_y
-                        )
-                        ** 2
+                        (predicted_low_action - high_action_y) ** 2
                     )
                     high_loss = high_loss + (
                         high_action_loss_weight * high_action_loss
                     )
+                    if high_oracle_action_anchor_weight > 0.0:
+                        with torch.no_grad():
+                            oracle_low_action = low_action_for_high_loss(high_low_x)
+                        high_oracle_action_anchor_loss = torch.mean(
+                            (predicted_low_action - oracle_low_action) ** 2
+                        )
+                        high_loss = high_loss + (
+                            high_oracle_action_anchor_weight
+                            * high_oracle_action_anchor_loss
+                        )
                 high_optimizer.zero_grad(set_to_none=True)
                 high_loss.backward()
                 high_optimizer.step()
                 high_sum += float(high_loss.detach().cpu())
+                high_action_sum += float(high_action_loss.detach().cpu())
+                high_oracle_action_anchor_sum += float(
+                    high_oracle_action_anchor_loss.detach().cpu()
+                )
 
             low_x = low_x.to(device, non_blocking=True)
             low_y = low_y.to(device, non_blocking=True)
@@ -2576,6 +2606,11 @@ def train_learned_interface_hierarchy(
             {
                 "epoch": epoch,
                 "high_train_mse": high_sum / batches_per_epoch,
+                "high_goal_mse": high_goal_sum / batches_per_epoch,
+                "high_action_loss": high_action_sum / batches_per_epoch,
+                "high_oracle_action_anchor_loss": (
+                    high_oracle_action_anchor_sum / batches_per_epoch
+                ),
                 "low_train_mse": low_sum / batches_per_epoch,
                 "low_anchor_loss": anchor_sum / batches_per_epoch,
                 "low_goal_sensitivity_loss": sensitivity_sum / batches_per_epoch,
@@ -2609,6 +2644,7 @@ def train_learned_interface_hierarchy(
         "freeze_low_policy": freeze_low_policy,
         "high_goal_mse_weight": high_goal_mse_weight,
         "high_action_loss_weight": high_action_loss_weight,
+        "high_oracle_action_anchor_weight": high_oracle_action_anchor_weight,
         "low_anchor_loss_weight": low_anchor_loss_weight,
         "goal_residual_scale": goal_residual_scale,
         "low_frame_dropout_prob": low_frame_dropout_prob,

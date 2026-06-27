@@ -19462,3 +19462,131 @@ for the same learned effect-space distance. The high-action R3 failure is not
 explained by accidentally using the base `effect32_film` D_phi checkpoint; the
 next reward/representation experiment needs a genuinely different encoder or
 distance target, not another alias over the same effect representation.
+
+## 2026-06-27 - High-level oracle-action anchor diagnostic
+
+The previous joint high/low anchor only constrained the trainable low policy on
+offline low-level inputs. It did not preserve the deployment behavior that made
+`highact_strong` useful. I added a deployment-closer high-level anchor: while
+fine-tuning the high level through the frozen goal-sensitive low policy, penalize
+the predicted-goal low action for drifting away from the same low policy's action
+under the demonstration/oracle future goal.
+
+### Code change
+
+`train_learned_interface_hierarchy` now accepts:
+
+```text
+high_oracle_action_anchor_weight
+```
+
+When this weight is positive, the high-level update adds:
+
+```text
+high_oracle_action_anchor_weight *
+MSE(low(current, predicted_high_goal), low(current, oracle_future_goal))
+```
+
+The low policy remains frozen for this loss, so the term updates only the high
+policy and directly anchors the predicted goal's induced action to oracle-goal
+low behavior.
+
+### Candidate
+
+```yaml
+effect32_film_gsens_ft_highact_oracleanchor:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32_film_gsens_ft_highact_oracleanchor
+  conditioning: film
+  high_init_candidate: effect32
+  low_init_candidate: effect32_film_gsens_ft
+  freeze_low_policy: true
+  high_goal_mse_weight: 0.0
+  high_action_loss_weight: 300.0
+  high_oracle_action_anchor_weight: 300.0
+  policy_lr: 1.0e-5
+  policy_epochs: 20
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_oracleanchor \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_gsens_ft_highact_oracleanchor \
+  --goal-source learned \
+  --episodes 100 \
+  --eval-seed-start 3500000 \
+  --eval-num-envs 1 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc low-level-rl \
+  --config configs/pusht_incremental.yaml \
+  eval-serial \
+  --n-demo 500 \
+  --candidate effect32_film_gsens_ft_highact_oracleanchor \
+  --seed 0 \
+  --run-name hcl_next_highact_oracleanchor_frozen_serial100_seed3500000 \
+  --episodes 100 \
+  --seed-start 3500000 \
+  --force
+```
+
+### Results
+
+Offline validation:
+
+| candidate | normalized goal L2 | oracle action MAE | predicted action MAE | predicted-vs-oracle action L2 |
+| --- | ---: | ---: | ---: | ---: |
+| highact_strong | 2.5489 | 0.0362 | 0.0366 | 0.0157 |
+| actiononly | 2.6673 | 0.0362 | 0.0366 | 0.0180 |
+| oracleanchor | 2.5576 | 0.0362 | 0.0365 | 0.0126 |
+
+The anchor achieved the intended offline effect: it reduced predicted-vs-oracle
+low-action drift while preserving the one-step predicted action MAE.
+
+Conservative single-env learned-interface screen on `3500000..3500099`:
+
+| candidate | success | final reward | max reward | teacher MAE |
+| --- | ---: | ---: | ---: | ---: |
+| highact_strong | 0.670 | 0.7492 | 0.7566 | 0.0937 |
+| actiononly | 0.660 | 0.7497 | 0.7562 | 0.0893 |
+| goal01 | 0.660 | 0.7479 | 0.7536 | 0.0840 |
+| oracleanchor | 0.630 | 0.7246 | 0.7349 | 0.0979 |
+
+Matching exact serial screen:
+
+| candidate | success | final reward | max reward | raw local reduction | reach rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| highact_strong | 0.670 | 0.7092 | 0.7566 | 0.3890 | 0.722 |
+| actiononly | 0.660 | 0.6161 | 0.7562 | 0.3721 | 0.742 |
+| goal01 | 0.660 | 0.6742 | 0.7536 | 0.3786 | 0.745 |
+| oracleanchor | 0.630 | 0.6780 | 0.7349 | 0.3803 | 0.737 |
+
+Paired against `highact_strong`, oracleanchor had `9` improvements,
+`13` regressions, net `-4`, and success delta `-0.04`.
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_oracleanchor/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_gsens_ft_highact_oracleanchor/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_gsens_ft_highact_oracleanchor/seed0/learned_hierarchy_eval_100_seed3500000_envs1.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_oracleanchor/seed0/hcl_next_highact_oracleanchor_frozen_serial100_seed3500000/serial_eval_100_seed3500000.json`
+- `results/incremental/low_level_rl/effect32_film_gsens_ft_highact_oracleanchor/seed0/hcl_next_highact_oracleanchor_frozen_serial100_seed3500000/paired_vs_highact_strong_serial100_seed3500000.json`
+
+### Interpretation
+
+The oracle-action anchor improves the offline action-preservation proxy but
+hurts deployment. This rejects the simple frozen-low high-level anchor variant:
+keeping predicted-goal actions close to oracle-goal actions in the offline
+held-goal data is not enough to preserve closed-loop/serial behavior. The
+conservative serial/RL base remains `effect32_film_gsens_ft_highact_strong`.
+The next coupled objective needs a stronger deployment-level signal, not another
+one-step action-space anchor.

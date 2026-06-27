@@ -525,6 +525,25 @@ needs a deployment-aligned anchor, not just an offline action anchor on training
 inputs: for example, explicitly preserve oracle-goal closed-loop behavior while
 optimizing high-level learned-goal compatibility.
 
+I then tested a frozen-low high-level oracle-action anchor. The new
+`high_oracle_action_anchor_weight` term penalizes the predicted-goal low action
+for drifting away from the same frozen low policy's action under the
+demonstration/oracle future goal. It reduced offline predicted-vs-oracle action
+drift (`0.0180 -> 0.0126` versus action-only) while preserving one-step action
+MAE, but it hurt deployment on the conservative `3500000` single-env/serial
+screen:
+
+| candidate | learned-interface envs=1 success | serial success | serial max reward |
+| --- | ---: | ---: | ---: |
+| highact_strong | 0.670 | 0.670 | 0.7566 |
+| actiononly | 0.660 | 0.660 | 0.7562 |
+| goal01 | 0.660 | 0.660 | 0.7536 |
+| oracleanchor | 0.630 | 0.630 | 0.7349 |
+
+Paired against `highact_strong`, oracleanchor had `9` improvements and `13`
+regressions. This rejects the simple one-step oracle-action anchor: preserving
+offline oracle-action behavior is still not the deployment-level signal needed.
+
 Returning to the successful frozen-low recipe, I tested an action-only high-level
 variant: same frozen `effect32_film_gsens_ft` low policy and same
 action-through-low weight as `highact_strong`, but with
