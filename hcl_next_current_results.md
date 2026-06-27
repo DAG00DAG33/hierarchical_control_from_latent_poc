@@ -1685,6 +1685,28 @@ deployable selector. The selector direction now needs richer current
 observation/latent context or direct online/intervention training, not another
 linear model over the same prefix scalars.
 
+I then added opt-in current latent/goal relation features to the same selector
+trace path:
+
+```text
+current_z_norm, goal_z_norm, current_goal_dot, current_goal_cosine,
+current_goal_delta_abs_mean, current_goal_delta_abs_max
+```
+
+On fresh 100-episode traces (`5500000` train, `5600000` validation), the
+non-deployable env-reward oracle selector was neutral-to-positive (`+0.000` and
+`+0.030` success), but the richer deployable selector still did not validate:
+
+| features | validation AUC | validation accuracy | selector reward gap vs oracle |
+| --- | ---: | ---: | ---: |
+| six prefix scalars | 0.530 | 0.517 | -0.00438 |
+| prefix + current latent/goal | 0.513 | 0.511 | -0.00612 |
+| prefix + current latent/goal, best ridge sweep | 0.526 | 0.522 | -0.00455 |
+
+The current latent/goal summaries overfit the training trace and do not improve
+held-out branch-choice prediction. This closes the obvious richer scalar-feature
+variant for this checkpoint.
+
 To make local-to-task proxy checks less indirect, I added
 `eval-local-r{1,2,3} --include-samples`, which exports per-sample local
 distances, dense rewards, success flags, and action deltas under

@@ -19849,3 +19849,131 @@ Further selector work should change the feature source substantially, for
 example using richer current observation/latent context or training the
 selector directly online, rather than fitting another linear selector to the
 same prefix scalars.
+
+## 2026-06-27 - Current-latent oracle trace selector features
+
+### Hypothesis
+
+The previous oracle-trace selector only used prefix scalar history. A deployable
+selector may need the current latent/goal relation at the replan state. I added
+compact current-latent/held-goal summary features and tested whether they make
+the env-reward oracle branch choice predictable on fresh 100-episode traces.
+
+### Code Change
+
+`rl-rerun` selector traces and online selector scoring now support these
+additional feature names:
+
+```text
+current_z_norm
+goal_z_norm
+current_goal_dot
+current_goal_cosine
+current_goal_delta_abs_mean
+current_goal_delta_abs_max
+```
+
+They are opt-in feature names, not part of the default selector feature list.
+
+### Commands
+
+Collect two fresh env-reward oracle traces with the new feature fields:
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 5500000 \
+  --num-envs 50 \
+  --oracle-copy-mode state_dict \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_latentfeat_100_seed5500000.json
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  eval-closed-loop-r3 \
+  --checkpoint artifacts/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/latest.pt \
+  --n-demo 500 \
+  --seed 0 \
+  --episodes 100 \
+  --eval-seed-start 5600000 \
+  --num-envs 50 \
+  --oracle-copy-mode state_dict \
+  --oracle-segment-selector \
+  --oracle-segment-selector-metric env_reward \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_latentfeat_100_seed5600000.json
+```
+
+Fit baseline and richer selectors:
+
+```bash
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  fit-oracle-segment-selector \
+  --train-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_latentfeat_100_seed5500000.json \
+  --validation-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_latentfeat_100_seed5600000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_sixfeat_train100_5500000_valid100_5600000.json \
+  --feature-names episode_action_delta_l2_mean episode_action_delta_l2_max episode_policy_saturation_rate episode_goal_l2_initial episode_goal_l2_mean episode_high_level_decisions \
+  --force
+
+uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  fit-oracle-segment-selector \
+  --train-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_latentfeat_100_seed5500000.json \
+  --validation-json results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/closed_loop_oracle_segment_selector_envreward_trace_latentfeat_100_seed5600000.json \
+  --output results/rl_rerun/local_r3/n500/seed0/task_reward_debug_n4096_1update_bc1_lr1e5_logstd5/oracle_segment_trace_selector_latentfeat_train100_5500000_valid100_5600000.json \
+  --feature-names step_index episode_action_delta_l2_mean episode_action_delta_l2_max episode_policy_saturation_rate episode_goal_l2_initial episode_goal_l2_mean episode_high_level_decisions current_z_norm goal_z_norm current_goal_dot current_goal_cosine current_goal_delta_abs_mean current_goal_delta_abs_max \
+  --force
+```
+
+### Results
+
+The new trace fields were present in both outputs. The env-reward oracle selector
+had mixed closed-loop upside:
+
+| seed start | frozen success | oracle-selector success | success delta | decisions | oracle residual rate |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5500000 | 0.420 | 0.420 | +0.000 | 819 | 0.508 |
+| 5600000 | 0.280 | 0.310 | +0.030 | 857 | 0.529 |
+
+Selector validation on `5600000`:
+
+| features | validation AUC | validation accuracy | selector residual rate | selector reward gap vs oracle |
+| --- | ---: | ---: | ---: | ---: |
+| six prefix scalars | 0.530 | 0.517 | 0.550 | -0.00438 |
+| prefix + current latent/goal | 0.513 | 0.511 | 0.534 | -0.00612 |
+
+The richer selector overfits the training trace (`AUC 0.614`) but is worse than
+the six-feature baseline on validation.
+
+I also swept ridge values for the 13-feature selector:
+
+| ridge | validation AUC | validation accuracy | selector residual rate | reward gap vs oracle |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.514 | 0.508 | 0.533 | -0.00613 |
+| 0.1 | 0.515 | 0.513 | 0.532 | -0.00614 |
+| 1 | 0.513 | 0.511 | 0.534 | -0.00612 |
+| 10 | 0.513 | 0.509 | 0.506 | -0.00534 |
+| 100 | 0.526 | 0.522 | 0.473 | -0.00455 |
+
+### Verification
+
+```bash
+uv run ruff check src/hcl_poc/rl_rerun.py --select F
+uv run python -m compileall -q src/hcl_poc/rl_rerun.py src/hcl_poc/cli.py
+```
+
+### Interpretation
+
+Adding compact current latent/goal relation features does not make the
+env-reward oracle branch decision deployably predictable. The best ridge setting
+for the richer selector still has weak validation AUC (`0.526`) and selects
+one-segment rewards below the oracle. This closes the next obvious "richer
+scalar feature" selector variant for this checkpoint. A useful selector likely
+needs substantially richer observation features or direct online/intervention
+training, not more linear fits over hand-designed scalar summaries.

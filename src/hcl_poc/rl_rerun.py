@@ -4309,7 +4309,32 @@ ONLINE_STEP_SELECTOR_FEATURES = {
     "episode_goal_l2_initial": "goal_l2",
     "episode_goal_l2_mean": "goal_l2_prefix_mean",
     "episode_high_level_decisions": "high_level_decisions",
+    "current_z_norm": "current_z_norm",
+    "goal_z_norm": "goal_z_norm",
+    "current_goal_dot": "current_goal_dot",
+    "current_goal_cosine": "current_goal_cosine",
+    "current_goal_delta_abs_mean": "current_goal_delta_abs_mean",
+    "current_goal_delta_abs_max": "current_goal_delta_abs_max",
 }
+
+
+def _latent_goal_selector_features(
+    current_z: np.ndarray,
+    goal_z: np.ndarray,
+) -> dict[str, np.ndarray]:
+    delta = goal_z - current_z
+    current_norm = np.linalg.norm(current_z, axis=-1).astype(np.float32)
+    goal_norm = np.linalg.norm(goal_z, axis=-1).astype(np.float32)
+    dot = np.sum(current_z * goal_z, axis=-1).astype(np.float32)
+    cosine = (dot / np.maximum(current_norm * goal_norm, 1e-6)).astype(np.float32)
+    return {
+        "current_z_norm": current_norm,
+        "goal_z_norm": goal_norm,
+        "current_goal_dot": dot,
+        "current_goal_cosine": cosine,
+        "current_goal_delta_abs_mean": np.mean(np.abs(delta), axis=-1).astype(np.float32),
+        "current_goal_delta_abs_max": np.max(np.abs(delta), axis=-1).astype(np.float32),
+    }
 
 
 def _closed_loop_selector_arrays(
@@ -5136,6 +5161,12 @@ def evaluate_rl_rerun_closed_loop_r1(
             "goal_l2": [],
             "goal_l2_prefix_mean": [],
             "high_level_decisions": [],
+            "current_z_norm": [],
+            "goal_z_norm": [],
+            "current_goal_dot": [],
+            "current_goal_cosine": [],
+            "current_goal_delta_abs_mean": [],
+            "current_goal_delta_abs_max": [],
         }
         high_decisions = 0
 
@@ -5523,6 +5554,10 @@ def evaluate_rl_rerun_closed_loop_r1(
                             current_goal_for_distance[replan] - held_goal[replan],
                             axis=-1,
                         ).astype(np.float32)
+                        latent_goal_features = _latent_goal_selector_features(
+                            current_goal_for_distance[replan],
+                            held_goal[replan],
+                        )
                         current_segment_goal_l2[replan_indices] = goal_l2
                         current_goal_l2_sum[replan_indices] += goal_l2
                         current_goal_l2_count[replan_indices] += 1.0
@@ -5564,6 +5599,7 @@ def evaluate_rl_rerun_closed_loop_r1(
                                 "high_level_decisions": (
                                     current_high_decisions[replan_indices]
                                 ).astype(np.float32),
+                                **latent_goal_features,
                             }
                             selector_scores = _closed_loop_step_selector_scores(
                                 segment_selector,
@@ -5753,6 +5789,12 @@ def evaluate_rl_rerun_closed_loop_r1(
                                 .astype(float)
                                 .tolist()
                             )
+                            for feature_name, feature_values in (
+                                latent_goal_features.items()
+                            ):
+                                oracle_segment_selector_trace[feature_name].extend(
+                                    feature_values.astype(float).tolist()
+                                )
                             oracle_segment_selector_decisions += int(len(replan_indices))
                             oracle_segment_selector_residual_decisions += int(
                                 choose_residual.sum()
@@ -5894,7 +5936,21 @@ def evaluate_rl_rerun_closed_loop_r1(
                         selector_goal_l2_mean = (
                             current_goal_l2_sum / selector_goal_denominator
                         ).astype(np.float32)
+                        selector_current_z = _encode_rerun_frames(
+                            frozen,
+                            frames,
+                            device,
+                        )
+                        selector_latent_goal_features = _latent_goal_selector_features(
+                            selector_current_z,
+                            held_goal,
+                        )
                         selector_feature_values = {
+                            "step_index": np.full(
+                                batch_envs,
+                                float(step_index),
+                                dtype=np.float32,
+                            ),
                             "action_delta_l2": action_delta_np,
                             "action_delta_l2_prefix_mean": (
                                 (current_action_delta_sum + action_delta_np)
@@ -5915,6 +5971,7 @@ def evaluate_rl_rerun_closed_loop_r1(
                             "goal_l2": current_segment_goal_l2,
                             "goal_l2_prefix_mean": selector_goal_l2_mean,
                             "high_level_decisions": current_high_decisions,
+                            **selector_latent_goal_features,
                         }
                         selector_scores = _closed_loop_step_selector_scores(
                             step_selector,
