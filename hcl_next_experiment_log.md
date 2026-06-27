@@ -20210,3 +20210,135 @@ does not increase same-state goal sensitivity. This rejects simple
 current-horizon supervised retraining as a fix. The next useful effect-code
 change needs a stronger action-relevant or closed-loop signal, not just matching
 the low-level supervised distribution to `update_period=1`.
+
+## 2026-06-27 - Effect32 action-weighted effect representation
+
+### Hypothesis
+
+The effect-code representation already has an inverse-action auxiliary head, but
+the baseline `effect32` weights that loss equally with the auxiliary physical
+target loss. If the current effect latent is not action-relevant enough, a
+higher inverse-action weight should increase low-level goal sensitivity while
+keeping the same deployable interface.
+
+### Code Change
+
+Added a representation and FiLM hierarchy candidate:
+
+```yaml
+effect32_act4:
+  family: effect_code
+  encoder_type: effect
+  latent_dim: 32
+  width: 512
+  lambda_action: 4.0
+  lambda_auxiliary: 1.0
+  lambda_var: 1.0
+  lambda_cov: 0.01
+  batches_per_epoch: 200
+  epochs: 40
+
+effect32_act4_film:
+  family: conditioning_ablation
+  representation_candidate: effect32_act4
+  high_level_candidate: effect32_act4
+  conditioning: film
+  policy_epochs: 40
+```
+
+### Commands
+
+```bash
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_act4_film \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc rl-rerun \
+  --config configs/pusht_incremental.yaml \
+  goal-diagnostics \
+  --representation learned_interface \
+  --candidate effect32_act4_film \
+  --n-demo 500 \
+  --seed 0 \
+  --samples 5000 \
+  --horizons 2,5,10 \
+  --output results/incremental/goal_diagnostics/n500/seed0/effect32_act4_film/diagnostics.json \
+  --force
+
+for source in learned oracle; do
+  TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+    --config configs/pusht_incremental.yaml \
+    --candidate effect32_act4_film \
+    --goal-source "${source}" \
+    --episodes 200 \
+    --eval-seed-start 3500000 \
+    --force
+done
+```
+
+### Results
+
+Representation validation:
+
+| metric | value |
+| --- | ---: |
+| best epoch | 39 |
+| action MSE | 0.0222 |
+| auxiliary continuous MSE | 0.0070 |
+| auxiliary contact BCE | 0.1486 |
+| active dimensions | 32 |
+
+Hierarchy validation selected epoch 35:
+
+| metric | value |
+| --- | ---: |
+| normalized goal L2 | 2.5259 |
+| oracle action MAE | 0.0390 |
+| predicted action MAE | 0.0397 |
+| prediction-induced action L2 | 0.0147 |
+
+Goal diagnostics:
+
+| candidate | goal shuffle L2 | frame shuffle L2 | max same-state sensitivity | goal MAE gap | gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| effect32_film | 0.0622 | 0.9503 | 0.0368 | 0.0102 | reject |
+| effect32_act4_film | 0.0907 | 0.9381 | 0.0646 | 0.0159 | reject |
+
+Matched 200-episode closed-loop evaluation at `seed_start=3500000`:
+
+| candidate | goal source | success | final reward | max reward | teacher MAE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| effect32_film | learned | 0.645 | 0.7347 | 0.7420 | 0.1073 |
+| effect32_film | oracle | 0.645 | 0.7399 | 0.7464 | 0.0892 |
+| effect32_act4_film | learned | 0.505 | 0.6376 | 0.6500 | 0.1071 |
+| effect32_act4_film | oracle | 0.575 | 0.6979 | 0.7052 | 0.0798 |
+
+The aggregate gate report is now `5` pass, `36` reject, `41` total.
+
+Artifacts:
+
+- `artifacts/incremental/learned_interface/effect32_act4/seed0/representation.pt`
+- `artifacts/incremental/learned_interface/effect32_act4_film/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_act4_film/seed0/hierarchy_metrics.json`
+- `results/incremental/goal_diagnostics/n500/seed0/effect32_act4_film/diagnostics.json`
+- `results/incremental/learned_interface/effect32_act4_film/seed0/learned_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/learned_interface/effect32_act4_film/seed0/oracle_hierarchy_eval_200_seed3500000.json`
+- `results/incremental/goal_diagnostics/gate_report.json`
+
+### Interpretation
+
+Increasing inverse-action pressure moves the representation in the intended
+direction: goal-shuffle action change and same-state horizon sensitivity both
+increase substantially relative to baseline. But the candidate still misses the
+strict offline gate and loses `14` learned-goal success points on the matched
+deployment window. The oracle result also drops, despite lower oracle teacher
+MAE, so the regression is not only high-level prediction error.
+
+This rejects a simple action-weight increase as the representation fix. The
+result is useful diagnostically: action relevance can be increased, but the
+tradeoff again damages the closed-loop behavior that made baseline effect32
+valuable. A promising representation change needs to preserve effect32-level
+closed-loop imitation while adding goal sensitivity, not just weight the
+inverse-action auxiliary more heavily.

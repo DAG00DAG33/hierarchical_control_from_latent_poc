@@ -2138,6 +2138,15 @@ The next useful directions are:
    the supervised low-level distribution to `update_period=1` is therefore not
    enough; the next effect-code change needs a stronger action-relevant or
    closed-loop signal.
+   I also trained an action-weighted effect representation,
+   `effect32_act4_film`, with `lambda_action=4.0` in the effect-code auxiliary
+   loss. It moved the goal-use metrics in the intended direction
+   (`goal_shuffle_l2=0.0907`, `max_same_state_sensitivity=0.0646`) but still
+   missed the strict offline gate and regressed closed-loop deployment
+   (`0.505` learned success, `0.575` oracle success on the matched 200-episode
+   window). Simple inverse-action reweighting is not the representation fix; it
+   increases goal sensitivity at the cost of the effect32 closed-loop behavior
+   we need to preserve.
 
 ## Key Artifacts
 

@@ -560,6 +560,17 @@ learned_interface:
       lambda_cov: 0.01
       batches_per_epoch: 200
       epochs: 40
+    effect32_act4:
+      family: effect_code
+      encoder_type: effect
+      latent_dim: 32
+      width: 512
+      lambda_action: 4.0
+      lambda_auxiliary: 1.0
+      lambda_var: 1.0
+      lambda_cov: 0.01
+      batches_per_epoch: 200
+      epochs: 40
     effect64:
       family: effect_code
       encoder_type: effect
@@ -576,6 +587,12 @@ learned_interface:
       representation_candidate: effect32
       high_level_candidate: effect32
       conditioning: film
+    effect32_act4_film:
+      family: conditioning_ablation
+      representation_candidate: effect32_act4
+      high_level_candidate: effect32_act4
+      conditioning: film
+      policy_epochs: 40
     effect64_film:
       family: conditioning_ablation
       representation_candidate: effect64
