@@ -19990,9 +19990,19 @@ performance without changing the representation or low-level weights.
 
 ### Code Change
 
-Added a lightweight learned-interface alias:
+Added lightweight learned-interface aliases:
 
 ```yaml
+effect32_film_u5:
+  family: conditioning_ablation
+  representation_candidate: effect32
+  high_level_candidate: effect32
+  conditioning: film
+  low_init_candidate: effect32_film
+  freeze_low_policy: true
+  update_period: 5
+  policy_epochs: 1
+
 effect32_film_u1:
   family: conditioning_ablation
   representation_candidate: effect32
@@ -20004,8 +20014,8 @@ effect32_film_u1:
   policy_epochs: 1
 ```
 
-This reuses the existing effect32 high level and effect32 FiLM low level, but
-stores `update_period=1` in the hierarchy checkpoint. The test isolates
+These reuse the existing effect32 high level and effect32 FiLM low level, but
+store shorter update periods in separate hierarchy checkpoints. The test isolates
 deployment replanning frequency rather than retraining another low policy.
 
 ### Commands
@@ -20024,6 +20034,20 @@ TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
   --episodes 200 \
   --eval-seed-start 3500000 \
   --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-train-hierarchy \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_u5 \
+  --seed 0 \
+  --force
+
+TQDM_DISABLE=1 uv run hcl-poc incremental learned-interface-eval \
+  --config configs/pusht_incremental.yaml \
+  --candidate effect32_film_u5 \
+  --goal-source learned \
+  --episodes 200 \
+  --eval-seed-start 3500000 \
+  --force
 ```
 
 I also attempted oracle-goal checks at 200 episodes and then 50 episodes, but
@@ -20038,20 +20062,26 @@ Matched 200-episode learned-goal window at `seed_start=3500000`:
 | candidate | update period | success | final reward | max reward | decisions / episode | teacher MAE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | effect32_film | 10 | 0.645 | 0.7347 | 0.7420 | 7.05 | 0.1073 |
+| effect32_film_u5 | 5 | 0.635 | 0.7290 | 0.7382 | 13.66 | 0.1040 |
 | effect32_film_u1 | 1 | 0.590 | 0.6947 | 0.7063 | 69.14 | 0.1067 |
 
 Artifacts:
 
+- `artifacts/incremental/learned_interface/effect32_film_u5/seed0/hierarchy.pt`
+- `artifacts/incremental/learned_interface/effect32_film_u5/seed0/hierarchy_metrics.json`
+- `results/incremental/learned_interface/effect32_film_u5/seed0/learned_hierarchy_eval_200_seed3500000.json`
 - `artifacts/incremental/learned_interface/effect32_film_u1/seed0/hierarchy.pt`
 - `artifacts/incremental/learned_interface/effect32_film_u1/seed0/hierarchy_metrics.json`
 - `results/incremental/learned_interface/effect32_film_u1/seed0/learned_hierarchy_eval_200_seed3500000.json`
 
 ### Interpretation
 
-Stepwise replanning makes learned-goal deployment worse despite nearly identical
-offline teacher MAE. The degradation is not explained by the low-level weights,
-which are copied from `effect32_film`; it is consistent with high-level
-prediction noise or temporal jitter from issuing a new effect goal every step.
-This rejects the simple stale-held-goal hypothesis as the next lever. A useful
-effect-code fix would need a different training/deployment interface, not just
-`update_period=1`.
+More frequent replanning does not improve learned-goal deployment despite
+similar offline teacher MAE. The midpoint `u5` is close but still below the
+baseline on success, final reward, and max reward; stepwise `u1` is clearly
+worse. The degradation is not explained by the low-level weights, which are
+copied from `effect32_film`; it is consistent with high-level prediction noise
+or temporal jitter from issuing new effect goals too often. This rejects the
+simple stale-held-goal hypothesis as the next lever. A useful effect-code fix
+would need a different training/deployment interface, not just a shorter update
+period.
