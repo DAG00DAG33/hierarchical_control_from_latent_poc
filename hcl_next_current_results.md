@@ -2122,6 +2122,12 @@ The next useful directions are:
    A direct short-horizon check with k=5 and k=2 was worse than the current k=10
    hierarchy, so horizon shortening is not the next lever unless paired with a
    different training distribution or objective.
+   A stepwise replanning alias, `effect32_film_u1`, also failed on the matched
+   200-episode learned-goal window: success dropped from `0.645` to `0.590`,
+   final reward from `0.7347` to `0.6947`, and decisions per episode increased
+   from `7.05` to `69.14`. The low-level weights were copied from
+   `effect32_film`, so this rejects simple `update_period=1` as a fix for
+   stale held effect goals.
 
 ## Key Artifacts
 
