@@ -276,6 +276,21 @@ the RL decision:
 | 500 | `0.240 +/- 0.040` |
 | 1800 | `0.520 +/- 0.035` |
 
+Before scratch RL, train or verify a learned reachability/distance model
+`D_psi(z_t, z_goal)` for each VAE512 budget and seed. The existing command path
+already supports this setup:
+
+```bash
+uv run hcl-poc rl-rerun train-reachability-distance \
+  --candidate vae512_w2048_b1e6 \
+  --n-demo {500|1800} \
+  --seed {0|1|2}
+```
+
+Use `D_psi` as the primary RL reward distance. Raw VAE latent L2
+`||z_t - z_goal||` is only a sanity-check ablation, because the reachable
+geometry of the VAE latent is unlikely to be Euclidean.
+
 ### Training Curriculum
 
 Stage the RL work so failures are cheap:
@@ -291,14 +306,13 @@ Stage the RL work so failures are cheap:
    - budgets: `N=500`, `N=1800`
    - seed: 0 only
    - train on reachable local branch goals
-   - use a VAE512 latent-space distance/reachability signal for `z_t` to
-     `z_goal`; call this `D_z` in new code unless a learned reachability model
-     is introduced explicitly
+   - use `D_psi(z_t, z_goal)` as the learned reachability reward distance
    - compare reward variants before scaling:
-     - pure terminal `D_z`
+     - pure terminal `D_psi`
      - paired terminal improvement over the frozen BC low level
-     - terminal `D_z` plus a small progress term
+     - terminal `D_psi` plus a small progress term
      - optional small task-reward mixture only if the first three are unstable
+     - raw latent L2 only as a sanity-check ablation, not the default
 
 3. **Scaled scratch run**
    - budgets: `N=500`, `N=1800`
@@ -322,7 +336,8 @@ Measure local reachability and full deployment separately.
 
 Local metrics:
 
-- terminal distance to goal in the VAE512 latent space
+- terminal `D_psi` distance to the VAE512 goal
+- raw VAE latent L2 to the goal as an auxiliary diagnostic
 - improvement over the frozen BC low level on matched local branches
 - success under oracle local goals
 - action saturation rate
@@ -367,9 +382,9 @@ Scale scratch RL beyond seed0 only if it passes both gates:
    evaluation, or oracle-goal success improves enough to show a real low-level
    reachability gain.
 
-Reject or redesign the scratch objective if it only improves VAE latent
-distance while reducing task success, matching the failure mode seen in longer
-R3 training.
+Reject or redesign the scratch objective if it only improves `D_psi` or raw VAE
+latent distance while reducing task success, matching the failure mode seen in
+longer R3 training.
 
 ## Confirmed Execution Order
 
@@ -378,8 +393,8 @@ The current decisions are:
 - start the effect32 budget sweep with the `N=500`/`N=1800` protocol check
   after one smoke point
 - produce both effect32-only plots and a combined README plot
-- use VAE512 latent-distance/reachability rewards for scratch RL, labeled `D_z`
-  unless a learned reachability model is added
+- use VAE512 learned reachability reward `D_psi(z_t, z_goal)` for scratch RL;
+  keep raw latent L2 only as a sanity-check ablation
 - try several seed0 reward variants at `N=500` and `N=1800`
 - run the three-seed scratch RL final evaluation only for the most promising
   reward variant
@@ -391,6 +406,7 @@ first: implement effect32_film scaling support
 then:  smoke N=500 seed0 with short evals
 then:  run N=500 and N=1800 for seeds 0,1,2 under final eval episodes
 then:  review before launching the full 8-budget sweep
+then:  train/verify VAE512 D_psi reachability checkpoints for N=500 and N=1800
 then:  implement VAE512 scratch low-level RL using the saved budgeted VAE512
        checkpoints for N=500 and N=1800
 then:  run seed0 scratch RL reward-selection variants at N=500 and N=1800
