@@ -6,8 +6,8 @@ experiments:
 1. Measure whether the compact `effect32_film` interface keeps its advantage
    across the same demonstration-budget protocol used by the VAE512 final
    sample-efficiency plot.
-2. Test whether a low-level policy trained from scratch with RL can become more
-   goal-sensitive and more reachable than the BC-initialized/fine-tuned low
+2. Test whether a VAE512 low-level policy trained from scratch with RL can
+   become more goal-sensitive and more reachable than the BC-trained VAE512 low
    level.
 
 No experiment should be launched from this file until the protocol below is
@@ -178,13 +178,19 @@ If it only ties VAE512 around `N=1800`, it is still useful, but the conclusion
 should be that compact action-aware effect codes match the strong VAE state
 interface rather than dominate it.
 
-## Experiment B: Scratch Low-Level RL
+## Experiment B: VAE512 Scratch Low-Level RL
 
 ### Question
 
-Can a low-level policy trained from scratch with RL learn to use the supplied
-goal more strongly than the BC low level, improving local reachability and
-closed-loop task success?
+Can a VAE512 low-level policy trained from scratch with RL learn to use the
+supplied future-state goal `z_{t+10}` more strongly than the BC low level,
+improving local reachability and closed-loop task success?
+
+This experiment should use the VAE512 hierarchy, not `effect32_film`. The
+reason is fairness: `effect32` uses auxiliary physical-state pseudo-labels
+during representation pretraining, so it is useful for the budget sweep but is
+not the cleanest architecture for testing whether RL can learn goal use from a
+non-privileged future-state interface.
 
 ### Why This Is Different From Current R3
 
@@ -217,10 +223,10 @@ low-level-rl train-r3 --init-mode scratch_full_low
 The scratch agent should:
 
 - use the same low-level condition as the deployed hierarchy:
-  `[current frame, goal, previous action, remaining fraction]`
+  `[current frame, z_goal, previous action, remaining fraction]`
 - initialize the actor randomly, not from `frozen.low_model`
 - train the full actor network, not only the final layer
-- keep the representation encoder and high-level policy fixed
+- keep the VAE512 encoder and high-level policy fixed
 - use demonstration data only for reset/goal sampling, not for BC loss
 - fail clearly if a required representation or hierarchy checkpoint is absent
 
@@ -228,7 +234,7 @@ The existing BC low level remains the baseline, not an initialization.
 
 One implementation caveat: the current `low-level-rl train-r3` CLI only exposes
 `--n-demo` choices `500` and `1000`. This experiment needs budgeted
-learned-interface checkpoints at `N=500` and `N=1800`, so the new scratch path
+VAE512 scaling checkpoints at `N=500` and `N=1800`, so the new scratch path
 should not inherit that parser restriction.
 
 ### Budgets
@@ -240,10 +246,35 @@ N=500
 N=1800
 ```
 
-For each budget, use the best available `effect32_film` checkpoint from
-Experiment A. If Experiment A has not yet finished, use the current shared
-`effect32_film` checkpoint only for code smoke tests and label the result as
-non-final.
+For each budget, use the saved VAE512 deterministic hierarchy checkpoint from:
+
+```text
+artifacts/incremental/vae512_scaling/n{N}/learned_interface/vae512_w2048_b1e6/seed{seed}/hierarchy.pt
+```
+
+The frozen VAE512 deterministic hierarchy baselines under the final protocol
+are:
+
+| N | success mean +/- seed SD | seed successes | eval |
+| ---: | ---: | --- | --- |
+| 500 | `0.301 +/- 0.020` | `[0.308, 0.316, 0.278]` | 500 episodes/seed |
+| 1800 | `0.565 +/- 0.025` | `[0.582, 0.536, 0.578]` | 500 episodes/seed |
+
+The flow-high VAE512 hierarchy is not the main baseline for scratch low-level
+RL, but it is similar:
+
+| N | flow hierarchy success mean +/- seed SD |
+| ---: | ---: |
+| 500 | `0.304 +/- 0.024` |
+| 1800 | `0.556 +/- 0.005` |
+
+The saved 50-episode branch-oracle diagnostics are noisy and should not drive
+the RL decision:
+
+| N | branch-oracle success mean +/- seed SD |
+| ---: | ---: |
+| 500 | `0.240 +/- 0.040` |
+| 1800 | `0.520 +/- 0.035` |
 
 ### Training Curriculum
 
@@ -260,11 +291,13 @@ Stage the RL work so failures are cheap:
    - budgets: `N=500`, `N=1800`
    - seed: 0 only
    - train on reachable local branch goals
-   - use `D_psi` as the learned distance/reachability signal
+   - use a VAE512 latent-space distance/reachability signal for `z_t` to
+     `z_goal`; call this `D_z` in new code unless a learned reachability model
+     is introduced explicitly
    - compare reward variants before scaling:
-     - pure terminal `D_psi`
+     - pure terminal `D_z`
      - paired terminal improvement over the frozen BC low level
-     - terminal `D_psi` plus a small progress term
+     - terminal `D_z` plus a small progress term
      - optional small task-reward mixture only if the first three are unstable
 
 3. **Scaled scratch run**
@@ -289,7 +322,7 @@ Measure local reachability and full deployment separately.
 
 Local metrics:
 
-- terminal distance to goal in the learned effect space
+- terminal distance to goal in the VAE512 latent space
 - improvement over the frozen BC low level on matched local branches
 - success under oracle local goals
 - action saturation rate
@@ -317,11 +350,12 @@ the whole hypothesis is that RL can learn to actually use the goal.
 
 Compare against:
 
-- frozen `effect32_film` BC hierarchy at the same budget
+- frozen VAE512 deterministic hierarchy at the same budget
 - best current R3/fine-tuned low-level checkpoint, if available for the same
   budget and protocol
-- VAE512 deterministic hierarchy at the same budget from the README sweep
-- oracle-goal frozen hierarchy, to estimate the reachable ceiling
+- VAE512 flow hierarchy at the same budget as context, not as the main low-level
+  baseline
+- oracle-goal frozen VAE512 hierarchy, to estimate the reachable ceiling
 
 ### Decision Rule
 
@@ -333,7 +367,7 @@ Scale scratch RL beyond seed0 only if it passes both gates:
    evaluation, or oracle-goal success improves enough to show a real low-level
    reachability gain.
 
-Reject or redesign the scratch objective if it only improves latent/effect
+Reject or redesign the scratch objective if it only improves VAE latent
 distance while reducing task success, matching the failure mode seen in longer
 R3 training.
 
@@ -344,7 +378,8 @@ The current decisions are:
 - start the effect32 budget sweep with the `N=500`/`N=1800` protocol check
   after one smoke point
 - produce both effect32-only plots and a combined README plot
-- use `D_psi` for scratch RL reward design
+- use VAE512 latent-distance/reachability rewards for scratch RL, labeled `D_z`
+  unless a learned reachability model is added
 - try several seed0 reward variants at `N=500` and `N=1800`
 - run the three-seed scratch RL final evaluation only for the most promising
   reward variant
@@ -356,8 +391,8 @@ first: implement effect32_film scaling support
 then:  smoke N=500 seed0 with short evals
 then:  run N=500 and N=1800 for seeds 0,1,2 under final eval episodes
 then:  review before launching the full 8-budget sweep
-then:  implement scratch low-level RL only after the budgeted effect32
-       checkpoints exist for N=500 and N=1800
+then:  implement VAE512 scratch low-level RL using the saved budgeted VAE512
+       checkpoints for N=500 and N=1800
 then:  run seed0 scratch RL reward-selection variants at N=500 and N=1800
 then:  run three-seed scratch RL final eval only for the selected reward
 ```
