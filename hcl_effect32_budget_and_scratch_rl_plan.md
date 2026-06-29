@@ -111,13 +111,15 @@ results/incremental/effect32_film_scaling/n{N}/...
 docs/results/effect32_film_scaling/...
 ```
 
-4. Add an aggregate plot that overlays `effect32_film` on the existing
-   VAE512 deployable success curves without modifying the tracked README plot
-   until the result is final.
+4. Generate both an `effect32_film`-only plot and a combined plot that overlays
+   `effect32_film` on the existing VAE512 deployable success curves. Once the
+   sweep is final, update the README plot so it includes all previous VAE512
+   architectures plus `effect32_film`.
 
 ### Staging
 
-Run this in three stages:
+Run this in three stages. The protocol check is the first serious run after a
+single smoke point; do not jump directly to the full eight-budget sweep.
 
 1. **Pipeline smoke:** `N=500`, `seed=0`, learned eval `20`, oracle eval `20`.
    This validates that budgeted effect-code training, FiLM hierarchy training,
@@ -134,10 +136,22 @@ Produce:
 ```text
 results/incremental/effect32_film_scaling/aggregate/aggregate.json
 results/incremental/effect32_film_scaling/aggregate/summary.csv
+results/incremental/effect32_film_scaling/aggregate/combined_comparison.csv
+docs/results/effect32_film_scaling/success_deployable_effect32_only.png
 docs/results/effect32_film_scaling/success_deployable_with_vae512.png
 docs/results/effect32_film_scaling/success_oracle.png
 docs/results/effect32_film_scaling/goal_diagnostics.csv
 ```
+
+After the full sweep is accepted, update:
+
+```text
+docs/results/vae512_scaling/success_deployable.png
+README.md
+```
+
+The README figure should remain the main combined comparison: all previous
+VAE512 sample-efficiency architectures plus the new `effect32_film` curve.
 
 The main comparison should report:
 
@@ -242,17 +256,24 @@ Stage the RL work so failures are cheap:
    - goal: verify the policy produces nontrivial actions and the reward is
      wired correctly
 
-2. **Local reachability run**
+2. **Seed0 reward-selection runs**
    - budgets: `N=500`, `N=1800`
-   - seed: 0 first
+   - seed: 0 only
    - train on reachable local branch goals
-   - reward: terminal latent/effect distance first; task reward only as a
-     diagnostic term, not the main objective
+   - use `D_psi` as the learned distance/reachability signal
+   - compare reward variants before scaling:
+     - pure terminal `D_psi`
+     - paired terminal improvement over the frozen BC low level
+     - terminal `D_psi` plus a small progress term
+     - optional small task-reward mixture only if the first three are unstable
 
 3. **Scaled scratch run**
    - budgets: `N=500`, `N=1800`
-   - seeds: at least 0, then add 1 and 2 if seed0 beats frozen locally and in
-     deployment
+   - reward: only the most promising seed0 reward variant from the previous
+     stage
+   - seeds: 0, 1, 2
+   - final evaluation: run this three-seed final evaluation only for the
+     selected reward variant, not for every reward candidate
    - use substantially more steps than the R3 fine-tune, because learning from
      scratch is a harder exploration problem
 
@@ -316,18 +337,19 @@ Reject or redesign the scratch objective if it only improves latent/effect
 distance while reducing task success, matching the failure mode seen in longer
 R3 training.
 
-## Review Questions
+## Confirmed Execution Order
 
-Before running, decide:
+The current decisions are:
 
-1. Should the effect32 budget sweep start with the `N=500`/`N=1800` protocol
-   check, or go straight to all eight budgets after one smoke point?
-2. Should the first scratch RL reward be pure terminal effect distance, paired
-   improvement over frozen, or a small task-reward mixture?
-3. Should the first final figure be an overlay on the existing VAE512 plot, or
-   a separate effect32-only figure plus a combined comparison table?
+- start the effect32 budget sweep with the `N=500`/`N=1800` protocol check
+  after one smoke point
+- produce both effect32-only plots and a combined README plot
+- use `D_psi` for scratch RL reward design
+- try several seed0 reward variants at `N=500` and `N=1800`
+- run the three-seed scratch RL final evaluation only for the most promising
+  reward variant
 
-My recommendation is:
+Execution order:
 
 ```text
 first: implement effect32_film scaling support
@@ -336,4 +358,6 @@ then:  run N=500 and N=1800 for seeds 0,1,2 under final eval episodes
 then:  review before launching the full 8-budget sweep
 then:  implement scratch low-level RL only after the budgeted effect32
        checkpoints exist for N=500 and N=1800
+then:  run seed0 scratch RL reward-selection variants at N=500 and N=1800
+then:  run three-seed scratch RL final eval only for the selected reward
 ```
