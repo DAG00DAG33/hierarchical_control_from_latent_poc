@@ -29,7 +29,7 @@ At 8,000 training trajectories:
 | Flat full observation, flow matching | `0.455 +/- 0.032` |
 | Reachable branch oracle, 50 episodes/seed | `0.693 +/- 0.070` |
 
-![VAE-512 sample-efficiency curves](docs/results/vae512_scaling/success_deployable.png)
+![VAE-512 and effect32_film sample-efficiency curves](docs/results/effect32_film_scaling/success_deployable_with_vae512.png)
 
 Over the complete 50-8,000 trajectory range, flat full-observation
 deterministic control has the best normalized area under the learning curve
