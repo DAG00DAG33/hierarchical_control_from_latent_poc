@@ -1679,8 +1679,9 @@ def _save_scaling_plot(
     deployable_episodes: int = 500,
     oracle_episodes: int = 50,
 ) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-
     colors = {
         method: color
         for method, color in zip(
@@ -1733,6 +1734,8 @@ def aggregate_vae_scaling_results(
     output_name: str = "aggregate",
 ) -> Path:
     """Validate and aggregate the complete fixed-budget scaling experiment."""
+    import matplotlib
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import pandas as pd
 
@@ -2326,8 +2329,9 @@ def _save_effect32_scaling_plot(
     seed_count: int,
     episodes: int,
 ) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-
     labels = {
         **_METHOD_LABELS,
         "effect32_film": "hierarchy effect32 FiLM",
