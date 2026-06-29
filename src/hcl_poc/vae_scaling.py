@@ -55,6 +55,8 @@ console = Console()
 VAE_SCALING_BUDGETS = (50, 100, 200, 500, 1000, 1800, 4000, 8000)
 VAE_SCALING_SEEDS = (0, 1, 2)
 VAE_CANDIDATE = "vae512_w2048_b1e6"
+EFFECT32_SCALING_CANDIDATE = "effect32_film"
+EFFECT32_SCALING_EXPERIMENT = "effect32_film_sample_efficiency"
 DEPLOYABLE_METHODS = (
     "deterministic_hierarchy",
     "flow_hierarchy",
@@ -64,6 +66,7 @@ DEPLOYABLE_METHODS = (
     "flat_observation_flow",
 )
 ALL_METHODS = (*DEPLOYABLE_METHODS, "oracle_hierarchy")
+EFFECT32_METHODS = ("effect32_film", "effect32_film_oracle")
 
 
 def vae_scaling_config(config: Config, n_trajectories: int) -> Config:
@@ -77,6 +80,32 @@ def vae_scaling_config(config: Config, n_trajectories: int) -> Config:
     )
     raw["paths"]["incremental_results_dir"] = str(
         config.path_value("paths.incremental_results_dir") / "vae512_scaling" / f"n{n_trajectories}"
+    )
+    raw["incremental"]["phase4"]["train_episodes"] = n_trajectories
+    raw["incremental"]["phase6"]["train_episodes"] = n_trajectories
+    if n_trajectories > 1800:
+        raw["incremental"]["phase4"]["prepared_path"] = str(
+            config.get("vae_scaling.extended_prepared_path")
+        )
+    raw["learned_interface"]["evaluation"]["seed_start"] = int(
+        config.get("vae_scaling.eval_seed_start", 2_200_000)
+    )
+    return Config(raw=raw, path=config.path)
+
+
+def effect32_scaling_config(config: Config, n_trajectories: int) -> Config:
+    if n_trajectories not in VAE_SCALING_BUDGETS:
+        raise ValueError(f"Effect32 scaling budget must be one of {VAE_SCALING_BUDGETS}")
+    raw = copy.deepcopy(config.raw)
+    raw["paths"]["incremental_artifact_dir"] = str(
+        config.path_value("paths.incremental_artifact_dir")
+        / "effect32_film_scaling"
+        / f"n{n_trajectories}"
+    )
+    raw["paths"]["incremental_results_dir"] = str(
+        config.path_value("paths.incremental_results_dir")
+        / "effect32_film_scaling"
+        / f"n{n_trajectories}"
     )
     raw["incremental"]["phase4"]["train_episodes"] = n_trajectories
     raw["incremental"]["phase6"]["train_episodes"] = n_trajectories
@@ -382,6 +411,56 @@ def write_vae_scaling_manifest(
     return path
 
 
+def write_effect32_scaling_manifest(
+    config: Config,
+    n_trajectories: int,
+    force: bool = False,
+) -> Path:
+    point_config = effect32_scaling_config(config, n_trajectories)
+    path = (
+        ensure_dir(point_config.path_value("paths.incremental_artifact_dir"))
+        / "data_manifest.json"
+    )
+    if path.exists() and not force:
+        return path
+    dataset_path = Path(point_config.get("incremental.phase4.prepared_path"))
+    validation_count = int(config.get("incremental.phase4.validation_episodes", 200))
+    with h5py.File(dataset_path, "r") as h5:
+        keys = sorted(key for key in h5 if key.startswith("episode_"))
+        train_keys = keys[:n_trajectories]
+        validation_keys = keys[-validation_count:]
+        train_lengths = [int(len(h5[key]["actions"])) for key in train_keys]
+        validation_lengths = [int(len(h5[key]["actions"])) for key in validation_keys]
+        validation_content_sha256 = _dataset_content_sha256(h5, validation_keys)
+    if set(train_keys) & set(validation_keys):
+        raise ValueError("Effect32 scaling train/validation trajectory overlap")
+    fingerprint_source = json.dumps(
+        {
+            "dataset": str(dataset_path.resolve()),
+            "train": list(zip(train_keys, train_lengths, strict=True)),
+            "validation": list(zip(validation_keys, validation_lengths, strict=True)),
+        },
+        sort_keys=True,
+    ).encode()
+    payload = {
+        "experiment": EFFECT32_SCALING_EXPERIMENT,
+        "candidate": EFFECT32_SCALING_CANDIDATE,
+        "dataset": str(dataset_path),
+        "selection": "nested prefix for train; fixed final 200 for validation",
+        "n_trajectories": n_trajectories,
+        "train_keys": train_keys,
+        "validation_keys": validation_keys,
+        "train_transitions": int(sum(train_lengths)),
+        "validation_transitions": int(sum(validation_lengths)),
+        "validation_content_sha256": validation_content_sha256,
+        "equivalent_behavior_seconds": sum(train_lengths) / float(config.get("control_freq", 20)),
+        "sha256": hashlib.sha256(fingerprint_source).hexdigest(),
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(path, payload)
+    return path
+
+
 def validate_nested_vae_scaling_manifests(config: Config) -> dict[str, Any]:
     manifests = []
     for budget in VAE_SCALING_BUDGETS:
@@ -412,6 +491,33 @@ def validate_nested_vae_scaling_manifests(config: Config) -> dict[str, Any]:
         "fixed_validation": True,
         "manifest_sha256": [manifest["sha256"] for manifest in manifests],
     }
+
+
+def validate_nested_effect32_scaling_manifests(config: Config) -> dict[str, Any]:
+    manifests = []
+    for budget in VAE_SCALING_BUDGETS:
+        path = write_effect32_scaling_manifest(config, budget)
+        with path.open() as stream:
+            manifests.append(json.load(stream))
+
+    validation = manifests[0]["validation_content_sha256"]
+    previous: list[str] = []
+    for manifest in manifests:
+        train = manifest["train_keys"]
+        if train[: len(previous)] != previous:
+            raise ValueError("Effect32 scaling trajectory budgets are not nested")
+        if manifest["validation_content_sha256"] != validation:
+            raise ValueError("Effect32 scaling validation split changed across budgets")
+        previous = train
+    return {
+        "experiment": EFFECT32_SCALING_EXPERIMENT,
+        "candidate": EFFECT32_SCALING_CANDIDATE,
+        "budgets": list(VAE_SCALING_BUDGETS),
+        "nested": True,
+        "fixed_validation": True,
+        "manifest_sha256": [manifest["sha256"] for manifest in manifests],
+    }
+
 
 
 def _load_point_episodes(
@@ -2094,6 +2200,350 @@ def aggregate_vae_scaling_results(
             "methods": list(ALL_METHODS),
             "run_count": len(runs),
             "episode_outcomes_validated": True,
+            "metadata": _runtime_metadata(config),
+        },
+    )
+    return aggregate_dir
+
+
+def train_effect32_scaling_point(
+    config: Config,
+    n_trajectories: int,
+    seed: int,
+    force: bool = False,
+) -> dict[str, Path]:
+    if seed not in VAE_SCALING_SEEDS:
+        raise ValueError(f"Effect32 scaling seed must be one of {VAE_SCALING_SEEDS}")
+    point_config = effect32_scaling_config(config, n_trajectories)
+    manifest = write_effect32_scaling_manifest(config, n_trajectories)
+    representation = train_learned_interface_representation(
+        point_config, EFFECT32_SCALING_CANDIDATE, seed, force=force
+    )
+    encoded = prepare_learned_interface_episodes(
+        point_config, EFFECT32_SCALING_CANDIDATE, seed, force=force
+    )
+    hierarchy = train_learned_interface_hierarchy(
+        point_config, EFFECT32_SCALING_CANDIDATE, seed, force=force
+    )
+    paths = {
+        "manifest": manifest,
+        "representation": representation,
+        "encoded": encoded,
+        "deterministic_hierarchy": hierarchy,
+    }
+    write_json(
+        _point_artifact_dir(point_config, seed) / "training_manifest.json",
+        {
+            "experiment": EFFECT32_SCALING_EXPERIMENT,
+            "candidate": EFFECT32_SCALING_CANDIDATE,
+            "n_trajectories": n_trajectories,
+            "seed": seed,
+            "artifacts": {key: str(value) for key, value in paths.items()},
+            "metadata": _runtime_metadata(config),
+        },
+    )
+    return paths
+
+
+def evaluate_effect32_scaling_point(
+    config: Config,
+    n_trajectories: int,
+    seed: int,
+    deployable_episodes: int | None = None,
+    oracle_episodes: int | None = None,
+    force: bool = False,
+) -> Path:
+    point_config = effect32_scaling_config(config, n_trajectories)
+    deployable_count = int(
+        deployable_episodes or config.get("vae_scaling.deployable_eval_episodes", 500)
+    )
+    oracle_count = int(oracle_episodes or config.get("vae_scaling.oracle_eval_episodes", 50))
+    train_effect32_scaling_point(config, n_trajectories, seed, force=False)
+    result_dir = _point_result_dir(point_config, seed)
+    summary_path = result_dir / f"summary_deploy{deployable_count}_oracle{oracle_count}.json"
+    if summary_path.exists() and not force:
+        return summary_path
+    learned_path = evaluate_learned_interface_hierarchy(
+        point_config,
+        EFFECT32_SCALING_CANDIDATE,
+        "learned",
+        seed,
+        episodes=deployable_count,
+        force=force,
+    )
+    oracle_path = evaluate_learned_interface_hierarchy(
+        point_config,
+        EFFECT32_SCALING_CANDIDATE,
+        "oracle",
+        seed,
+        episodes=oracle_count,
+        force=force,
+    )
+    paths = {
+        "effect32_film": learned_path,
+        "effect32_film_oracle": oracle_path,
+    }
+    rows = []
+    for method in EFFECT32_METHODS:
+        with paths[method].open() as stream:
+            result = json.load(stream)
+        rows.append(
+            {
+                "method": method,
+                "source": str(paths[method]),
+                "success": float(result["success"]),
+                "success_wilson_95": result["success_wilson_95"],
+                "final_reward": float(result["final_reward"]),
+                "max_reward": float(result["max_reward"]),
+                "teacher_action_mae": float(result["teacher_action_mae"]),
+                "episodes": int(result["episodes"]),
+            }
+        )
+    with write_effect32_scaling_manifest(config, n_trajectories).open() as stream:
+        manifest = json.load(stream)
+    payload = {
+        "experiment": EFFECT32_SCALING_EXPERIMENT,
+        "candidate": EFFECT32_SCALING_CANDIDATE,
+        "n_trajectories": n_trajectories,
+        "training_seed": seed,
+        "deployable_evaluation_episodes": deployable_count,
+        "oracle_evaluation_episodes": oracle_count,
+        "evaluation_seed_start": int(config.get("vae_scaling.eval_seed_start", 2_200_000)),
+        "data_manifest": str(write_effect32_scaling_manifest(config, n_trajectories)),
+        "data_manifest_sha256": manifest["sha256"],
+        "rows": rows,
+        "metadata": _runtime_metadata(config),
+    }
+    write_json(summary_path, payload)
+    return summary_path
+
+
+def _save_effect32_scaling_plot(
+    frame: Any,
+    methods: tuple[str, ...],
+    output_path: Path,
+    title: str,
+    seed_count: int,
+    episodes: int,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    labels = {
+        **_METHOD_LABELS,
+        "effect32_film": "hierarchy effect32 FiLM",
+        "effect32_film_oracle": "effect32 FiLM branch oracle",
+    }
+    colors = {
+        "deterministic_hierarchy": "#0072B2",
+        "flow_hierarchy": "#D55E00",
+        "flat_latent_deterministic": "#009E73",
+        "flat_latent_flow": "#56B4E9",
+        "flat_observation_deterministic": "#CC79A7",
+        "flat_observation_flow": "#E69F00",
+        "oracle_hierarchy": "#000000",
+        "effect32_film": "#882255",
+        "effect32_film_oracle": "#44AA99",
+    }
+    figure, axis = plt.subplots(figsize=(10.5, 6.2))
+    for method in methods:
+        selected = frame[frame["method"] == method].sort_values("n_trajectories")
+        if selected.empty:
+            continue
+        axis.errorbar(
+            selected["n_trajectories"],
+            selected["success_mean"],
+            yerr=selected["success_sd"].fillna(0.0),
+            label=labels[method],
+            color=colors[method],
+            marker="o",
+            linewidth=2,
+            capsize=3,
+            linestyle="--" if method.endswith("_oracle") or method == "oracle_hierarchy" else "-",
+        )
+    axis.set_xscale("log")
+    axis.set_xticks(VAE_SCALING_BUDGETS, labels=VAE_SCALING_BUDGETS)
+    axis.set_xlabel("training trajectories (nested subsets)")
+    axis.set_ylabel("success")
+    axis.set_ylim(0.0, 1.0)
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=9, ncol=2)
+    axis.set_title(
+        f"{title}\nmean +/- sample SD over {seed_count} training seed(s); "
+        f"{episodes} evaluation episodes/seed"
+    )
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def aggregate_effect32_scaling_results(
+    config: Config,
+    deployable_episodes: int = 500,
+    oracle_episodes: int = 50,
+    training_seeds: tuple[int, ...] = VAE_SCALING_SEEDS,
+    budgets: tuple[int, ...] = VAE_SCALING_BUDGETS,
+    output_name: str = "aggregate",
+) -> Path:
+    import pandas as pd
+
+    aggregate_dir = ensure_dir(
+        config.path_value("paths.incremental_results_dir")
+        / "effect32_film_scaling"
+        / output_name
+    )
+    run_rows: list[dict[str, Any]] = []
+    for budget in budgets:
+        if budget not in VAE_SCALING_BUDGETS:
+            raise ValueError(f"Effect32 scaling budget must be one of {VAE_SCALING_BUDGETS}")
+        point_config = effect32_scaling_config(config, budget)
+        for seed in training_seeds:
+            summary_path = (
+                _point_result_dir(point_config, seed)
+                / f"summary_deploy{deployable_episodes}_oracle{oracle_episodes}.json"
+            )
+            if not summary_path.exists():
+                raise FileNotFoundError(f"Missing effect32 scaling result: {summary_path}")
+            summary = json.loads(summary_path.read_text())
+            by_method = {row["method"]: row for row in summary["rows"]}
+            if set(by_method) != set(EFFECT32_METHODS):
+                raise ValueError(f"Incomplete effect32 method set in {summary_path}")
+            for method in EFFECT32_METHODS:
+                row = by_method[method]
+                expected_episodes = (
+                    oracle_episodes if method == "effect32_film_oracle" else deployable_episodes
+                )
+                if int(row["episodes"]) != expected_episodes:
+                    raise ValueError(
+                        f"{method} at N={budget}, seed={seed} has "
+                        f"{row['episodes']} episodes, expected {expected_episodes}"
+                    )
+                source = Path(row["source"])
+                payload = json.loads(source.read_text())
+                outcomes = payload.get("episode_success")
+                if outcomes is None or len(outcomes) != expected_episodes:
+                    raise ValueError(f"Missing episode outcomes in {source}")
+                run_rows.append(
+                    {
+                        "n_trajectories": budget,
+                        "training_seed": seed,
+                        "method": method,
+                        "episodes": expected_episodes,
+                        "success": float(row["success"]),
+                        "final_reward": float(row["final_reward"]),
+                        "max_reward": float(row["max_reward"]),
+                        "teacher_action_mae": float(row["teacher_action_mae"]),
+                        "action_saturation_rate": payload.get("action_saturation_rate", math.nan),
+                        "rollout_elapsed_s": payload.get("elapsed_s", math.nan),
+                        "source": str(source),
+                        "episode_success": json.dumps(outcomes),
+                    }
+                )
+    runs = pd.DataFrame(run_rows)
+    runs.to_csv(aggregate_dir / "all_runs.csv", index=False)
+    metrics = [
+        "success",
+        "final_reward",
+        "max_reward",
+        "teacher_action_mae",
+        "action_saturation_rate",
+        "rollout_elapsed_s",
+    ]
+    grouped = runs.groupby(["n_trajectories", "method"], sort=False)
+    summary = grouped[metrics].agg(["mean", "std"]).reset_index()
+    summary.columns = [
+        "_".join(part for part in column if part) if isinstance(column, tuple) else column
+        for column in summary.columns
+    ]
+    summary = summary.rename(
+        columns={
+            column: column.removesuffix("_std") + "_sd"
+            for column in summary.columns
+            if column.endswith("_std")
+        }
+    )
+    seed_values = grouped["success"].apply(list).reset_index(name="success_by_seed")
+    summary = summary.merge(seed_values, on=["n_trajectories", "method"])
+    summary.to_csv(aggregate_dir / "method_budget_summary.csv", index=False)
+    (aggregate_dir / "method_budget_summary.md").write_text(
+        summary.to_markdown(index=False) + "\n"
+    )
+    learned_only = summary[summary["method"] == "effect32_film"]
+    learned_only.to_csv(aggregate_dir / "summary.csv", index=False)
+
+    docs_dir = ensure_dir(Path("docs/results/effect32_film_scaling"))
+    effect_plot_methods = ("effect32_film",)
+    _save_effect32_scaling_plot(
+        summary,
+        effect_plot_methods,
+        aggregate_dir / "success_deployable_effect32_only.png",
+        "Effect32 FiLM sample efficiency",
+        len(training_seeds),
+        deployable_episodes,
+    )
+    _save_effect32_scaling_plot(
+        summary,
+        effect_plot_methods,
+        docs_dir / "success_deployable_effect32_only.png",
+        "Effect32 FiLM sample efficiency",
+        len(training_seeds),
+        deployable_episodes,
+    )
+    _save_effect32_scaling_plot(
+        summary,
+        EFFECT32_METHODS,
+        aggregate_dir / "success_oracle.png",
+        "Effect32 FiLM learned vs oracle",
+        len(training_seeds),
+        deployable_episodes,
+    )
+    _save_effect32_scaling_plot(
+        summary,
+        EFFECT32_METHODS,
+        docs_dir / "success_oracle.png",
+        "Effect32 FiLM learned vs oracle",
+        len(training_seeds),
+        deployable_episodes,
+    )
+
+    vae_summary_path = (
+        config.path_value("paths.incremental_results_dir")
+        / "vae512_scaling"
+        / "aggregate"
+        / "method_budget_summary.csv"
+    )
+    combined = summary.copy()
+    if vae_summary_path.exists():
+        vae_summary = pd.read_csv(vae_summary_path)
+        combined = pd.concat([vae_summary, summary], ignore_index=True, sort=False)
+    combined.to_csv(aggregate_dir / "combined_comparison.csv", index=False)
+    _save_effect32_scaling_plot(
+        combined,
+        (*DEPLOYABLE_METHODS, "effect32_film"),
+        aggregate_dir / "success_deployable_with_vae512.png",
+        "VAE512 plus Effect32 FiLM sample efficiency",
+        len(training_seeds),
+        deployable_episodes,
+    )
+    _save_effect32_scaling_plot(
+        combined,
+        (*DEPLOYABLE_METHODS, "effect32_film"),
+        docs_dir / "success_deployable_with_vae512.png",
+        "VAE512 plus Effect32 FiLM sample efficiency",
+        len(training_seeds),
+        deployable_episodes,
+    )
+
+    write_json(
+        aggregate_dir / "aggregate.json",
+        {
+            "experiment": EFFECT32_SCALING_EXPERIMENT,
+            "candidate": EFFECT32_SCALING_CANDIDATE,
+            "budgets": list(budgets),
+            "training_seeds": list(training_seeds),
+            "deployable_episodes_per_seed": deployable_episodes,
+            "oracle_episodes_per_seed": oracle_episodes,
+            "methods": list(EFFECT32_METHODS),
+            "run_count": len(runs),
             "metadata": _runtime_metadata(config),
         },
     )

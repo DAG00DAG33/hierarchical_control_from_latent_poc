@@ -180,11 +180,15 @@ from hcl_poc.train import (
     train_state_bc_policy,
 )
 from hcl_poc.vae_scaling import (
+    aggregate_effect32_scaling_results,
     aggregate_vae_scaling_results,
+    evaluate_effect32_scaling_point,
     evaluate_vae_scaling_point,
     extend_vae_scaling_dataset,
+    train_effect32_scaling_point,
     train_vae_scaling_point,
     vae_scaling_config,
+    validate_nested_effect32_scaling_manifests,
     validate_nested_vae_scaling_manifests,
 )
 
@@ -2088,6 +2092,35 @@ def incremental_cmd(args: argparse.Namespace) -> None:
             oracle_episodes=args.oracle_episodes,
             force=args.force,
         )
+    elif args.incremental_command == "effect32-scaling-manifests":
+        console.print(validate_nested_effect32_scaling_manifests(config))
+    elif args.incremental_command == "effect32-scaling-aggregate":
+        console.print(
+            aggregate_effect32_scaling_results(
+                config,
+                deployable_episodes=args.episodes,
+                oracle_episodes=args.oracle_episodes,
+                training_seeds=tuple(args.seeds),
+                budgets=tuple(args.budgets),
+                output_name=args.output_name,
+            )
+        )
+    elif args.incremental_command == "effect32-scaling-train":
+        train_effect32_scaling_point(
+            config,
+            n_trajectories=args.n_trajectories,
+            seed=args.seed,
+            force=args.force,
+        )
+    elif args.incremental_command in {"effect32-scaling-eval", "effect32-scaling-run"}:
+        evaluate_effect32_scaling_point(
+            config,
+            n_trajectories=args.n_trajectories,
+            seed=args.seed,
+            deployable_episodes=args.episodes,
+            oracle_episodes=args.oracle_episodes,
+            force=args.force,
+        )
     else:
         raise ValueError(args.incremental_command)
 
@@ -3672,6 +3705,36 @@ def build_parser() -> argparse.ArgumentParser:
             vae_scaling.add_argument("--episodes", type=int)
             vae_scaling.add_argument("--oracle-episodes", type=int)
         vae_scaling.set_defaults(func=incremental_cmd)
+    effect32_scaling_manifests = incremental_sub.add_parser("effect32-scaling-manifests")
+    add_config_arg(effect32_scaling_manifests)
+    effect32_scaling_manifests.set_defaults(func=incremental_cmd)
+    effect32_scaling_aggregate = incremental_sub.add_parser("effect32-scaling-aggregate")
+    add_config_arg(effect32_scaling_aggregate)
+    effect32_scaling_aggregate.add_argument("--episodes", type=int, default=500)
+    effect32_scaling_aggregate.add_argument("--oracle-episodes", type=int, default=50)
+    effect32_scaling_aggregate.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    effect32_scaling_aggregate.add_argument(
+        "--budgets",
+        type=int,
+        nargs="+",
+        default=[50, 100, 200, 500, 1000, 1800, 4000, 8000],
+    )
+    effect32_scaling_aggregate.add_argument("--output-name", default="aggregate")
+    effect32_scaling_aggregate.set_defaults(func=incremental_cmd)
+    for command in [
+        "effect32-scaling-train",
+        "effect32-scaling-eval",
+        "effect32-scaling-run",
+    ]:
+        effect32_scaling = incremental_sub.add_parser(command)
+        add_config_arg(effect32_scaling)
+        effect32_scaling.add_argument("--n-trajectories", type=int, required=True)
+        effect32_scaling.add_argument("--seed", type=int, required=True)
+        effect32_scaling.add_argument("--force", action="store_true")
+        if command != "effect32-scaling-train":
+            effect32_scaling.add_argument("--episodes", type=int)
+            effect32_scaling.add_argument("--oracle-episodes", type=int)
+        effect32_scaling.set_defaults(func=incremental_cmd)
 
     p = sub.add_parser("train")
     add_config_arg(p)
