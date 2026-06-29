@@ -157,6 +157,47 @@ class DirectLowActorCritic(nn.Module):
         )
 
 
+class ScratchLowActorCritic(nn.Module):
+    def __init__(
+        self,
+        condition_dim: int,
+        action_dim: int = 3,
+        width: int = 256,
+        depth: int = 2,
+        initial_logstd: float = -2.3,
+    ) -> None:
+        super().__init__()
+        self.condition_dim = condition_dim
+        self.action_dim = action_dim
+        self.width = width
+        self.depth = depth
+        self.actor_mean = _mlp(condition_dim, action_dim, width, depth, output_std=0.01)
+        nn.init.zeros_(self.actor_mean[-1].bias)
+        self.actor_logstd = nn.Parameter(torch.full((1, action_dim), initial_logstd))
+        self.critic = _mlp(condition_dim, 1, width, depth, output_std=1.0)
+
+    def mean_action(self, condition: torch.Tensor) -> torch.Tensor:
+        return self.actor_mean(condition)
+
+    def get_action_and_value(
+        self,
+        condition: torch.Tensor,
+        raw_action: torch.Tensor | None = None,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean = self.mean_action(condition)
+        std = torch.exp(self.actor_logstd.expand_as(mean))
+        distribution = torch.distributions.Normal(mean, std)
+        if raw_action is None:
+            raw_action = mean if deterministic else distribution.sample()
+        return (
+            raw_action,
+            distribution.log_prob(raw_action).sum(-1),
+            distribution.entropy().sum(-1),
+            self.critic(condition).flatten(),
+        )
+
+
 @dataclass
 class FrozenHierarchy:
     high_model: nn.Module
@@ -1224,7 +1265,7 @@ def audit_low_level_rl(config: Config, n_demo: int, seed: int) -> Path:
 
 def _save_checkpoint(
     path: Path,
-    agent: ResidualActorCritic | DirectLowActorCritic,
+    agent: ResidualActorCritic | DirectLowActorCritic | ScratchLowActorCritic,
     optimizer: torch.optim.Optimizer,
     global_step: int,
     recipe: dict[str, Any],
@@ -1270,6 +1311,22 @@ def _load_direct(
         frozen.action_norm.mean,
         frozen.action_norm.std,
         int(checkpoint["condition_dim"]),
+        int(checkpoint["width"]),
+        int(checkpoint["depth"]),
+    ).to(device)
+    agent.load_state_dict(checkpoint["agent"])
+    agent.eval()
+    return agent, checkpoint
+
+
+def _load_scratch(
+    path: Path,
+    device: torch.device,
+) -> tuple[ScratchLowActorCritic, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    agent = ScratchLowActorCritic(
+        int(checkpoint["condition_dim"]),
+        int(checkpoint["action_dim"]),
         int(checkpoint["width"]),
         int(checkpoint["depth"]),
     ).to(device)
@@ -1405,7 +1462,7 @@ def evaluate_residual_rl(
     device = default_device()
     frozen = _load_frozen(config, n_demo, seed, device, candidate)
     residual_agent: ResidualActorCritic | None = None
-    direct_agent: DirectLowActorCritic | None = None
+    direct_agent: DirectLowActorCritic | ScratchLowActorCritic | None = None
     direct_ensemble: list[DirectLowActorCritic] = []
     alpha = 0.0
     global_step = 0
@@ -1451,6 +1508,8 @@ def evaluate_residual_rl(
             reachability_checkpoint_path = Path(str(raw_reachability_checkpoint))
         if method == "r3_direct_last_layer":
             direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
+        elif method == "scratch_direct_full":
+            direct_agent, checkpoint = _load_scratch(checkpoint_path, device)
         else:
             residual_agent, checkpoint = _load_residual(checkpoint_path, device)
             alpha = float(checkpoint["recipe"]["alpha"])
@@ -1983,7 +2042,7 @@ def evaluate_residual_rl_serial(
         goal_prototypes = _load_normalized_goal_prototypes(config, frozen, candidate, seed)
         goal_prototype_norms = np.sum(np.square(goal_prototypes), axis=1)
     residual_agent: ResidualActorCritic | None = None
-    direct_agent: DirectLowActorCritic | None = None
+    direct_agent: DirectLowActorCritic | ScratchLowActorCritic | None = None
     alpha = 0.0
     global_step = 0
     checkpoint_path = checkpoint_path or artifact / "latest.pt"
@@ -1997,6 +2056,8 @@ def evaluate_residual_rl_serial(
             reachability_checkpoint_path = Path(str(raw_reachability_checkpoint))
         if method == "r3_direct_last_layer":
             direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
+        elif method == "scratch_direct_full":
+            direct_agent, checkpoint = _load_scratch(checkpoint_path, device)
         else:
             residual_agent, checkpoint = _load_residual(checkpoint_path, device)
             alpha = float(checkpoint["recipe"]["alpha"])
@@ -2648,7 +2709,7 @@ def record_low_level_rl_videos(
     artifact, result = _paths(config, n_demo, seed, run_name)
     checkpoint_path = checkpoint_path or artifact / "latest.pt"
     residual_agent: ResidualActorCritic | None = None
-    direct_agent: DirectLowActorCritic | None = None
+    direct_agent: DirectLowActorCritic | ScratchLowActorCritic | None = None
     alpha = 0.0
     global_step = 0
     if checkpoint_path.exists():
@@ -2656,6 +2717,8 @@ def record_low_level_rl_videos(
         method = str(raw_checkpoint.get("recipe", {}).get("method", "r1_residual_deterministic"))
         if method == "r3_direct_last_layer":
             direct_agent, checkpoint = _load_direct(checkpoint_path, frozen, device)
+        elif method == "scratch_direct_full":
+            direct_agent, checkpoint = _load_scratch(checkpoint_path, device)
         else:
             residual_agent, checkpoint = _load_residual(checkpoint_path, device)
             alpha = float(checkpoint["recipe"]["alpha"])
@@ -3086,13 +3149,14 @@ def train_direct_low_rl(
     reward_mode: str = "absolute",
     candidate: str = VAE_CANDIDATE,
     rl_seed_offset: int = 0,
+    scratch: bool = False,
     force: bool = False,
 ) -> Path:
     if rl_seed_offset < 0:
         raise ValueError("rl_seed_offset must be non-negative")
     if reward_mode not in {"absolute", "paired"}:
         raise ValueError("reward_mode must be one of {'absolute', 'paired'}")
-    if candidate == VAE_CANDIDATE and n_demo not in {500, 1000}:
+    if not scratch and candidate == VAE_CANDIDATE and n_demo not in {500, 1000}:
         raise ValueError("Low-level RL currently supports N_demo in {500, 1000}")
     artifact, result = _paths(config, n_demo, seed, run_name, candidate)
     latest = artifact / "latest.pt"
@@ -3101,7 +3165,8 @@ def train_direct_low_rl(
         latest.unlink(missing_ok=True)
         best_train_latent.unlink(missing_ok=True)
     device = default_device()
-    set_seed(seed + 60_000 + rl_seed_offset)
+    seed_base = 70_000 if scratch else 60_000
+    set_seed(seed + seed_base + rl_seed_offset)
     frozen = _load_frozen(config, n_demo, seed, device, candidate)
     if distance_metric == "reachability" and reachability_checkpoint_path is None:
         reachability_checkpoint_path = (
@@ -3122,15 +3187,23 @@ def train_direct_low_rl(
     condition_dim = _condition_dim(frozen)
     width = int(config.get("low_level_rl.residual_width", 256))
     depth = int(config.get("low_level_rl.residual_depth", 2))
-    agent = DirectLowActorCritic(
-        frozen.low_model,
-        frozen.action_norm.mean,
-        frozen.action_norm.std,
-        condition_dim,
-        width=width,
-        depth=depth,
-        initial_logstd=float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
-    ).to(device)
+    if scratch:
+        agent = ScratchLowActorCritic(
+            condition_dim,
+            width=width,
+            depth=depth,
+            initial_logstd=float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
+        ).to(device)
+    else:
+        agent = DirectLowActorCritic(
+            frozen.low_model,
+            frozen.action_norm.mean,
+            frozen.action_norm.std,
+            condition_dim,
+            width=width,
+            depth=depth,
+            initial_logstd=float(config.get("low_level_rl.direct_initial_logstd", -4.0)),
+        ).to(device)
     trainable = [parameter for parameter in agent.parameters() if parameter.requires_grad]
     optimizer = torch.optim.Adam(
         trainable,
@@ -3138,7 +3211,7 @@ def train_direct_low_rl(
         eps=1e-5,
     )
     recipe = {
-        "method": "r3_direct_last_layer",
+        "method": "scratch_direct_full" if scratch else "r3_direct_last_layer",
         "n_demo": n_demo,
         "candidate": candidate,
         "seed": seed,
@@ -3155,7 +3228,9 @@ def train_direct_low_rl(
         else None,
         "segment_terminates_gae": bool(config.get("low_level_rl.segment_terminates_gae", True)),
         "rollout_mode": "full_hierarchy_segment_reward",
-        "trainable_scope": "low_policy_final_layer_plus_logstd_and_critic",
+        "trainable_scope": "full_random_actor_plus_logstd_and_critic"
+        if scratch
+        else "low_policy_final_layer_plus_logstd_and_critic",
         "frozen_hierarchy": str(frozen.checkpoint_path),
     }
     global_step = 0
@@ -3463,3 +3538,41 @@ def train_direct_low_rl(
             base_rollout.close()
         rollout.close()
     return latest
+
+
+def train_scratch_low_rl(
+    config: Config,
+    n_demo: int,
+    seed: int,
+    run_name: str,
+    total_steps: int,
+    terminal_weight: float,
+    distance_progress_weight: float = 1.0,
+    task_reward_weight: float = 0.0,
+    task_progress_weight: float = 0.0,
+    distance_metric: str = "reachability",
+    reachability_checkpoint_path: Path | None = None,
+    reward_mode: str = "absolute",
+    candidate: str = VAE_CANDIDATE,
+    rl_seed_offset: int = 0,
+    force: bool = False,
+) -> Path:
+    return train_direct_low_rl(
+        config,
+        n_demo=n_demo,
+        seed=seed,
+        run_name=run_name,
+        total_steps=total_steps,
+        bc_weight=0.0,
+        terminal_weight=terminal_weight,
+        distance_progress_weight=distance_progress_weight,
+        task_reward_weight=task_reward_weight,
+        task_progress_weight=task_progress_weight,
+        distance_metric=distance_metric,
+        reachability_checkpoint_path=reachability_checkpoint_path,
+        reward_mode=reward_mode,
+        candidate=candidate,
+        rl_seed_offset=rl_seed_offset,
+        scratch=True,
+        force=force,
+    )

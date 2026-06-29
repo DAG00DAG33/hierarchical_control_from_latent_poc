@@ -117,6 +117,7 @@ from hcl_poc.low_level_rl import (
     record_low_level_rl_videos,
     train_direct_low_rl,
     train_residual_rl,
+    train_scratch_low_rl,
 )
 from hcl_poc.privileged_z import (
     collect_privileged_z_closed_loop_action_search_bank,
@@ -216,7 +217,8 @@ def _low_level_config_with_overrides(config: Config, args: argparse.Namespace) -
     if learning_rate is not None:
         key = (
             "direct_learning_rate"
-            if getattr(args, "low_level_rl_command", "") == "train-r3"
+            if getattr(args, "low_level_rl_command", "")
+            in {"train-r3", "train-scratch"}
             else "learning_rate"
         )
         low[key] = learning_rate
@@ -224,7 +226,8 @@ def _low_level_config_with_overrides(config: Config, args: argparse.Namespace) -
     if initial_logstd is not None:
         key = (
             "direct_initial_logstd"
-            if getattr(args, "low_level_rl_command", "") == "train-r3"
+            if getattr(args, "low_level_rl_command", "")
+            in {"train-r3", "train-scratch"}
             else "initial_logstd"
         )
         low[key] = initial_logstd
@@ -336,6 +339,29 @@ def low_level_rl_cmd(args: argparse.Namespace) -> None:
                 run_name=args.run_name,
                 total_steps=args.steps,
                 bc_weight=args.bc_weight,
+                terminal_weight=args.terminal_weight,
+                distance_progress_weight=args.distance_progress_weight,
+                task_reward_weight=args.task_reward_weight,
+                task_progress_weight=args.task_progress_weight,
+                reward_mode=args.reward_mode,
+                distance_metric=args.distance_metric,
+                reachability_checkpoint_path=Path(args.reachability_checkpoint)
+                if args.reachability_checkpoint
+                else None,
+                candidate=args.candidate,
+                rl_seed_offset=args.rl_seed_offset,
+                force=args.force,
+            )
+        )
+    elif args.low_level_rl_command == "train-scratch":
+        run_config = _low_level_config_with_overrides(config, args)
+        console.print(
+            train_scratch_low_rl(
+                run_config,
+                n_demo=args.n_demo,
+                seed=args.seed,
+                run_name=args.run_name,
+                total_steps=args.steps,
                 terminal_weight=args.terminal_weight,
                 distance_progress_weight=args.distance_progress_weight,
                 task_reward_weight=args.task_reward_weight,
@@ -2266,8 +2292,42 @@ def build_parser() -> argparse.ArgumentParser:
     train_r3.add_argument("--no-segment-terminate-gae", action="store_true")
     train_r3.add_argument("--force", action="store_true")
     train_r3.set_defaults(func=low_level_rl_cmd)
+    train_scratch = low_level_rl_sub.add_parser("train-scratch")
+    train_scratch.add_argument(
+        "--n-demo", type=int, choices=[500, 1800], required=True
+    )
+    train_scratch.add_argument("--candidate", default="vae512_w2048_b1e6")
+    train_scratch.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
+    train_scratch.add_argument("--run-name", required=True)
+    train_scratch.add_argument("--steps", type=int, required=True)
+    train_scratch.add_argument("--terminal-weight", type=float, default=1.0)
+    train_scratch.add_argument("--distance-progress-weight", type=float, default=1.0)
+    train_scratch.add_argument("--task-reward-weight", type=float, default=0.0)
+    train_scratch.add_argument("--task-progress-weight", type=float, default=0.0)
+    train_scratch.add_argument(
+        "--reward-mode",
+        choices=["absolute", "paired"],
+        default="absolute",
+    )
+    train_scratch.add_argument(
+        "--distance-metric",
+        choices=["raw_l2", "reachability"],
+        default="reachability",
+    )
+    train_scratch.add_argument("--reachability-checkpoint")
+    train_scratch.add_argument("--num-envs", type=int)
+    train_scratch.add_argument("--rollout-steps", type=int)
+    train_scratch.add_argument("--num-minibatches", type=int)
+    train_scratch.add_argument("--update-epochs", type=int)
+    train_scratch.add_argument("--learning-rate", type=float)
+    train_scratch.add_argument("--initial-logstd", type=float)
+    train_scratch.add_argument("--residual-penalty-weight", type=float)
+    train_scratch.add_argument("--rl-seed-offset", type=int, default=0)
+    train_scratch.add_argument("--no-segment-terminate-gae", action="store_true")
+    train_scratch.add_argument("--force", action="store_true")
+    train_scratch.set_defaults(func=low_level_rl_cmd)
     low_eval = low_level_rl_sub.add_parser("eval")
-    low_eval.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    low_eval.add_argument("--n-demo", type=int, choices=[500, 1000, 1800], required=True)
     low_eval.add_argument("--candidate", default="vae512_w2048_b1e6")
     low_eval.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
     low_eval.add_argument("--run-name", required=True)
@@ -2290,7 +2350,9 @@ def build_parser() -> argparse.ArgumentParser:
     low_eval.add_argument("--force", action="store_true")
     low_eval.set_defaults(func=low_level_rl_cmd)
     low_eval_serial = low_level_rl_sub.add_parser("eval-serial")
-    low_eval_serial.add_argument("--n-demo", type=int, choices=[500, 1000], required=True)
+    low_eval_serial.add_argument(
+        "--n-demo", type=int, choices=[500, 1000, 1800], required=True
+    )
     low_eval_serial.add_argument("--candidate", default="vae512_w2048_b1e6")
     low_eval_serial.add_argument("--seed", type=int, choices=[0, 1, 2], required=True)
     low_eval_serial.add_argument("--run-name", required=True)
