@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,9 @@ from hcl_poc.config import load_config
 from hcl_poc.low_level_rl import ScratchLowActorCritic
 from hcl_poc.rl_rerun import _make_benchmark_env, _to_numpy
 from hcl_poc.utils import Standardizer, default_device, ensure_dir, set_seed, write_json
+
+sys.path.append(str(Path(__file__).resolve().parent))
+from rl_reachability_tcp_dpsi_ensemble import TcpDpsi, _features, _target_inverse
 
 
 TCP_SLICE = slice(14, 17)
@@ -146,6 +150,29 @@ class LocalTcpPpo:
             eps=1e-5,
         )
         self.rng = np.random.default_rng(args.seed + 4_110_000)
+        self.dpsi_models: list[TcpDpsi] = []
+        self.dpsi_input_norm: Standardizer | None = None
+        self.dpsi_target_norm: Standardizer | None = None
+        if args.reward_distance_source == "dpsi":
+            if not args.dpsi_checkpoint:
+                raise ValueError("--dpsi-checkpoint is required when using D_psi reward")
+            dpsi_checkpoint = torch.load(
+                args.dpsi_checkpoint,
+                map_location=self.device,
+                weights_only=False,
+            )
+            self.dpsi_input_norm = Standardizer.from_state_dict(dpsi_checkpoint["input_norm"])
+            self.dpsi_target_norm = Standardizer.from_state_dict(dpsi_checkpoint["target_norm"])
+            for state_dict in dpsi_checkpoint["models"]:
+                model = TcpDpsi(
+                    int(dpsi_checkpoint["input_dim"]),
+                    int(dpsi_checkpoint["hidden_dim"]),
+                    int(dpsi_checkpoint["depth"]),
+                ).to(self.device)
+                model.load_state_dict(state_dict)
+                model.eval()
+                model.requires_grad_(False)
+                self.dpsi_models.append(model)
         self.obs: Any = None
         self.current_state = np.zeros((self.num_envs, self.state_dim), dtype=np.float32)
         self.current_state_norm = np.zeros_like(self.current_state)
@@ -218,7 +245,34 @@ class LocalTcpPpo:
             [self.current_state_norm, goal, self.previous_action_norm, remaining],
             axis=-1,
         ).astype(np.float32)
-        return torch.from_numpy(condition).to(self.device), _distance(self.current_state, self.goal)
+        return torch.from_numpy(condition).to(self.device), self.reward_distance(
+            self.current_state,
+            self.goal,
+        )
+
+    @torch.inference_mode()
+    def reward_distance(self, state: np.ndarray, goal: np.ndarray) -> np.ndarray:
+        if self.args.reward_distance_source == "true_tcp":
+            return _distance(state, goal)
+        if (
+            self.dpsi_input_norm is None
+            or self.dpsi_target_norm is None
+            or not self.dpsi_models
+        ):
+            raise RuntimeError("D_psi reward requested before the ensemble was loaded")
+        features = self.dpsi_input_norm.transform(_features(state, goal, tau=0.0)).astype(
+            np.float32
+        )
+        x = torch.from_numpy(features).to(self.device)
+        predictions = []
+        for model in self.dpsi_models:
+            pred_transformed = self.dpsi_target_norm.inverse(
+                model(x).detach().cpu().numpy()[:, None]
+            ).reshape(-1)
+            predictions.append(_target_inverse(pred_transformed, self.args.dpsi_target_scale))
+        return np.maximum(np.mean(np.stack(predictions, axis=0), axis=0), 0.0).astype(
+            np.float32
+        )
 
     @torch.inference_mode()
     def step_local(
@@ -232,12 +286,13 @@ class LocalTcpPpo:
         clipped = torch.clamp(raw_action, self.action_low, self.action_high)
         next_obs, _env_reward, _terminated, _truncated, info = self.env.step(clipped)
         next_state = _obs_state_np(next_obs)
+        next_reward_distance = self.reward_distance(next_state, self.goal)
         next_distance = _distance(next_state, self.goal)
-        progress = previous_distance - next_distance
+        progress = previous_distance - next_reward_distance
         reward = float(self.args.distance_progress_weight) * progress
         segment_end = self.local_step == self.horizon - 1
         if segment_end:
-            reward = reward - float(self.args.terminal_weight) * next_distance
+            reward = reward - float(self.args.terminal_weight) * next_reward_distance
         self.obs = next_obs
         self.current_state = next_state
         self.current_state_norm = self.state_norm.transform(next_state)
@@ -248,6 +303,7 @@ class LocalTcpPpo:
         done = np.full(self.num_envs, segment_end, dtype=np.bool_)
         metrics = {
             "next_distance": next_distance,
+            "next_reward_distance": next_reward_distance,
             "success": _to_numpy(info.get("success", np.zeros(self.num_envs, dtype=np.bool_)))
             .reshape(-1)
             .astype(np.bool_),
@@ -282,8 +338,8 @@ class LocalTcpPpo:
             for _step in range(self.horizon):
                 condition, distance = self.condition(shuffled_goal=shuffled_goal)
                 if start_distance is None:
-                    start_distance = distance.copy()
-                    initial_distances.extend(distance.tolist())
+                    start_distance = _distance(self.current_state, self.goal)
+                    initial_distances.extend(start_distance.tolist())
                 action, _logprob, _entropy, _value = self.agent.get_action_and_value(
                     condition.float(),
                     deterministic=deterministic,
@@ -382,7 +438,14 @@ class LocalTcpPpo:
             "minibatch_size": int(minibatch_size),
             "update_epochs": int(args.update_epochs),
             "reward_mode": args.reward_mode,
-            "reward": "tcp_position_squared_progress_minus_terminal_tcp_position_squared_distance",
+            "reward_distance_source": args.reward_distance_source,
+            "dpsi_checkpoint": str(args.dpsi_checkpoint) if args.dpsi_checkpoint else None,
+            "dpsi_target_scale": float(args.dpsi_target_scale),
+            "reward": (
+                "learned_dpsi_progress_minus_terminal_learned_dpsi_distance"
+                if args.reward_distance_source == "dpsi"
+                else "tcp_position_squared_progress_minus_terminal_tcp_position_squared_distance"
+            ),
             "terminal_weight": float(args.terminal_weight),
             "distance_progress_weight": float(args.distance_progress_weight),
             "success_epsilon": float(args.success_epsilon),
@@ -589,6 +652,13 @@ def main() -> None:
     parser.add_argument("--updates", type=int, default=250)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--reward-mode", choices=["progress_terminal"], default="progress_terminal")
+    parser.add_argument(
+        "--reward-distance-source",
+        choices=["true_tcp", "dpsi"],
+        default="true_tcp",
+    )
+    parser.add_argument("--dpsi-checkpoint")
+    parser.add_argument("--dpsi-target-scale", type=float, default=1000.0)
     parser.add_argument("--terminal-weight", type=float, default=1.0)
     parser.add_argument("--distance-progress-weight", type=float, default=1.0)
     parser.add_argument("--success-epsilon", type=float, default=0.0025)

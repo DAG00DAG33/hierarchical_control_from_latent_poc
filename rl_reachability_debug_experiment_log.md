@@ -380,3 +380,167 @@ positive control for the ensemble/data/validation procedure. The next step in
 the plan is the low-dimensional PPO-with-learned-distance test; for a strict
 VAE/effect reward test, we still need the corresponding visual/latent branch
 dataset.
+
+## 2026-06-30 - Run 5: Privileged/TCP PPO with Learned D_psi Reward
+
+Hypothesis:
+
+If the branch-trained `D_psi` ensemble is a useful reward model, PPO trained
+from scratch with the learned distance should still solve the local TCP
+reachability task, while possibly reducing the action saturation seen in the
+true-distance Run 2 PPO.
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --num-steps 10 \
+  --local-horizon 10 \
+  --reward-mode progress_terminal \
+  --reward-distance-source dpsi \
+  --dpsi-checkpoint artifacts/incremental/rl_reachability_debug/run4_tcp_dpsi_ensemble/tcp_dpsi_ensemble.pt \
+  --terminal-reward-weight 10.0 \
+  --progress-reward-weight 5.0 \
+  --entropy-coef 0.01 \
+  --eval-refs 1 \
+  --output-dir results/incremental/rl_reachability_debug/run5_tcp_dpsi_ppo
+```
+
+Local reachability result on the fixed evaluation bank:
+
+| Policy | Reward distance | Terminal TCP distance | Reach rate eps=0.0025 | Shuffled-goal reach | Eval action saturation |
+| --- | --- | ---: | ---: | ---: | ---: |
+| initial random policy | n/a | 0.072764 | 0.0059 | n/a | n/a |
+| Run 2 PPO | true TCP | 0.000489 | 0.9744 | 0.1013 | 0.449 |
+| Run 5 PPO | learned D_psi | 0.000515 | 0.9725 | 0.0958 | 0.302 |
+
+Additional Run 5 fixed-bank details:
+
+- terminal TCP distance p50/p90/p99: `0.000248 / 0.001096 / 0.004828`
+- action L2 mean: `0.756`
+- final training-window terminal TCP distance: `0.000910`
+- final training-window reach rate: `0.916`
+- final training-window action saturation: `0.330`
+- PPO updates: `250`
+- environment steps: `10,240,000`
+
+Interpretation:
+
+The learned-distance reward preserves the local reachability behavior: it is
+nearly tied with the true-distance reward on terminal TCP distance and reach
+rate. It also reduces action saturation compared with Run 2, but the local
+task is still much easier than the full task because the reset bank starts from
+states sampled from successful demonstrations and the goal is only a short TCP
+endpoint.
+
+## 2026-06-30 - Run 5b: Full-Task Success Comparison for BC vs RL Low-Level Policies
+
+Question:
+
+Does the RL-trained low-level policy improve full task success when paired with
+oracle TCP subgoals or the learned 1800-trajectory privileged high-level
+predictor?
+
+Important measurement correction:
+
+An initial comparison incorrectly reported `0.0` success for the 1800-trajectory
+BC low-level policy. That was a success-accounting bug in the new evaluator:
+it read only live `info["success"]`, while the existing hierarchy evaluators
+use `final_info["episode"]["success_once"]`. After matching the existing
+success bookkeeping, BC returns to the expected nonzero range.
+
+Policy note:
+
+Run 3 was a random-shooting action-selection diagnostic around the Run 2 PPO
+policy, not a separately saved low-level policy. The trainable RL low-level
+comparison here is therefore:
+
+- Run 2: true TCP-distance PPO low-level policy
+- Run 5: learned `D_psi`-reward PPO low-level policy
+- BC baseline: 1800-trajectory privileged TCP low-level policy
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_tcp_full_success_eval.py \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle learned \
+  --output results/incremental/rl_reachability_debug/run5_low_level_success_comparison_100_fixed.json
+```
+
+Results:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Mean length | Hold endpoint error | Teacher action MAE | Action saturation |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle TCP endpoint | BC 1800 | 0.66 | 0.767 | 0.770 | 64.6 | 0.0346 | 0.0461 | 0.083 |
+| oracle TCP endpoint | Run 2 true-distance PPO | 0.00 | 0.147 | 0.186 | 100.0 | 0.0553 | 0.2800 | 0.133 |
+| oracle TCP endpoint | Run 5 D_psi PPO | 0.00 | 0.152 | 0.193 | 100.0 | 0.0567 | 0.2701 | 0.089 |
+| learned high-level endpoint | BC 1800 | 0.65 | 0.758 | 0.761 | 67.4 | 0.0357 | 0.0551 | 0.077 |
+| learned high-level endpoint | Run 2 true-distance PPO | 0.00 | 0.141 | 0.185 | 100.0 | 0.0563 | 0.3331 | 0.106 |
+| learned high-level endpoint | Run 5 D_psi PPO | 0.01 | 0.155 | 0.194 | 99.2 | 0.0526 | 0.2894 | 0.063 |
+
+For the oracle rows, the learned high-level predictor's endpoint error against
+the oracle endpoint was `0.0204 m` when paired with BC, but around
+`0.105-0.110 m` on the RL-policy rollouts because those policies move the
+system into a different state distribution.
+
+Interpretation:
+
+The RL low-level policies solve the local TCP reachability probe but do not
+improve full task success. In fact, they are far worse than the 1800-trajectory
+BC low-level policy in closed loop. The likely issue is not local endpoint
+reachability in isolation; it is distribution/behavior mismatch. The RL
+policies produce actions with much larger teacher-action MAE and keep episodes
+alive until timeout, so they can hit short TCP endpoints without following the
+task-relevant contact dynamics that the BC policy preserves.
+
+## 2026-06-30 - Run 5c: Local Reachability Comparison for BC vs RL Low-Level Policies
+
+Question:
+
+Is the 1800-trajectory BC low-level policy locally more reachable than the RL
+low-level policies on the same reset bank used by Runs 2 and 5?
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_tcp_local_policy_compare.py \
+  --eval-refs 1 \
+  --include-shuffled \
+  --output results/incremental/rl_reachability_debug/run5_local_policy_compare_ref1.json
+```
+
+The comparison uses the same 4096-env fixed local reset reference and 10-step
+TCP endpoint targets as the PPO local evaluations. Reach uses the same squared
+TCP-distance threshold, `eps=0.0025`.
+
+Results:
+
+| Goal condition | Low-level policy | Reach rate | Mean terminal squared distance | Mean TCP error | P90 squared distance | Action saturation | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| true goal | BC 1800 | 0.9832 | 0.000258 | 0.0104 m | 0.000470 | 0.189 | 0.0452 |
+| true goal | Run 2 true-distance PPO | 0.9597 | 0.000514 | 0.0163 m | 0.000887 | 0.411 | 0.3466 |
+| true goal | Run 5 D_psi PPO | 0.9861 | 0.000384 | 0.0164 m | 0.000845 | 0.279 | 0.3084 |
+| shuffled goal | BC 1800 | 0.1978 | 0.012417 | 0.0971 m | 0.027450 | 0.167 | 0.1747 |
+| shuffled goal | Run 2 true-distance PPO | 0.8662 | 0.001511 | 0.0253 m | 0.003638 | 0.426 | 0.4997 |
+| shuffled goal | Run 5 D_psi PPO | 0.8699 | 0.001346 | 0.0248 m | 0.003381 | 0.275 | 0.4474 |
+
+Interpretation:
+
+BC is better on the stricter local reachability diagnostics: it has the lowest
+mean endpoint error, the lowest P90 endpoint error, and much lower teacher
+action error. Run 5 has a marginally higher threshold reach rate than BC
+(`0.9861` vs `0.9832`), but only because the threshold is loose enough that
+both policies are near saturation; its mean endpoint error is still worse.
+
+The shuffled-goal rows are the clearest warning sign. BC reach drops from
+`0.9832` to `0.1978`, so it is actually using the goal. The RL policies still
+reach around `0.87` on shuffled goals, meaning they learned a strong local
+default motion from the successful-demonstration reset bank rather than a
+robust goal-conditioned controller. This explains why local PPO reachability
+does not transfer to full task success.
