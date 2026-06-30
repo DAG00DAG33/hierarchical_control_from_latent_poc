@@ -241,3 +241,44 @@ for privileged/TCP. It can. The next useful diagnostics are:
 2. whether CEM improves materially beyond random shooting;
 3. whether these action-search branches provide good off-policy examples for
    the planned `D_psi` ensemble.
+
+## 2026-06-30 - Run 4 Preparation: Existing D_phi Checkpoints
+
+Finding:
+
+Existing VAE512 reachability checkpoints are present, including:
+
+- `artifacts/incremental/vae512_scaling/n500/reachability_distance/vae512_w2048_b1e6/seed{0,1,2}/d_phi.pt`
+- `artifacts/incremental/vae512_scaling/n1800/reachability_distance/vae512_w2048_b1e6/seed{0,1,2}/d_phi.pt`
+- `artifacts/incremental/reachability_distance/vae512_w2048_b1e6/seed0/d_phi.pt`
+
+These are the older demo-temporal single-model `D_phi` checkpoints from
+`src/hcl_poc/reachability.py`, not the branch/off-policy ensemble specified in
+the new plan.
+
+Existing VAE512 `D_phi` validation summary:
+
+| Dataset | Seed | Temporal MSE | Temporal Spearman | Near/Far acc. | Shuffled AUC | Demo decrease acc. |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| N=500 | 0 | 0.01459 | 0.9154 | 0.9827 | 0.8597 | 0.6577 |
+| N=500 | 1 | 0.01422 | 0.9137 | 0.9824 | 0.8472 | 0.6558 |
+| N=500 | 2 | 0.01520 | 0.9132 | 0.9805 | 0.8598 | 0.6470 |
+| N=1800 | 0 | 0.00777 | 0.9328 | 0.9885 | 0.8745 | 0.7048 |
+| N=1800 | 1 | 0.00903 | 0.9263 | 0.9854 | 0.8600 | 0.6938 |
+| N=1800 | 2 | 0.00880 | 0.9287 | 0.9868 | 0.8641 | 0.6951 |
+
+Interpretation:
+
+These checkpoints are useful baselines and may form an initialization or
+comparison point, but they do not satisfy the Run 4 validation gate because they
+were not trained or validated on frozen-policy failures, PPO branches,
+random-shooting/CEM branches, shuffled invalid goals, or off-policy states.
+
+Next action:
+
+Build a branch dataset for the new `D_psi` ensemble. The Run 3 random-shooting
+diagnostic already shows that selected branches are meaningfully better than PPO
+branches; the next useful artifact is a saved branch dataset containing start
+state/latent, goal, PPO terminal outcome, random-search terminal outcome, and
+negative/shuffled goals so the ensemble can be validated on actual rollout
+ranking instead of demo temporal distance alone.
