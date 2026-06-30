@@ -187,3 +187,57 @@ Proceed to the next gated diagnostic in the plan: random shooting / CEM on the
 same privileged/TCP local reset bank, using the trained PPO result as a reference
 point. Also consider a short Run 2b ablation with an action penalty or lower
 initial/action scale if saturation is judged too high.
+
+## 2026-06-30 - Run 3: Privileged/TCP Random Shooting Pilot
+
+Hypothesis:
+
+On the same easy local MDP, random action-sequence search should reveal whether
+there is still meaningful local improvement above the trained PPO controller.
+
+Setup:
+
+- reset bank: same `data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5`
+- eval references: `1` vector reset reference, `4096` local episodes
+- base sequence: deterministic Run 2 PPO policy
+- random shooting: Gaussian noise around the PPO 10-step action sequence
+- noise std: `0.05`
+- candidate counts: `32`, `64`, `128`
+- selection metric: terminal TCP squared distance to the same held goal
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_tcp_random_shooting.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --checkpoint results/incremental/rl_reachability_debug/run2_privileged_tcp/privileged_tcp_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --eval-refs 1 \
+  --random-candidates 32 64 128 \
+  --noise-stds 0.05 \
+  --output results/incremental/rl_reachability_debug/run3_tcp_random_shooting_pilot.json
+```
+
+Results:
+
+| Method | Terminal distance | Reach rate | Improved vs PPO | p50 | p90 | p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| PPO deterministic | 0.000602 | 0.9641 | - | 0.000199 | 0.000918 | 0.010293 |
+| shooting, 32 candidates | 0.000110 | 0.9954 | 0.9578 | 0.000023 | 0.000225 | 0.001618 |
+| shooting, 64 candidates | 0.000081 | 0.9968 | 0.9780 | 0.000014 | 0.000170 | 0.001076 |
+| shooting, 128 candidates | 0.000063 | 0.9980 | 0.9893 | 0.000009 | 0.000126 | 0.000786 |
+
+Interpretation:
+
+Random shooting improves substantially over the already successful PPO policy,
+so useful 10-step action sequences do exist and the local objective is not
+saturated. PPO is good enough to pass the local sanity gate, but it does not
+reach the local action-search upper bound.
+
+This suggests the next question is no longer "can PPO learn reachability at all?"
+for privileged/TCP. It can. The next useful diagnostics are:
+
+1. whether saturation can be reduced without losing most reachability;
+2. whether CEM improves materially beyond random shooting;
+3. whether these action-search branches provide good off-policy examples for
+   the planned `D_psi` ensemble.

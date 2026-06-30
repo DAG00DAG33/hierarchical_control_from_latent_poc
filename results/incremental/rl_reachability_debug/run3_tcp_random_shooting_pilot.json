@@ -1,0 +1,46 @@
+{
+  "baseline": {
+    "initial_distance_mean": 0.06412428617477417,
+    "ppo_goal_reach_rate_eps": 0.964111328125,
+    "ppo_p50_terminal_distance": 0.00019945783424191177,
+    "ppo_p90_terminal_distance": 0.0009177114116027951,
+    "ppo_p99_terminal_distance": 0.010293154045939445,
+    "ppo_terminal_distance_mean": 0.0006015744293108582
+  },
+  "checkpoint": "results/incremental/rl_reachability_debug/run2_privileged_tcp/privileged_tcp_ppo_progress_terminal_n4096_seed0/latest.pt",
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5",
+  "eval_refs": 1,
+  "horizon": 10,
+  "local_episodes": 4096,
+  "random_shooting": {
+    "c128_std0.05": {
+      "fraction_improved_vs_ppo": 0.9892578125,
+      "goal_reach_rate_eps": 0.998046875,
+      "p50_terminal_distance": 9.119332389673218e-06,
+      "p90_terminal_distance": 0.00012616488675121218,
+      "p99_terminal_distance": 0.0007855971343815327,
+      "paired_improvement_vs_ppo": 0.0005381624796427786,
+      "terminal_distance_mean": 6.341192056424916e-05
+    },
+    "c32_std0.05": {
+      "fraction_improved_vs_ppo": 0.957763671875,
+      "goal_reach_rate_eps": 0.995361328125,
+      "p50_terminal_distance": 2.2633850676356815e-05,
+      "p90_terminal_distance": 0.00022530328715220094,
+      "p99_terminal_distance": 0.0016179546946659684,
+      "paired_improvement_vs_ppo": 0.000491680228151381,
+      "terminal_distance_mean": 0.000109894186607562
+    },
+    "c64_std0.05": {
+      "fraction_improved_vs_ppo": 0.97802734375,
+      "goal_reach_rate_eps": 0.996826171875,
+      "p50_terminal_distance": 1.4294969332695473e-05,
+      "p90_terminal_distance": 0.00016953813610598445,
+      "p99_terminal_distance": 0.00107587780803442,
+      "paired_improvement_vs_ppo": 0.0005207948852330446,
+      "terminal_distance_mean": 8.077953680185601e-05
+    }
+  },
+  "run": "rl_reachability_debug_run3_tcp_random_shooting_pilot",
+  "success_epsilon": 0.0025
+}
