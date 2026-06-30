@@ -544,3 +544,132 @@ reach around `0.87` on shuffled goals, meaning they learned a strong local
 default motion from the successful-demonstration reset bank rather than a
 robust goal-conditioned controller. This explains why local PPO reachability
 does not transfer to full task success.
+
+## 2026-06-30 - Run 6: Larger Reset Bank and Longer D_psi Training
+
+Motivation:
+
+The 250-update runs could be undertrained and the original reset bank had only
+two highly correlated vector batches. Run 6 increases both:
+
+- reset bank: `2 x 4096` teacher trajectories -> `8 x 4096`
+- valid horizon-10 reset references: `417,792` -> `1,671,168`
+- PPO updates: `250` -> `1000`
+- environment steps: `10.24M` -> `40.96M`
+
+New reset bank:
+
+```bash
+uv run hcl-poc rl-rerun --config configs/pusht_incremental.yaml collect-vector-data \
+  --output data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --batches 8 \
+  --max-steps 60 \
+  --seed-start 9600000 \
+  --no-store-dino \
+  --force
+```
+
+Long PPO runs:
+
+| Run | Reward distance | Reward mode | Updates | Env steps | Runtime |
+| --- | --- | --- | ---: | ---: | ---: |
+| Run 6 true-TCP | true TCP squared distance | progress + terminal | 1000 | 40.96M | 8396s |
+| Run 6 D_psi | learned D_psi | progress + terminal | 1000 | 40.96M | 8382s |
+
+Local fixed-bank evaluation:
+
+| Policy | Terminal squared distance | Reach rate | P50 | P90 | P99 | Eval action saturation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Run 6 true-TCP | 0.000450 | 0.9760 | 0.000173 | 0.001114 | 0.003813 | 0.321 |
+| Run 6 D_psi | 0.000330 | 0.9901 | 0.000209 | 0.000630 | 0.002497 | 0.333 |
+
+Local comparison against the 1800-trajectory BC low level on the same `b8`
+bank:
+
+| Goal condition | Low-level policy | Reach rate | Mean terminal squared distance | Mean TCP error | P90 squared distance | P99 squared distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| true goal | BC 1800 | 0.9834 | 0.000261 | 0.0105 m | 0.000463 | 0.004142 | 0.0456 |
+| true goal | Run 6 true-TCP | 0.9752 | 0.000460 | 0.0175 m | 0.001045 | 0.004014 | 0.3591 |
+| true goal | Run 6 D_psi | 0.9895 | 0.000343 | 0.0156 m | 0.000675 | 0.002589 | 0.3498 |
+| shuffled goal | BC 1800 | 0.2285 | 0.011329 | 0.0921 m | 0.025965 | 0.063640 | 0.1672 |
+| shuffled goal | Run 6 true-TCP | 0.9205 | 0.001013 | 0.0230 m | 0.001987 | 0.014034 | 0.4657 |
+| shuffled goal | Run 6 D_psi | 0.9301 | 0.000989 | 0.0215 m | 0.001627 | 0.015300 | 0.4774 |
+
+Full-task success comparison:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Mean length | Hold endpoint error | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle TCP endpoint | BC 1800 | 0.64 | 0.753 | 0.756 | 63.9 | 0.0354 | 0.0484 |
+| oracle TCP endpoint | Run 6 true-TCP | 0.00 | 0.140 | 0.185 | 100.0 | 0.0567 | 0.3147 |
+| oracle TCP endpoint | Run 6 D_psi | 0.00 | 0.152 | 0.202 | 100.0 | 0.0563 | 0.2680 |
+| learned high-level endpoint | BC 1800 | 0.62 | 0.740 | 0.742 | 68.2 | 0.0356 | 0.0519 |
+| learned high-level endpoint | Run 6 true-TCP | 0.02 | 0.146 | 0.195 | 98.8 | 0.0679 | 0.3658 |
+| learned high-level endpoint | Run 6 D_psi | 0.00 | 0.150 | 0.190 | 100.0 | 0.0557 | 0.2925 |
+
+Interpretation:
+
+Longer training and the larger reset bank improve local reachability. The
+D_psi run now slightly beats BC on the loose reach threshold and has better
+P90/P99 squared distance than the true-TCP run. However, BC is still more
+precise in mean TCP error and much closer to the teacher action distribution.
+
+The task-success gap remains large. The RL policies still fail in full
+rollouts even with oracle TCP endpoints, so the issue is not only high-level
+prediction error. The local shuffled-goal comparison also remains poor for RL:
+the policies are still too successful when goals are shuffled, suggesting a
+strong default motion on the demonstration reset distribution rather than
+robust goal-selective control.
+
+## 2026-06-30 - Run 7: D_psi Reward-Mode Selection
+
+Motivation:
+
+The progress-plus-terminal `D_psi` reward improved local metrics but did not
+improve task success. Run 7 tests the reward variants specified in the scratch
+RL plan before deciding whether to train any one variant longer:
+
+- terminal-only `D_psi`
+- progress-only `D_psi`
+- paired terminal advantage over the frozen 1800-trajectory BC low level
+
+Implementation note:
+
+`bc_advantage_terminal` precomputes the frozen BC low-level terminal `D_psi`
+distance on the same reset and goal in a branch environment, then gives the RL
+policy terminal reward:
+
+```text
+D_psi(BC_terminal, goal) - D_psi(RL_terminal, goal)
+```
+
+Queue command:
+
+```bash
+setsid bash scripts/run_reachability_reward_variants.sh \
+  > results/incremental/rl_reachability_debug/run7_reward_variants_queue.nohup.log \
+  2>&1 < /dev/null &
+```
+
+Startup status:
+
+The queue launched successfully and started the terminal-only variant first.
+The variants run sequentially to avoid GPU/simulator contention.
+
+Decision rule before moving on:
+
+If the reward variants plus a longer run of the best variant still give poor
+full-task success, do not advance to the next planned experiment. Instead debug
+the deployment-distribution reachability gap directly:
+
+1. Measure local reachability to goals generated by the learned high-level
+   policy, comparing BC and the best RL low-level policy.
+2. Collect reset states from actual deployed hierarchy rollouts rather than
+   only from teacher/demo reset banks.
+3. On those deployed reset states, evaluate whether the RL low level reaches
+   the high-level goals better than BC.
+4. Split the measurement by goal source: oracle TCP endpoint, learned high
+   endpoint, and shuffled learned endpoint.
+
+This is required because Run 6 already shows that high local reachability on
+teacher/demo reset banks can coexist with near-zero task success.

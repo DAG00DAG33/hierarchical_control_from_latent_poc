@@ -10,10 +10,13 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
+from torch import nn
 from tqdm import trange
 
 from hcl_poc.config import load_config
 from hcl_poc.low_level_rl import ScratchLowActorCritic
+from hcl_poc.models import MLP
+from hcl_poc.privileged_z import _clone_mani_state_dict
 from hcl_poc.rl_rerun import _make_benchmark_env, _to_numpy
 from hcl_poc.utils import Standardizer, default_device, ensure_dir, set_seed, write_json
 
@@ -181,11 +184,38 @@ class LocalTcpPpo:
         self.previous_action_norm = self.action_norm.transform(
             np.zeros((self.num_envs, self.action_dim), dtype=np.float32)
         )
+        self.bc_terminal_reward_distance = np.zeros(self.num_envs, dtype=np.float32)
+        self.bc_model: nn.Module | None = None
+        self.bc_action_norm: Standardizer | None = None
+        self.bc_cond_norm: Standardizer | None = None
+        self.bc_branch_env: Any | None = None
+        if args.reward_mode == "bc_advantage_terminal":
+            bc_path = Path(args.bc_low_checkpoint)
+            if not bc_path.exists():
+                raise FileNotFoundError(bc_path)
+            bc_payload = torch.load(bc_path, map_location=self.device, weights_only=False)
+            bc_entry = bc_payload["tcp"]
+            bc_model = MLP(
+                int(bc_entry["cond_dim"]),
+                int(bc_entry["action_dim"]),
+                int(bc_entry["hidden_dim"]),
+                depth=4,
+            ).to(self.device)
+            bc_model.load_state_dict(bc_entry["model"])
+            bc_model.eval()
+            bc_model.requires_grad_(False)
+            self.bc_model = bc_model
+            self.bc_action_norm = Standardizer.from_state_dict(bc_payload["action_norm"])
+            self.bc_cond_norm = Standardizer.from_state_dict(bc_entry["cond_norm"])
+            self.bc_branch_env = _make_benchmark_env(self.config, self.num_envs, "state")
+            self.bc_branch_env.reset(seed=args.seed + 4_115_000)
         self.local_step = 0
         self.reset_errors: list[float] = []
         self.normalizer_meta = norm_meta
 
     def close(self) -> None:
+        if self.bc_branch_env is not None:
+            self.bc_branch_env.close()
         self.h5.close()
         self.env.close()
 
@@ -231,6 +261,53 @@ class LocalTcpPpo:
         self.goal = np.concatenate([endpoint, velocity], axis=-1).astype(np.float32)
         self.goal_normed = self.goal_norm.transform(self.goal)
         self.local_step = 0
+        if self.args.reward_mode == "bc_advantage_terminal":
+            self.bc_terminal_reward_distance = self.bc_terminal_distance()
+
+    @torch.inference_mode()
+    def bc_terminal_distance(self) -> np.ndarray:
+        if (
+            self.bc_branch_env is None
+            or self.bc_model is None
+            or self.bc_action_norm is None
+            or self.bc_cond_norm is None
+        ):
+            raise RuntimeError("BC advantage reward requested before BC baseline was loaded")
+        self.bc_branch_env.unwrapped.set_state_dict(
+            _clone_mani_state_dict(self.env.unwrapped.get_state_dict())
+        )
+        obs = self.bc_branch_env.unwrapped.get_obs()
+        previous_action_raw = self.action_norm.inverse(self.previous_action_norm)
+        action_low = self.action_low.detach().cpu().numpy()
+        action_high = self.action_high.detach().cpu().numpy()
+        for step in range(self.horizon):
+            state = _obs_state_np(obs)
+            remaining = np.full(
+                self.num_envs,
+                max(self.horizon - step, 1),
+                dtype=np.float32,
+            )
+            tcp_velocity = (self.goal[:, :3] - state[:, TCP_SLICE]) / (
+                remaining[:, None] / float(self.control_freq)
+            )
+            goal = np.concatenate([self.goal[:, :3], tcp_velocity], axis=-1).astype(
+                np.float32
+            )
+            previous_norm = self.bc_action_norm.transform(previous_action_raw)
+            condition = np.concatenate(
+                [state, goal, previous_norm, (remaining / self.horizon)[:, None]],
+                axis=-1,
+            ).astype(np.float32)
+            normalized = self.bc_model(
+                torch.from_numpy(self.bc_cond_norm.transform(condition)).to(self.device).float()
+            )
+            raw_action = self.bc_action_norm.inverse(normalized.detach().cpu().numpy())
+            clipped = np.clip(raw_action, action_low, action_high).astype(np.float32)
+            obs, _reward, _terminated, _truncated, _info = self.bc_branch_env.step(
+                torch.from_numpy(clipped).to(self.device).float()
+            )
+            previous_action_raw = clipped
+        return self.reward_distance(_obs_state_np(obs), self.goal)
 
     def condition(self, *, shuffled_goal: bool = False) -> tuple[torch.Tensor, np.ndarray]:
         goal = self.goal_normed
@@ -289,10 +366,25 @@ class LocalTcpPpo:
         next_reward_distance = self.reward_distance(next_state, self.goal)
         next_distance = _distance(next_state, self.goal)
         progress = previous_distance - next_reward_distance
-        reward = float(self.args.distance_progress_weight) * progress
         segment_end = self.local_step == self.horizon - 1
-        if segment_end:
-            reward = reward - float(self.args.terminal_weight) * next_reward_distance
+        if self.args.reward_mode == "progress":
+            reward = float(self.args.distance_progress_weight) * progress
+        elif self.args.reward_mode == "terminal":
+            reward = np.zeros(self.num_envs, dtype=np.float32)
+            if segment_end:
+                reward = reward - float(self.args.terminal_weight) * next_reward_distance
+        elif self.args.reward_mode == "progress_terminal":
+            reward = float(self.args.distance_progress_weight) * progress
+            if segment_end:
+                reward = reward - float(self.args.terminal_weight) * next_reward_distance
+        elif self.args.reward_mode == "bc_advantage_terminal":
+            reward = np.zeros(self.num_envs, dtype=np.float32)
+            if segment_end:
+                reward = float(self.args.terminal_weight) * (
+                    self.bc_terminal_reward_distance - next_reward_distance
+                )
+        else:
+            raise ValueError(f"Unknown reward mode: {self.args.reward_mode}")
         self.obs = next_obs
         self.current_state = next_state
         self.current_state_norm = self.state_norm.transform(next_state)
@@ -413,6 +505,15 @@ class LocalTcpPpo:
         latest_path = run_dir / "latest.pt"
         if latest_path.exists() and not args.force:
             return latest_path
+        init_global_step = 0
+        init_history: list[dict[str, Any]] = []
+        if args.init_checkpoint:
+            payload = torch.load(args.init_checkpoint, map_location=self.device, weights_only=False)
+            self.agent.load_state_dict(payload["agent"])
+            if "optimizer" in payload:
+                self.optimizer.load_state_dict(payload["optimizer"])
+            init_global_step = int(payload.get("global_step", 0))
+            init_history = list(payload.get("history", []))
 
         batch_size = self.num_envs * self.horizon
         if batch_size % args.num_minibatches:
@@ -440,12 +541,16 @@ class LocalTcpPpo:
             "reward_mode": args.reward_mode,
             "reward_distance_source": args.reward_distance_source,
             "dpsi_checkpoint": str(args.dpsi_checkpoint) if args.dpsi_checkpoint else None,
-            "dpsi_target_scale": float(args.dpsi_target_scale),
-            "reward": (
-                "learned_dpsi_progress_minus_terminal_learned_dpsi_distance"
-                if args.reward_distance_source == "dpsi"
-                else "tcp_position_squared_progress_minus_terminal_tcp_position_squared_distance"
+            "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
+            "init_global_step": int(init_global_step),
+            "init_history_updates": int(len(init_history)),
+            "bc_low_checkpoint": (
+                str(args.bc_low_checkpoint)
+                if args.reward_mode == "bc_advantage_terminal"
+                else None
             ),
+            "dpsi_target_scale": float(args.dpsi_target_scale),
+            "reward": args.reward_mode,
             "terminal_weight": float(args.terminal_weight),
             "distance_progress_weight": float(args.distance_progress_weight),
             "success_epsilon": float(args.success_epsilon),
@@ -475,7 +580,7 @@ class LocalTcpPpo:
         done_buf = torch.zeros((self.horizon, self.num_envs), device=self.device)
         value_buf = torch.zeros((self.horizon, self.num_envs), device=self.device)
         next_done = torch.zeros(self.num_envs, device=self.device)
-        global_step = 0
+        global_step = init_global_step
         start_time = time.perf_counter()
 
         with trange(args.updates, desc="run2 privileged TCP PPO") as progress:
@@ -651,13 +756,22 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=10)
     parser.add_argument("--updates", type=int, default=250)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--reward-mode", choices=["progress_terminal"], default="progress_terminal")
+    parser.add_argument(
+        "--reward-mode",
+        choices=["progress_terminal", "terminal", "progress", "bc_advantage_terminal"],
+        default="progress_terminal",
+    )
     parser.add_argument(
         "--reward-distance-source",
         choices=["true_tcp", "dpsi"],
         default="true_tcp",
     )
     parser.add_argument("--dpsi-checkpoint")
+    parser.add_argument("--init-checkpoint")
+    parser.add_argument(
+        "--bc-low-checkpoint",
+        default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_tcp.pt",
+    )
     parser.add_argument("--dpsi-target-scale", type=float, default=1000.0)
     parser.add_argument("--terminal-weight", type=float, default=1.0)
     parser.add_argument("--distance-progress-weight", type=float, default=1.0)
