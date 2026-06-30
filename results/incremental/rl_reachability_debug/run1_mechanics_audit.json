@@ -1,0 +1,87 @@
+{
+  "action_sensitivity": {
+    "cached_previous_action_l2": {
+      "max": 0.2081446498632431,
+      "mean": 0.0979734347667545
+    },
+    "cached_start_observation_action_l2": {
+      "max": 0.8890508413314819,
+      "mean": 0.5641279125120491
+    },
+    "constant_remaining_time_action_l2": {
+      "max": 0.010729534551501274,
+      "mean": 0.006122152809984982
+    },
+    "shuffled_goal_action_l2": {
+      "max": 0.16822537779808044,
+      "mean": 0.12847203388810158
+    },
+    "shuffled_observation_action_l2": {
+      "max": 0.7427622079849243,
+      "mean": 0.5577799439430237
+    }
+  },
+  "branch_terminal_distances": {
+    "cached_previous_action": {
+      "terminal_raw_distance_mean": 1.025997519493103,
+      "terminal_selected_distance_mean": 1.025997519493103
+    },
+    "cached_start_observation": {
+      "terminal_raw_distance_mean": 2.8621983528137207,
+      "terminal_selected_distance_mean": 2.8621983528137207
+    },
+    "constant_remaining_time": {
+      "terminal_raw_distance_mean": 0.9637486934661865,
+      "terminal_selected_distance_mean": 0.9637486934661865
+    },
+    "live": {
+      "terminal_raw_distance_mean": 0.9440239071846008,
+      "terminal_selected_distance_mean": 0.9440239071846008
+    },
+    "shuffled_goal": {
+      "terminal_raw_distance_mean": 1.490551471710205,
+      "terminal_selected_distance_mean": 1.490551471710205
+    },
+    "shuffled_observation": {
+      "terminal_raw_distance_mean": 1.6860276460647583,
+      "terminal_selected_distance_mean": 1.6860276460647583
+    }
+  },
+  "candidate": "vae512_w2048_b1e6",
+  "conditioning": "concat",
+  "config": "configs/pusht_incremental.yaml",
+  "gae_toy": {
+    "bootstrap_changes_returns": true,
+    "gae_lambda": 0.95,
+    "gamma": 0.99,
+    "local_terminal_max_abs_error": 0.0,
+    "local_terminal_returns": [
+      0.9084066749999999,
+      0.9553499999999999,
+      1.0
+    ],
+    "manual_local_terminal_returns": [
+      0.9084066749999999,
+      0.9553499999999999,
+      1.0
+    ],
+    "truncated_bootstrap_returns": [
+      9.66535515,
+      10.2663,
+      10.9
+    ]
+  },
+  "horizon_steps": 10,
+  "n_demo": 1800,
+  "num_envs": 32,
+  "pass": {
+    "gae_local_terminal_matches_manual": true,
+    "held_goal_input_changes_actions": true,
+    "observation_input_changes_actions": true,
+    "previous_action_changes_actions": true,
+    "remaining_time_changes_actions": true
+  },
+  "seed": 0,
+  "seed_start": 3900000,
+  "update_period": 10
+}

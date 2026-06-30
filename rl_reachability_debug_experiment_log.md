@@ -87,3 +87,103 @@ Next action:
 
 Proceed to Run 2: privileged/TCP scratch PPO local reaching, unless a separate
 issue is found while preparing that environment.
+
+## 2026-06-30 - Run 2: Privileged/TCP Scratch PPO Local Reaching
+
+Hypothesis:
+
+If PPO and the local reward are basically viable, a random policy should learn
+the easiest 10-step low-dimensional reaching problem before we try VAE or visual
+inputs again.
+
+Setup:
+
+- input: normalized privileged state, normalized TCP endpoint/velocity goal,
+  normalized previous action, remaining local time
+- policy: random scratch MLP actor-critic
+- local horizon: `10`
+- envs: `4096`
+- PPO updates: `250`
+- samples/update: `40960`
+- total env steps: `10,240,000`
+- optimizer steps: `250 * 3 epochs * 8 minibatches = 6000`
+- reward: TCP squared-distance progress plus terminal TCP squared-distance
+  penalty
+- reset bank: `data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5`
+- reset replay check: mean live/reference state L2 `0.0`
+
+Commands:
+
+```bash
+uv run python -m hcl_poc.cli --config configs/pusht_incremental.yaml \
+  rl-rerun collect-vector-data \
+  --output data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --num-envs 4096 \
+  --batches 2 \
+  --max-steps 60 \
+  --seed-start 9500000 \
+  --no-store-dino
+
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --updates 250 \
+  --eval-episodes 2 \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 25 \
+  --output-dir results/incremental/rl_reachability_debug/run2_privileged_tcp \
+  --force
+```
+
+Fixed-bank local evaluation:
+
+| Mode | Initial distance | Terminal distance | Reduction | Reach rate | Improved fraction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| initial random mean policy | 0.078806 | 0.072764 | 0.006042 | 0.0059 | 0.9784 |
+| trained correct goal | 0.078806 | 0.000489 | 0.078317 | 0.9744 | 0.9999 |
+| trained shuffled goal | 0.078806 | 0.036897 | 0.041909 | 0.1013 | 0.8141 |
+
+Terminal distance quantiles:
+
+| Mode | p50 | p90 | p99 |
+| --- | ---: | ---: | ---: |
+| initial random mean policy | 0.067389 | 0.132611 | 0.198787 |
+| trained correct goal | 0.000177 | 0.000807 | 0.007111 |
+| trained shuffled goal | 0.023942 | 0.092444 | 0.158354 |
+
+PPO diagnostics:
+
+| Metric | First update | Last update |
+| --- | ---: | ---: |
+| global env steps | 40,960 | 10,240,000 |
+| mean terminal distance | 0.019954 | 0.000721 |
+| reach rate | 0.1631 | 0.9487 |
+| policy KL | 0.0047 | 0.0066 |
+| clip fraction | 0.0494 | 0.0837 |
+| entropy | 1.2528 | -0.7190 |
+| value loss | 0.02309 | 0.000041 |
+| explained variance | -27.516 | 0.912 |
+| NaN count | 0 | 0 |
+| action saturation | 0.0201 | 0.4633 |
+
+Interpretation:
+
+Run 2 passes the main local reachability gate. PPO can solve the easy
+privileged/TCP local MDP from scratch with large parallel batches and enough
+policy iterations. The correct-goal policy is far better than the shuffled-goal
+condition on the same reset bank, so the learned controller is using the goal.
+
+The main caveat is action saturation: deterministic eval saturation is about
+`0.45`, and the last training update saturation is about `0.46`. This is not an
+immediate failure because terminal distance and correct-vs-shuffled separation
+are strong, but the next diagnostic should check whether the learned behavior is
+mostly bang-bang control and whether a smaller action scale, action penalty, or
+residual formulation preserves the reachability gain with less saturation.
+
+Next action:
+
+Proceed to the next gated diagnostic in the plan: random shooting / CEM on the
+same privileged/TCP local reset bank, using the trained PPO result as a reference
+point. Also consider a short Run 2b ablation with an action penalty or lower
+initial/action scale if saturation is judged too high.
