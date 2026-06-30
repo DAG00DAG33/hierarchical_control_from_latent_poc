@@ -693,3 +693,12 @@ uv run python scripts/rl_reachability_deployment_reachability_eval.py \
   --num-envs 10 \
   --output results/incremental/rl_reachability_debug/run7_deployment_reachability_eval.json
 ```
+
+Prepared post-training evaluator:
+
+`scripts/summarize_reachability_reward_variants.py` reads the three Run 7
+metrics files and ranks variants by local reachability score. The companion
+`scripts/run_reachability_reward_variant_evals.sh` then runs local BC-vs-RL
+comparisons and full-task success evaluations for terminal-only, progress-only,
+and BC-advantage D_psi checkpoints. This should be run only after the detached
+Run 7 training queue has completed all three variants.
