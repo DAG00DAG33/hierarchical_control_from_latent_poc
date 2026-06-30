@@ -47,6 +47,37 @@ Reward variants:
 | 1800 | paired_e2304 | 0.000 | 0.137 | 0.0011 | -0.0354 | 0.1961 | 0.000 | 0.984 |
 | 1800 | raw_l2 | 0.000 | 0.122 | -0.0158 | -0.0158 | 0.5430 | 0.000 | 0.797 |
 
+## Training Reachability Change
+
+The scratch policies did learn something under some rewards, but the effect was
+weak. The clearest training improvement is at `N=500`, where terminal
+`D_psi` distance decreases during training. At `N=1800`, terminal `D_psi`
+distance does not improve for the `D_psi` variants.
+
+| N | run | train terminal distance, first -> last | delta | paired improvement, first -> last |
+| ---: | --- | ---: | ---: | ---: |
+| 500 | terminal | 0.965 -> 0.936 | +0.029 | n/a |
+| 500 | progress | 0.965 -> 0.932 | +0.033 | n/a |
+| 500 | task_mix | 0.965 -> 0.925 | +0.041 | n/a |
+| 500 | paired_e2304 | 0.966 -> 0.952 | +0.015 | -0.243 -> -0.014 |
+| 500 | raw_l2 | 2.729 -> 2.223 | +0.506 | n/a |
+| 1800 | terminal | 0.942 -> 0.954 | -0.012 | n/a |
+| 1800 | progress | 0.942 -> 0.946 | -0.004 | n/a |
+| 1800 | task_mix | 0.942 -> 0.950 | -0.008 | n/a |
+| 1800 | paired_e2304 | 0.945 -> 0.964 | -0.020 | -0.324 -> -0.033 |
+| 1800 | raw_l2 | 2.315 -> 1.748 | +0.567 | n/a |
+
+Positive delta means the terminal training distance decreased. The paired
+reward signal also became less negative at both budgets, but it remained
+negative at the end of training.
+
+On evaluation, local `D_psi` reachability remained below the frozen low-level
+baseline. At `N=500`, the frozen baseline has `0.0521` segment `D_psi`
+reduction, while the best scratch variant reaches `0.0390`. At `N=1800`, the
+frozen baseline has `0.1079`, while the best scratch variant reaches only
+`0.0333`. Raw latent progress is negative for every scratch variant, while the
+frozen baseline is positive at both budgets.
+
 ## Decision
 
 No high-effort scratch variant passes the scaling gate. The larger runs improve
