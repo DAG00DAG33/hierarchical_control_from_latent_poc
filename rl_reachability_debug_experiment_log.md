@@ -673,3 +673,23 @@ the deployment-distribution reachability gap directly:
 
 This is required because Run 6 already shows that high local reachability on
 teacher/demo reset banks can coexist with near-zero task success.
+
+Prepared debug tool:
+
+`scripts/rl_reachability_deployment_reachability_eval.py` implements the first
+version of this deployment-distribution check. It deploys one or more collector
+hierarchies, snapshots states at learned high-level replanning points, then
+branch-evaluates candidate low-level policies on the learned high-level TCP
+endpoint goals from those actual rollout states. It reports true-goal and
+shuffled-goal reachability for BC, true-distance PPO, and D_psi PPO policies.
+
+Default intended use after Run 7:
+
+```bash
+uv run python scripts/rl_reachability_deployment_reachability_eval.py \
+  --collector-policies bc1800 run5_dpsi_ppo \
+  --candidate-policies bc1800 run2_true_tcp_ppo run5_dpsi_ppo \
+  --decisions 200 \
+  --num-envs 10 \
+  --output results/incremental/rl_reachability_debug/run7_deployment_reachability_eval.json
+```
