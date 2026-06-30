@@ -1,0 +1,13 @@
+{
+  "best_reach_rate": 0.998291015625,
+  "best_terminal_distance_mean": 7.58807800593786e-05,
+  "candidate_reach_rate": 0.8555316925048828,
+  "candidate_terminal_distance_mean": 0.020927082747220993,
+  "dataset": "data/rl_reachability_debug/run4_tcp_branch_dataset_c64_ref2.npz",
+  "fraction_best_improved_vs_ppo": 0.976806640625,
+  "local_episodes": 8192,
+  "noise_std": 0.05,
+  "ppo_reach_rate": 0.9747314453125,
+  "ppo_terminal_distance_mean": 0.0004937592311762273,
+  "random_candidates": 64
+}

@@ -282,3 +282,101 @@ branches; the next useful artifact is a saved branch dataset containing start
 state/latent, goal, PPO terminal outcome, random-search terminal outcome, and
 negative/shuffled goals so the ensemble can be validated on actual rollout
 ranking instead of demo temporal distance alone.
+
+## 2026-06-30 - Run 4: Privileged/TCP Branch D_psi Ensemble
+
+Hypothesis:
+
+Before using a learned distance as an RL reward, verify that an ensemble can
+rank actual rollout branches on held-out local resets, including PPO branches,
+random-search branches, selected best branches, and shuffled-goal negatives.
+
+Scope:
+
+This is a privileged/TCP sanity-check ensemble on the same low-dimensional MDP
+as Runs 2-3. It validates the branch/off-policy ensemble machinery, but it is
+not yet the final VAE/effect-latent `D_psi` reward model.
+
+Branch dataset:
+
+- path: `data/rl_reachability_debug/run4_tcp_branch_dataset_c64_ref2.npz`
+- local episodes: `8192`
+- random candidates per episode: `64`
+- noise std: `0.05`
+- PPO terminal distance mean: `0.000494`
+- random candidate terminal distance mean: `0.020927`
+- random-search best terminal distance mean: `0.0000759`
+- PPO reach rate: `0.9747`
+- random-search best reach rate: `0.9983`
+- best improved vs PPO: `0.9768`
+
+Dataset command:
+
+```bash
+uv run python scripts/rl_reachability_tcp_branch_dataset.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b2.h5 \
+  --checkpoint results/incremental/rl_reachability_debug/run2_privileged_tcp/privileged_tcp_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --eval-refs 2 \
+  --random-candidates 64 \
+  --output data/rl_reachability_debug/run4_tcp_branch_dataset_c64_ref2.npz
+```
+
+Ensemble:
+
+- members: `3`
+- target: `log1p(distance * 1000)`
+- train samples: `88679`
+- validation samples: `110592`
+- validation split: held-out local episodes
+- checkpoint: `artifacts/incremental/rl_reachability_debug/run4_tcp_dpsi_ensemble/tcp_dpsi_ensemble.pt`
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_tcp_dpsi_ensemble.py \
+  --dataset data/rl_reachability_debug/run4_tcp_branch_dataset_c64_ref2.npz \
+  --members 3 \
+  --epochs 16 \
+  --target-scale 1000 \
+  --max-train-candidate-samples 65536 \
+  --output results/incremental/rl_reachability_debug/run4_tcp_dpsi_ensemble.json \
+  --output-dir artifacts/incremental/rl_reachability_debug/run4_tcp_dpsi_ensemble
+```
+
+Validation gates:
+
+| Gate | Metric | Result |
+| --- | ---: | --- |
+| correlates with actual terminal distance | Spearman `0.9948` | pass |
+| separates reachable vs unreachable branches | AUC `0.9999` | pass |
+| ranks random-search selected branch better than PPO | accuracy `0.8999` | pass |
+| D_psi-selected candidate improves actual rollout distance | `0.000478 -> 0.000081` | pass |
+| D_psi-selected candidate is near oracle random-search best | oracle gap `0.0000046` | pass |
+| uncertainty rises on shuffled goals | std ratio `27.20x` | pass |
+
+Candidate-selection comparison on held-out branches:
+
+| Selector | Actual terminal distance |
+| --- | ---: |
+| PPO branch | 0.000478 |
+| D_psi-selected random candidate | 0.000081 |
+| oracle best random candidate | 0.000076 |
+| random candidate mean | 0.021063 |
+
+Interpretation:
+
+The branch/off-policy ensemble gate passes for the privileged/TCP local MDP.
+The learned ensemble is not merely fitting demo temporal distance: it ranks
+held-out branch outcomes, selects random candidates that nearly match the oracle
+best candidate, separates reachable/unreachable branches, and has much higher
+uncertainty on shuffled-goal inputs.
+
+Main caveat:
+
+Because this model sees privileged TCP state and a TCP goal, the metric is much
+easier than the intended VAE/effect-latent `D_psi`. It should be treated as a
+positive control for the ensemble/data/validation procedure. The next step in
+the plan is the low-dimensional PPO-with-learned-distance test; for a strict
+VAE/effect reward test, we still need the corresponding visual/latent branch
+dataset.
