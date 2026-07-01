@@ -199,6 +199,29 @@ def _goal_distance(
     return np.sum(delta * delta, axis=-1).astype(np.float32)
 
 
+def _load_bc_policy(
+    path: Path,
+    goal_type: str,
+    device: torch.device,
+) -> tuple[nn.Module, dict[str, Any], Standardizer, Standardizer]:
+    payload = torch.load(path, map_location=device, weights_only=False)
+    entry = payload[goal_type]
+    model = MLP(
+        int(entry["cond_dim"]),
+        int(entry["action_dim"]),
+        int(entry["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(entry["model"])
+    model.eval()
+    return (
+        model,
+        payload,
+        Standardizer.from_state_dict(payload["action_norm"]),
+        Standardizer.from_state_dict(entry["cond_norm"]),
+    )
+
+
 class LocalTcpPpo:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -277,6 +300,7 @@ class LocalTcpPpo:
             lr=float(args.learning_rate),
             eps=1e-5,
         )
+        self.bc_warm_start_summary: dict[str, Any] | None = None
         self.teacher = None
         self.teacher_action_penalty_weight = float(
             getattr(args, "teacher_action_penalty_weight", 0.0)
@@ -351,6 +375,140 @@ class LocalTcpPpo:
         self.local_step = 0
         self.reset_errors: list[float] = []
         self.normalizer_meta = norm_meta
+
+    def _sample_warm_start_batch(
+        self,
+        batch_size: int,
+        bc_model: nn.Module,
+        bc_action_norm: Standardizer,
+        bc_cond_norm: Standardizer,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        conditions: list[np.ndarray] = []
+        targets: list[np.ndarray] = []
+        action_low = self.action_low.detach().cpu().numpy()
+        action_high = self.action_high.detach().cpu().numpy()
+        remaining = batch_size
+        while remaining > 0:
+            key = str(self.rng.choice(self.batch_keys))
+            group = self.h5[key]
+            starts = _valid_starts(group, self.horizon)
+            take = min(remaining, self.num_envs)
+            env_indices = self.rng.integers(0, self.num_envs, size=take)
+            start_values = self.rng.choice(starts, size=take)
+            offsets = self.rng.integers(0, self.horizon, size=take)
+            time_indices = start_values + offsets
+            state = np.asarray(group["observations_state"], dtype=np.float32)[
+                time_indices,
+                env_indices,
+            ]
+            if "target_future_states" in group:
+                future = np.asarray(group["target_future_states"], dtype=np.float32)[
+                    start_values,
+                    env_indices,
+                ]
+            else:
+                future = np.asarray(group["observations_state"], dtype=np.float32)[
+                    start_values + self.horizon,
+                    env_indices,
+                ]
+            remaining_steps = (self.horizon - offsets).astype(np.int32)
+            goal = np.zeros((take, self.goal_dim), dtype=np.float32)
+            for value in np.unique(remaining_steps):
+                mask = remaining_steps == value
+                goal[mask] = _pre_rl_phase_b_goal(
+                    state[mask],
+                    future[mask],
+                    int(value),
+                    self.control_freq,
+                    self.goal_type,
+                )
+            previous_raw = np.asarray(
+                group["previous_executed_actions"],
+                dtype=np.float32,
+            )[time_indices, env_indices]
+            previous_norm = self.action_norm.transform(previous_raw)
+            condition = np.concatenate(
+                [
+                    self.state_norm.transform(state),
+                    self.goal_norm.transform(goal),
+                    previous_norm,
+                    (remaining_steps.astype(np.float32) / self.horizon)[:, None],
+                ],
+                axis=-1,
+            ).astype(np.float32)
+            bc_previous_norm = bc_action_norm.transform(previous_raw)
+            bc_condition = np.concatenate(
+                [
+                    state,
+                    goal,
+                    bc_previous_norm,
+                    (remaining_steps.astype(np.float32) / self.horizon)[:, None],
+                ],
+                axis=-1,
+            ).astype(np.float32)
+            with torch.no_grad():
+                normalized_action = bc_model(
+                    torch.from_numpy(bc_cond_norm.transform(bc_condition))
+                    .to(self.device)
+                    .float()
+                )
+            raw_action = bc_action_norm.inverse(
+                normalized_action.detach().cpu().numpy()
+            ).astype(np.float32)
+            targets.append(np.clip(raw_action, action_low, action_high).astype(np.float32))
+            conditions.append(condition)
+            remaining -= take
+        return (
+            torch.from_numpy(np.concatenate(conditions, axis=0)).to(self.device).float(),
+            torch.from_numpy(np.concatenate(targets, axis=0)).to(self.device).float(),
+        )
+
+    def warm_start_from_bc(self) -> None:
+        args = self.args
+        steps = int(getattr(args, "bc_warm_start_steps", 0))
+        if steps <= 0:
+            return
+        bc_path = Path(args.bc_warm_start_checkpoint)
+        if not bc_path.exists():
+            raise FileNotFoundError(bc_path)
+        bc_model, _payload, bc_action_norm, bc_cond_norm = _load_bc_policy(
+            bc_path,
+            self.goal_type,
+            self.device,
+        )
+        for parameter in bc_model.parameters():
+            parameter.requires_grad_(False)
+        optimizer = torch.optim.Adam(
+            self.agent.actor_mean.parameters(),
+            lr=float(args.bc_warm_start_lr),
+        )
+        batch_size = int(args.bc_warm_start_batch_size)
+        losses: list[float] = []
+        for _step in trange(steps, desc="bc warm start", leave=False):
+            condition, target = self._sample_warm_start_batch(
+                batch_size,
+                bc_model,
+                bc_action_norm,
+                bc_cond_norm,
+            )
+            prediction = self.agent.mean_action(condition)
+            loss = torch.mean((prediction - target) ** 2)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.agent.actor_mean.parameters(),
+                float(args.max_grad_norm),
+            )
+            optimizer.step()
+            losses.append(float(loss.detach().cpu()))
+        self.bc_warm_start_summary = {
+            "checkpoint": str(bc_path),
+            "steps": int(steps),
+            "batch_size": int(batch_size),
+            "learning_rate": float(args.bc_warm_start_lr),
+            "initial_mse": losses[0] if losses else None,
+            "final_mse": losses[-1] if losses else None,
+        }
 
     def close(self) -> None:
         if self.bc_branch_env is not None:
@@ -747,6 +905,7 @@ class LocalTcpPpo:
                 self.optimizer.load_state_dict(payload["optimizer"])
             init_global_step = int(payload.get("global_step", 0))
             init_history = list(payload.get("history", []))
+        self.warm_start_from_bc()
 
         batch_size = self.num_envs * self.horizon
         if batch_size % args.num_minibatches:
@@ -780,6 +939,7 @@ class LocalTcpPpo:
             "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
             "init_global_step": int(init_global_step),
             "init_history_updates": int(len(init_history)),
+            "bc_warm_start": self.bc_warm_start_summary,
             "bc_low_checkpoint": (
                 str(args.bc_low_checkpoint)
                 if args.reward_mode == "bc_advantage_terminal"
@@ -1018,6 +1178,13 @@ def main() -> None:
     parser.add_argument("--dpsi-checkpoint")
     parser.add_argument("--init-checkpoint")
     parser.add_argument("--use-init-normalizers", action="store_true")
+    parser.add_argument(
+        "--bc-warm-start-checkpoint",
+        default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt",
+    )
+    parser.add_argument("--bc-warm-start-steps", type=int, default=0)
+    parser.add_argument("--bc-warm-start-batch-size", type=int, default=8192)
+    parser.add_argument("--bc-warm-start-lr", type=float, default=1e-3)
     parser.add_argument(
         "--bc-low-checkpoint",
         default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_tcp.pt",

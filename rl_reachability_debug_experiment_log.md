@@ -2515,3 +2515,115 @@ useful full-state experiment should constrain the policy structurally toward
 Phase-C BC, for example BC warm start, residual-on-BC, or a KL/BC-prior
 regularizer. A stronger scalar teacher-action penalty is possible as a quick
 ablation, but the previous results suggest simple penalties are a weak tool.
+
+## 2026-07-01 - Run 25: BC-Warm-Started Reset-Mixture Full-State PPO
+
+Motivation:
+
+Run 22 showed that longer same-bank PPO improves some local metrics but does
+not transfer to held-subgoal task success. Runs 23 and 24 showed that deployed
+reset coverage and oracle targets help local/deployed reachability, but plain
+scratch PPO remains far off the action/contact behavior of Phase-C full BC.
+Run 25 keeps the reset-mixture direction but initializes the trainable PPO
+actor from the Phase-C full BC low-level policy.
+
+This keeps the experiment aligned with the POC constraint: deployed reset
+states are used to address distribution shift, while oracle branching is only
+used for diagnostics. The core training target is still the hierarchy's
+available held full-state subgoal, not DAgger-style online expert action
+relabeling.
+
+Dataset:
+
+```text
+data/rl_reachability_debug/full_reset_mixture_demo8_bc4_run22_4.h5
+```
+
+Mixture:
+
+| Source | Batches | Fraction |
+| --- | ---: | ---: |
+| original demo/teacher local windows | 8 | 50% |
+| Phase-C full BC deployed hierarchy states | 4 | 25% |
+| Run 22 PPO deployed hierarchy states | 4 | 25% |
+
+BC warm start:
+
+| Field | Value |
+| --- | ---: |
+| checkpoint | `artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt` |
+| warm-start steps | 1000 |
+| batch size | 8192 |
+| learning rate | 0.001 |
+| initial action MSE to BC | 0.2371 |
+| final action MSE to BC | 0.0022 |
+
+Reset-mixture fixed-bank local result:
+
+| Metric | Run 25 initial | Run 25 trained | Run 25 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 5.3252 | 3.6321 | 8.8288 |
+| p50 terminal distance | 1.5708 | 1.7027 | 6.7154 |
+| p90 terminal distance | 12.1632 | 6.9932 | 15.6308 |
+| p99 terminal distance | 59.8115 | 35.4761 | 47.8307 |
+| fraction improved | 0.7678 | 0.8653 | 0.5837 |
+| action saturation | 0.1384 | 0.0445 | 0.0359 |
+| action L2 | 0.7965 | 0.6843 | 0.6340 |
+
+Training-window diagnostics at the end of Run 25:
+
+| Diagnostic | Value |
+| --- | ---: |
+| train teacher action MAE | 0.1090 |
+| mean return per step | 0.4181 |
+| clip fraction | 0.1271 |
+| policy KL | 0.0095 |
+| explained variance | 0.9609 |
+| action saturation | 0.0023 |
+| NaN count | 0 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.72 | 0.8094 | 0.8115 | 1.7071 | 0.0421 |
+| oracle | Run 25 BC-warm-start reset-mixture PPO | 0.16 | 0.3941 | 0.4071 | 2.3472 | 0.1314 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3954 | 0.4002 |
+| shuffled oracle | Run 25 BC-warm-start reset-mixture PPO | 0.02 | 0.1439 | 0.1755 | 11.2030 | 0.3397 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.9909 | 0.8697 | 0.1672 | 1.5919 | 0.8583 |
+| Phase-C full BC | Run 22 long PPO | no | 8.9909 | 0.8122 | 0.1750 | 2.1522 | 0.9553 |
+| Phase-C full BC | Run 25 BC-warm-start PPO | no | 8.9909 | 1.0739 | 0.3142 | 2.3017 | 0.9029 |
+| Run 25 BC-warm-start PPO | Phase-C full BC | no | 8.0484 | 2.9800 | 0.6122 | 6.7456 | 0.7698 |
+| Run 25 BC-warm-start PPO | Run 22 long PPO | no | 8.0484 | 1.1469 | 0.3602 | 2.6900 | 0.9768 |
+| Run 25 BC-warm-start PPO | Run 25 BC-warm-start PPO | no | 8.0484 | 2.0967 | 0.9046 | 4.0808 | 0.8801 |
+
+Interpretation:
+
+Run 25 is the first full-state PPO variant in this thread with meaningful
+held-subgoal task recovery (`0.16` oracle success versus `0.00-0.04` for the
+plain full-state PPO/reset-mixture variants). It also has much lower
+teacher-action MAE than Runs 23/24. However, it remains far below Phase-C full
+BC (`0.72` on the same 100-episode oracle bank), and its deployed-state branch
+reachability is not uniformly better than Run 22.
+
+The evidence now supports two constraints for the next experiments:
+
+1. Do not return to simply training longer on the original demo reset bank.
+   The low-level must see shifted deployed hierarchy states.
+2. Do not use online expert action relabeling as the main POC path. Oracle
+   targets/branches are useful as diagnostics or upper bounds, but the main
+   training method should use reset mixtures, disturbed resets, BC priors,
+   residual-on-BC, or KL-to-BC structure.
+
+Next action:
+
+Prefer a stronger BC-structured reset-distribution experiment over another
+plain scratch continuation. The most direct candidates are residual-on-Phase-C
+BC PPO on the same reset mixture, an explicit KL/BC-prior regularizer on the
+PPO actor, or a disturbed-reset variant that trains recovery around demo and
+deployed states without requiring new online expert action labels.
