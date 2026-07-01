@@ -123,7 +123,7 @@ terminal distances favor Run 13. This means the low learned-goal task success is
 not simply because Run 13 cannot reach learned object-pose goals from deployed
 states.
 
-### Full-State Subgoals Are Locally Promising but Need Stronger Action-Manifold Control
+### Full-State Subgoals Are Strong With Correct Held-Target Semantics
 
 Run 16 tested the original full-state subgoal idea with scratch PPO and the same
 teacher-action penalty used in Run 13.
@@ -142,22 +142,23 @@ This is the strongest local evidence that the right subgoal semantics matter:
 full-state goals are much more aligned with the desired option outcome than
 TCP-only endpoint goals.
 
-Held-subgoal full hierarchy evaluation, with the subgoal held for `k=10`, did
-not yet improve task success:
+The first full-rollout evaluator held the raw 28D Phase-B `full` goal vector
+fixed for `k=10`. That was the wrong protocol for Phase-B/Phase-C `full` goals,
+because the vector contains velocity/rate features. The correct protocol is to
+hold the target future state fixed and recompute the goal features from the
+current state and remaining time.
 
-| Goal source | Low-level | Success | Final reward | Hold full-goal dist. | Teacher action MAE |
-| --- | --- | ---: | ---: | ---: | ---: |
-| oracle | Phase-B full BC | 0.01 | 0.1724 | 13.0115 | 0.2710 |
-| oracle | Run 16 full PPO | 0.00 | 0.1239 | 5.2004 | 0.3163 |
-| learned | Phase-B full BC | 0.01 | 0.1633 | 20.9570 | 0.3146 |
-| learned | Run 16 full PPO | 0.00 | 0.1311 | 4.3042 | 0.3486 |
-| shuffled learned | Phase-B full BC | 0.00 | 0.1113 | 19.9949 | 0.3937 |
-| shuffled learned | Run 16 full PPO | 0.00 | 0.1073 | 13.8111 | 0.4528 |
+Correct held-oracle BC audit:
 
-The full PPO low-level reaches held full-state goals better than BC, but still
-has worse teacher-action drift and worse task reward. The next full-state
-variant should use a stronger teacher-action penalty, BC warm start, or residual
-formulation.
+| BC policy | Goal feature semantics | Success | Final reward | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: |
+| Phase-B full BC | recomputed features, no time input | 0.08 | 0.2915 | 0.2146 |
+| Phase-C full BC | recomputed features, time-conditioned | 0.74 | 0.8241 | 0.0407 |
+
+This explains why the earlier BC full-goal held result was suspiciously low:
+it was an evaluator/baseline mismatch. Full-state subgoals are not weak. The
+time-conditioned full BC baseline is strong under the intended held-subgoal
+hierarchy.
 
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
@@ -177,7 +178,8 @@ outcome. Object-pose goals improved task relevance, and full-state goals are the
 most semantically correct local reachability target so far.
 
 The strongest task-success result remains constrained object-pose PPO with a
-teacher-action penalty. The strongest local reachability result is now full-state
-PPO, but it still drifts too far from teacher/contact behavior to improve held
-k=10 hierarchy success. The next promising direction is full-state PPO with a
-stronger teacher-action penalty, BC warm start, or residual formulation.
+teacher-action penalty. The strongest hierarchy baseline is now the corrected
+Phase-C time-conditioned full-state BC (`0.74` oracle held success). The next
+promising direction is to retrain full-state PPO using the same held-target /
+recomputed-feature semantics as Phase C, then compare against this corrected
+baseline.

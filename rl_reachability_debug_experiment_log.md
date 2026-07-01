@@ -1751,10 +1751,10 @@ uv run python scripts/rl_reachability_goal_high_predictor.py \
 | persistence full-goal L2 | 3.8790 |
 | persistence p90 full-goal L2 | 6.2743 |
 
-Held-subgoal full hierarchy evaluation:
+Raw-goal held evaluation:
 
-This is the primary hierarchy evaluation. The high-level subgoal is held for
-`k=10` primitive steps.
+This was the first held-subgoal check I ran. It holds the raw 28D Phase-B
+`full` goal vector fixed for `k=10` primitive steps.
 
 ```bash
 uv run python scripts/rl_reachability_goal_full_success_eval.py \
@@ -1778,15 +1778,38 @@ uv run python scripts/rl_reachability_goal_full_success_eval.py \
 | shuffled learned | Phase-B full BC | 0.00 | 0.1113 | 0.1669 | 19.9949 | 20.7079 | 0.3937 |
 | shuffled learned | Run 16 full PPO | 0.00 | 0.1073 | 0.1438 | 13.8111 | 15.4410 | 0.4528 |
 
-Interpretation of the held-subgoal result:
+Correction:
 
-Run 16 solves the local held full-goal reachability problem much better than
-the Phase-B full BC low-level in the same full-rollout evaluator, but it still
-does not improve task success. The likely issue is not the full-state subgoal
-idea itself. It is that the scratch PPO policy still drifts too far from the
-teacher/contact action manifold: teacher-action MAE is worse than BC in both
-oracle and learned held-subgoal rollouts, and final task reward is lower despite
-better full-goal distance.
+This is **not** the correct Phase-B `full` held-subgoal protocol. The Phase-B
+`full` goal vector contains velocity/rate features in addition to target object,
+TCP, and joint state. The old project evaluator keeps the target future state
+fixed, but recomputes the goal features at every primitive step using the
+current state and remaining time. Holding the raw 28D vector fixed gives the BC
+policy an out-of-distribution condition and explains the suspicious near-zero
+BC success.
+
+Official held-goal BC protocol audit:
+
+I reran the existing project evaluator with `goal_type=full`, `k=10`, and
+`goal_update_period=10`. This uses `fixed_endpoint_recomputed_features`
+semantics: the future target state is held, while the Phase-B goal features are
+recomputed each step.
+
+| BC policy | Time conditioned | Success | Final reward | Max reward | Teacher action MAE | Object error | TCP error | Yaw error |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-B full BC | no | 0.08 | 0.2915 | 0.3187 | 0.2146 | 0.0204 m | 0.1087 m | 0.1454 rad |
+| Phase-C full BC | yes | 0.74 | 0.8241 | 0.8258 | 0.0407 | 0.0179 m | 0.0662 m | 0.1299 rad |
+
+The time-conditioned Phase-C full BC checkpoint is:
+
+```text
+artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt
+```
+
+Its validation action MAE is `0.0305`, and the held-oracle success is `0.74`.
+This confirms that full-state subgoals are not inherently bad; they are strong
+when the low-level is trained/evaluated with the correct held-target semantics
+and remaining-time conditioning.
 
 Non-hierarchical one-step replan diagnostic:
 
@@ -1803,12 +1826,13 @@ test. It is a receding-horizon oracle/high-level diagnostic only.
 
 This cross-check explains why older Phase-B `full` rows looked much stronger:
 they used `action_horizon_steps=1`. That result is useful historically, but the
-held-subgoal evaluation is the correct metric for the hierarchical controller.
+held-subgoal evaluation with recomputed features and time conditioning is the
+correct BC baseline for the hierarchical controller.
 
 Next action:
 
-Do not abandon full-state goals. Run 16 is the best evidence so far that the
-right subgoal semantics make local reachability meaningful. The next scoped
-full-state experiment should increase the teacher-action penalty or use a
-BC-warm-start/residual version so that full-state reachability improves without
-leaving the contact/task action manifold.
+Do not abandon full-state goals. The corrected audit shows the opposite:
+time-conditioned full-state BC is very strong under held oracle goals. The next
+scoped RL experiment should retrain/evaluate full-state PPO with the same
+held-target/recomputed-feature semantics as Phase C, rather than holding the raw
+Phase-B `full` vector fixed.

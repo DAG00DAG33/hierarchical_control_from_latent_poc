@@ -1,0 +1,48 @@
+{
+  "data": {
+    "causal_train_transitions": 71115,
+    "dataset_path": "data/incremental/phase1_query_dataset.h5",
+    "expanded_train_samples": 531150,
+    "label_kind": "deterministic_clipped",
+    "requested_train_episodes": 1800,
+    "state_query_samples": 0,
+    "subset": "successful",
+    "train_episodes": 1800,
+    "usable_episodes": 2190,
+    "validation_episodes": 200
+  },
+  "goal_type": "full",
+  "horizon_steps": 10,
+  "metadata": {
+    "config": "configs/pusht_incremental.yaml",
+    "control_freq": 20,
+    "controller": "pd_ee_delta_pos",
+    "cuda_available": true,
+    "device": "cuda",
+    "environment": "PushT-v1",
+    "git_commit": "b5f45c5b339cca2f82e3eae87337a93cd9fce3d9",
+    "git_dirty": true,
+    "gymnasium_version": "1.3.0",
+    "mani_skill_version": "3.0.1",
+    "torch_version": "2.12.0+cu130"
+  },
+  "method": "time_conditioned_multi_offset_oracle",
+  "phase": "C1",
+  "training_summary": {
+    "best_validation_mse": 0.012364063411951065,
+    "train_samples": 531150,
+    "validation_metrics": {
+      "correlation_per_dim": [
+        0.9934321966528472,
+        0.9965654663464205,
+        0.9933452910783265
+      ],
+      "mae": 0.030500905588269234,
+      "max_abs_error": 1.0287984609603882,
+      "prediction_out_of_bounds_fraction": 0.15260125402474156,
+      "rmse": 0.04689531773328781,
+      "target_near_bounds_fraction": 0.3487544483985765
+    },
+    "validation_samples": 59010
+  }
+}
