@@ -14,6 +14,7 @@ from torch import nn
 from tqdm import trange
 
 from hcl_poc.config import load_config
+from hcl_poc.incremental import PRE_RL_PHASE_B_GOAL_TYPES, _pre_rl_phase_b_goal
 from hcl_poc.low_level_rl import ScratchLowActorCritic
 from hcl_poc.models import MLP
 from hcl_poc.privileged_z import _clone_mani_state_dict
@@ -54,6 +55,7 @@ def _fit_normalizers(
     batch_keys: list[str],
     horizon: int,
     control_freq: int,
+    goal_type: str,
 ) -> tuple[Standardizer, Standardizer, Standardizer, dict[str, Any]]:
     states = []
     actions = []
@@ -66,12 +68,16 @@ def _fit_normalizers(
         if max_start <= 0:
             raise ValueError(f"{key} is shorter than horizon={horizon}")
         starts = np.arange(max_start)
-        endpoint = state[starts + horizon, :, TCP_SLICE]
-        tcp_now = state[starts, :, TCP_SLICE]
-        velocity = (endpoint - tcp_now) / (horizon / float(control_freq))
+        current = state[starts]
+        future = state[starts + horizon]
         states.append(state.reshape(-1, state.shape[-1]))
         actions.append(action.reshape(-1, action.shape[-1]))
-        goals.append(np.concatenate([endpoint, velocity], axis=-1).reshape(-1, 6))
+        goals.append(
+            _pre_rl_phase_b_goal(current, future, horizon, control_freq, goal_type).reshape(
+                -1,
+                _goal_dim(goal_type),
+            )
+        )
     state_all = np.concatenate(states, axis=0).astype(np.float32)
     action_all = np.concatenate(actions, axis=0).astype(np.float32)
     goal_all = np.concatenate(goals, axis=0).astype(np.float32)
@@ -95,6 +101,68 @@ def _distance(current_state: np.ndarray, goal: np.ndarray) -> np.ndarray:
     return np.sum(delta * delta, axis=-1).astype(np.float32)
 
 
+def _goal_dim(goal_type: str) -> int:
+    if goal_type == "object_pose":
+        return 4
+    if goal_type == "object":
+        return 7
+    if goal_type == "tcp":
+        return 6
+    if goal_type == "robot":
+        return 20
+    if goal_type == "full":
+        return 28
+    raise ValueError(f"Unknown goal_type: {goal_type}")
+
+
+def _goal_metric_features(goal: np.ndarray, goal_type: str) -> np.ndarray:
+    if goal_type == "tcp":
+        return goal[:, :3]
+    if goal_type == "object_pose":
+        return goal[:, :4]
+    if goal_type == "object":
+        return goal[:, :4]
+    if goal_type == "robot":
+        return np.concatenate([goal[:, :3], goal[:, 6:20]], axis=-1).astype(np.float32)
+    if goal_type == "full":
+        return np.concatenate(
+            [goal[:, :4], goal[:, 7:10], goal[:, 13:28]],
+            axis=-1,
+        ).astype(np.float32)
+    raise ValueError(f"Unknown goal_type: {goal_type}")
+
+
+def _goal_state_features(
+    current_state: np.ndarray,
+    goal_type: str,
+    horizon: int,
+    control_freq: int,
+) -> np.ndarray:
+    goal = _pre_rl_phase_b_goal(
+        current_state,
+        current_state,
+        horizon,
+        control_freq,
+        goal_type,
+    )
+    return _goal_metric_features(goal, goal_type)
+
+
+def _goal_distance(
+    current_state: np.ndarray,
+    goal: np.ndarray,
+    goal_type: str,
+    horizon: int,
+    control_freq: int,
+) -> np.ndarray:
+    if goal_type == "tcp":
+        return _distance(current_state, goal)
+    achieved = _goal_state_features(current_state, goal_type, horizon, control_freq)
+    target = _goal_metric_features(goal, goal_type)
+    delta = achieved - target
+    return np.sum(delta * delta, axis=-1).astype(np.float32)
+
+
 class LocalTcpPpo:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -115,11 +183,15 @@ class LocalTcpPpo:
         if self.max_steps < self.horizon:
             raise ValueError(f"Dataset max_steps={self.max_steps} is shorter than horizon={self.horizon}")
         self.control_freq = int(self.config.get("control_freq", 20))
+        self.goal_type = str(getattr(args, "goal_type", "tcp"))
+        if self.goal_type not in PRE_RL_PHASE_B_GOAL_TYPES:
+            raise ValueError(f"Unknown goal_type: {self.goal_type}")
         self.state_norm, self.action_norm, self.goal_norm, norm_meta = _fit_normalizers(
             self.h5,
             self.batch_keys,
             self.horizon,
             self.control_freq,
+            self.goal_type,
         )
         self.state_dim = int(norm_meta["state_dim"])
         self.action_dim = int(norm_meta["action_dim"])
@@ -157,6 +229,8 @@ class LocalTcpPpo:
         self.dpsi_input_norm: Standardizer | None = None
         self.dpsi_target_norm: Standardizer | None = None
         if args.reward_distance_source == "dpsi":
+            if self.goal_type != "tcp":
+                raise ValueError("D_psi reward currently requires --goal-type tcp")
             if not args.dpsi_checkpoint:
                 raise ValueError("--dpsi-checkpoint is required when using D_psi reward")
             dpsi_checkpoint = torch.load(
@@ -190,6 +264,8 @@ class LocalTcpPpo:
         self.bc_cond_norm: Standardizer | None = None
         self.bc_branch_env: Any | None = None
         if args.reward_mode == "bc_advantage_terminal":
+            if self.goal_type != "tcp":
+                raise ValueError("bc_advantage_terminal currently requires --goal-type tcp")
             bc_path = Path(args.bc_low_checkpoint)
             if not bc_path.exists():
                 raise FileNotFoundError(bc_path)
@@ -254,11 +330,17 @@ class LocalTcpPpo:
         self.previous_action_norm = self.action_norm.transform(
             np.asarray(group["previous_executed_actions"][t], dtype=np.float32)
         )
-        endpoint = np.asarray(group["observations_state"][t + self.horizon, :, TCP_SLICE], dtype=np.float32)
-        velocity = (endpoint - live_state[:, TCP_SLICE]) / (
-            self.horizon / float(self.control_freq)
+        future_state = np.asarray(
+            group["observations_state"][t + self.horizon],
+            dtype=np.float32,
         )
-        self.goal = np.concatenate([endpoint, velocity], axis=-1).astype(np.float32)
+        self.goal = _pre_rl_phase_b_goal(
+            live_state,
+            future_state,
+            self.horizon,
+            self.control_freq,
+            self.goal_type,
+        ).astype(np.float32)
         self.goal_normed = self.goal_norm.transform(self.goal)
         self.local_step = 0
         if self.args.reward_mode == "bc_advantage_terminal":
@@ -331,6 +413,14 @@ class LocalTcpPpo:
     def reward_distance(self, state: np.ndarray, goal: np.ndarray) -> np.ndarray:
         if self.args.reward_distance_source == "true_tcp":
             return _distance(state, goal)
+        if self.args.reward_distance_source == "true_goal":
+            return _goal_distance(
+                state,
+                goal,
+                self.goal_type,
+                self.horizon,
+                self.control_freq,
+            )
         if (
             self.dpsi_input_norm is None
             or self.dpsi_target_norm is None
@@ -364,7 +454,16 @@ class LocalTcpPpo:
         next_obs, _env_reward, _terminated, _truncated, info = self.env.step(clipped)
         next_state = _obs_state_np(next_obs)
         next_reward_distance = self.reward_distance(next_state, self.goal)
-        next_distance = _distance(next_state, self.goal)
+        next_distance = (
+            next_reward_distance
+            if self.args.reward_distance_source == "true_goal"
+            else _distance(next_state, self.goal)
+        )
+        next_tcp_distance = (
+            _distance(next_state, self.goal)
+            if self.goal_type == "tcp"
+            else np.full(self.num_envs, np.nan, dtype=np.float32)
+        )
         progress = previous_distance - next_reward_distance
         segment_end = self.local_step == self.horizon - 1
         if self.args.reward_mode == "progress":
@@ -395,6 +494,7 @@ class LocalTcpPpo:
         done = np.full(self.num_envs, segment_end, dtype=np.bool_)
         metrics = {
             "next_distance": next_distance,
+            "next_tcp_distance": next_tcp_distance,
             "next_reward_distance": next_reward_distance,
             "success": _to_numpy(info.get("success", np.zeros(self.num_envs, dtype=np.bool_)))
             .reshape(-1)
@@ -430,7 +530,7 @@ class LocalTcpPpo:
             for _step in range(self.horizon):
                 condition, distance = self.condition(shuffled_goal=shuffled_goal)
                 if start_distance is None:
-                    start_distance = _distance(self.current_state, self.goal)
+                    start_distance = self.reward_distance(self.current_state, self.goal)
                     initial_distances.extend(start_distance.tolist())
                 action, _logprob, _entropy, _value = self.agent.get_action_and_value(
                     condition.float(),
@@ -488,6 +588,7 @@ class LocalTcpPpo:
                 "condition_dim": self.condition_dim,
                 "state_dim": self.state_dim,
                 "goal_dim": self.goal_dim,
+                "goal_type": self.goal_type,
                 "action_dim": self.action_dim,
             },
             path,
@@ -497,7 +598,10 @@ class LocalTcpPpo:
         args = self.args
         run_dir = ensure_dir(
             Path(args.output_dir)
-            / f"privileged_tcp_ppo_{args.reward_mode}_n{self.num_envs}_seed{args.seed}"
+            / (
+                f"privileged_{self.goal_type}_ppo_{args.reward_mode}_"
+                f"n{self.num_envs}_seed{args.seed}"
+            )
         )
         checkpoint_dir = ensure_dir(run_dir / "checkpoints")
         history_path = run_dir / "history.json"
@@ -532,6 +636,7 @@ class LocalTcpPpo:
             "dataset": str(self.dataset.resolve()),
             "num_envs": self.num_envs,
             "horizon": self.horizon,
+            "goal_type": self.goal_type,
             "updates": int(args.updates),
             "samples_per_update": int(batch_size),
             "total_env_steps": int(batch_size * args.updates),
@@ -754,6 +859,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="results/incremental/rl_reachability_debug/run2_privileged_tcp")
     parser.add_argument("--num-envs", type=int)
     parser.add_argument("--horizon", type=int, default=10)
+    parser.add_argument("--goal-type", choices=PRE_RL_PHASE_B_GOAL_TYPES, default="tcp")
     parser.add_argument("--updates", type=int, default=250)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -763,7 +869,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--reward-distance-source",
-        choices=["true_tcp", "dpsi"],
+        choices=["true_tcp", "true_goal", "dpsi"],
         default="true_tcp",
     )
     parser.add_argument("--dpsi-checkpoint")

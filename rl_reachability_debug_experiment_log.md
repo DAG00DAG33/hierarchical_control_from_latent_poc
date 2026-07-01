@@ -977,3 +977,103 @@ but endpoint chasing does not produce successful PushT behavior.
 
 The next useful training experiment should change the local reward or policy
 constraint, not simply increase endpoint-only PPO length.
+
+## 2026-07-01 - Run 8: Privileged Object-Pose Local PPO
+
+Motivation:
+
+The plan's Phase 1 asks for privileged/state local reaching, not only TCP
+endpoint reaching. Runs 6 and 7 showed that a low-level policy can become a
+strong TCP endpoint servo while still failing PushT. Run 8 therefore changes
+the local goal and reward to the object's privileged pose:
+
+```text
+goal_type = object_pose
+goal = [object_x, object_y, sin(object_yaw), cos(object_yaw)]
+reward distance = squared distance in that object-pose goal space
+```
+
+This is still an oracle local-reset experiment, not a deployable hierarchy,
+because the available learned high-level predictor in `phase_f` is TCP-only.
+
+Implementation:
+
+`scripts/rl_reachability_privileged_tcp_ppo.py` now supports:
+
+- `--goal-type {tcp, object_pose, object, robot, full}`
+- `--reward-distance-source true_goal`
+
+The default remains TCP and existing `D_psi`/BC-advantage paths are guarded as
+TCP-only because their learned metric and frozen BC baseline were trained for
+the TCP interface.
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type object_pose \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run8_object_pose_b8_u250 \
+  --force
+```
+
+Training budget:
+
+```text
+4096 envs * 10 steps/update * 250 updates = 10.24M environment steps
+8 minibatches * 3 epochs * 250 updates = 6000 optimizer steps
+```
+
+Results:
+
+| Metric | Initial random policy | Trained object-pose PPO | Trained shuffled-goal eval |
+| --- | ---: | ---: | ---: |
+| object-pose initial distance | 0.5897 | 0.5897 | 0.5897 |
+| terminal object-pose distance | 0.5690 | 0.1517 | 0.3422 |
+| distance reduction | 0.0207 | 0.4380 | 0.2475 |
+| reach under epsilon 0.0025 | 0.2410 | 0.3160 | 0.2744 |
+| p50 terminal distance | 0.1357 | 0.0120 | 0.0269 |
+| p90 terminal distance | 1.9496 | 0.4894 | 1.0402 |
+| p99 terminal distance | 3.2821 | 1.9135 | 3.8756 |
+| action saturation | 0.0000 | 0.1214 | 0.1584 |
+| action L2 | 0.0057 | 0.7342 | 0.7440 |
+
+Final PPO diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| final train terminal object-pose distance | 0.3992 |
+| final train reach under epsilon | 0.0974 |
+| mean return per step | 0.0256 |
+| policy KL | 0.00846 |
+| clip fraction | 0.1132 |
+| value loss | 0.0624 |
+| explained variance | 0.8225 |
+| action saturation | 0.3090 |
+| NaN count | 0 |
+| elapsed | 2009s |
+
+Interpretation:
+
+Object-pose PPO gives a positive local learning signal: eval terminal distance
+drops from `0.5690` to `0.1517`, and correct-goal performance is clearly
+better than shuffled-goal performance (`0.1517` versus `0.3422` terminal
+distance). This is a stronger result than the TCP-only endpoint experiments for
+the specific question of whether PPO can use a privileged task-relevant goal.
+
+However, this is not yet a deployable hierarchy result. We do not currently
+have a matching learned object-pose high-level predictor wired into the full
+rollout evaluator, and the existing BC low level is TCP-conditioned. The next
+experiment should either train/evaluate the matching object-pose high-level
+interface or add object/contact terms to the TCP-interface reward while keeping
+the deployable TCP high-level policy fixed.

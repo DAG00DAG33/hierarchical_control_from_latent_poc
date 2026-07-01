@@ -24,6 +24,7 @@ def _runner_args(args: argparse.Namespace) -> argparse.Namespace:
         dataset=args.dataset,
         num_envs=args.num_envs,
         horizon=args.horizon,
+        goal_type="tcp",
         seed=args.seed,
         reward_mode="progress_terminal",
         reward_distance_source="true_tcp",
