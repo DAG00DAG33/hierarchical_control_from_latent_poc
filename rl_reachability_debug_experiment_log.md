@@ -2795,3 +2795,69 @@ aggregation round should not simply add more Run 27 states and continue with
 the same objective. It should add a stronger action/contact constraint, such
 as residual-on-Phase-C-BC PPO or a stronger BC-prior/KL schedule, while keeping
 the iterative reset-bank collection mechanism.
+
+## 2026-07-02 - Run 28: Iterative Aggregation Round 1 With Stronger BC Prior
+
+Motivation:
+
+Run 27 improved geometric reachability but regressed task success. Run 28 tests
+whether the first aggregation bank needs a stronger action/contact constraint:
+same dataset and Run 26 initialization as Run 27, but increase
+`bc_prior_weight` from `1.0` to `5.0`.
+
+Round-1 aggregation-bank local result:
+
+| Metric | Run 28 initial | Run 28 trained | Run 28 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 2.5236 | 1.9199 | 7.4422 |
+| p50 terminal distance | 0.9220 | 0.5005 | 5.5369 |
+| p90 terminal distance | 4.3332 | 3.5163 | 13.7794 |
+| fraction improved | 0.9368 | 0.9391 | 0.6330 |
+| action saturation | 0.0440 | 0.0802 | 0.0500 |
+| action L2 | 0.6367 | 0.6808 | 0.6588 |
+
+Training-window diagnostics at the end of Run 28:
+
+| Diagnostic | Value |
+| --- | ---: |
+| BC-prior weight | 5.0 |
+| train BC-prior MSE | 0.0093 |
+| mean return per step | 0.6839 |
+| clip fraction | 0.1749 |
+| policy KL | 0.0135 |
+| action saturation | 0.1820 |
+| NaN count | 0 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.66 | 0.7682 | 0.7706 | 1.7542 | 0.0423 |
+| oracle | Run 28 iterative aggregation BC-prior-5 PPO | 0.25 | 0.4756 | 0.4836 | 1.4907 | 0.0870 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3820 | 0.4002 |
+| shuffled oracle | Run 28 iterative aggregation BC-prior-5 PPO | 0.01 | 0.1391 | 0.1649 | 10.3251 | 0.3398 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.7160 | 0.9091 | 0.1657 | 1.7433 | 0.8721 |
+| Phase-C full BC | Run 26 BC-prior PPO | no | 8.7160 | 0.9802 | 0.2900 | 2.0345 | 0.9341 |
+| Phase-C full BC | Run 27 iterative aggregation PPO | no | 8.7160 | 0.6992 | 0.2085 | 1.5093 | 0.9360 |
+| Phase-C full BC | Run 28 iterative aggregation BC-prior-5 PPO | no | 8.7160 | 0.7426 | 0.2221 | 1.4575 | 0.9031 |
+| Run 28 iterative aggregation BC-prior-5 PPO | Phase-C full BC | no | 7.5663 | 2.3780 | 0.3135 | 5.6223 | 0.7457 |
+| Run 28 iterative aggregation BC-prior-5 PPO | Run 26 BC-prior PPO | no | 7.5663 | 1.6553 | 0.4794 | 3.3181 | 0.8632 |
+| Run 28 iterative aggregation BC-prior-5 PPO | Run 27 iterative aggregation PPO | no | 7.5663 | 1.2134 | 0.3605 | 2.5594 | 0.8902 |
+| Run 28 iterative aggregation BC-prior-5 PPO | Run 28 iterative aggregation BC-prior-5 PPO | no | 7.5663 | 1.4456 | 0.3571 | 2.9417 | 0.8825 |
+
+Interpretation:
+
+Run 28 is the strongest full-state PPO result so far: oracle held success
+improves to `0.25`, teacher-action MAE drops to `0.0870`, and shuffled-goal
+success remains near zero. The stronger BC prior fixes much of Run 27's task
+success regression while retaining the local/deployed reachability gains from
+the aggregation bank.
+
+The policy is still below Phase-C full BC on task success, so the iterative
+reset-bank direction should continue, but with the stronger BC prior (or a
+residual-on-BC formulation) rather than the weaker Run 27 objective.
