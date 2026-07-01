@@ -2431,3 +2431,87 @@ upper bound. If oracle-target reset mixture still fails, the bottleneck is more
 likely action/contact compatibility or the PPO objective. If it succeeds, the
 learned-high 28D-goal-to-pseudo-future-state target construction is the main
 problem.
+
+## 2026-07-01 - Run 24: Oracle-Target Reset-Mixture Diagnostic
+
+Motivation:
+
+Run 23 used deployed reset states but learned-high pseudo future targets. Run
+24 is an upper-bound diagnostic: use teacher/oracle branches to label deployed
+reset states with the actual reachable `t+10` future state. This is not the
+main POC method, but it separates target-quality failure from reset-distribution
+failure.
+
+Dataset:
+
+```text
+data/rl_reachability_debug/full_reset_mixture_oracle_demo4_bc2_run22_2.h5
+```
+
+Mixture:
+
+| Source | Batches | Fraction |
+| --- | ---: | ---: |
+| original demo/teacher local windows | 4 | 50% |
+| Phase-C full BC deployed hierarchy states | 2 | 25% |
+| Run 22 PPO deployed hierarchy states | 2 | 25% |
+
+Oracle-target mixture fixed-bank local result:
+
+| Metric | Run 24 initial | Run 24 trained | Run 24 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 2.5107 | 2.5682 | 6.3283 |
+| p50 terminal distance | 1.2624 | 1.2992 | 4.6700 |
+| p90 terminal distance | 3.8567 | 3.9914 | 10.1929 |
+| p99 terminal distance | 32.9147 | 35.1254 | 46.9478 |
+| fraction improved | 0.9640 | 0.9660 | 0.7339 |
+| action saturation | 0.0036 | 0.0153 | 0.0227 |
+| action L2 | 0.5374 | 0.5625 | 0.5937 |
+
+Training-window diagnostics at the end of Run 24:
+
+| Diagnostic | Value |
+| --- | ---: |
+| train teacher action MAE | 0.3367 |
+| mean return per step | 0.1393 |
+| clip fraction | 0.4868 |
+| explained variance | 0.8088 |
+| action saturation | 0.0381 |
+| NaN count | 0 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.74 | 0.8234 | 0.8251 | 1.5749 | 0.0411 |
+| oracle | Run 24 oracle-target reset PPO | 0.03 | 0.1591 | 0.1953 | 3.0692 | 0.2519 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.4141 | 0.4002 |
+| shuffled oracle | Run 24 oracle-target reset PPO | 0.00 | 0.1137 | 0.1449 | 12.0599 | 0.4193 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.7790 | 0.9057 | 0.1609 | 1.8721 | 0.8643 |
+| Phase-C full BC | Run 22 long PPO | no | 8.7790 | 0.8075 | 0.1752 | 2.1652 | 0.9554 |
+| Phase-C full BC | Run 24 oracle-target reset PPO | no | 8.7790 | 0.8986 | 0.1860 | 2.3411 | 0.9419 |
+| Run 24 oracle-target reset PPO | Phase-C full BC | no | 8.1222 | 4.7505 | 1.6733 | 11.1948 | 0.6230 |
+| Run 24 oracle-target reset PPO | Run 22 long PPO | no | 8.1222 | 2.4427 | 1.2820 | 4.1023 | 0.8672 |
+| Run 24 oracle-target reset PPO | Run 24 oracle-target reset PPO | no | 8.1222 | 2.1048 | 1.0311 | 3.8327 | 0.9082 |
+
+Interpretation:
+
+Oracle targets improve held-rollout full-goal distance over Run 23
+(`4.3716 -> 3.0692`) and give slightly higher oracle success (`0.00 -> 0.03`),
+but the policy remains far below Phase-C full BC (`0.74`). This means target
+quality matters, but it is not the whole problem. The stronger remaining
+failure is action/contact compatibility: Run 24 still has high teacher-action
+MAE and very low task reward despite better full-goal distance.
+
+Next action:
+
+Do not continue plain scratch PPO on reset mixtures as the main line. The next
+useful full-state experiment should constrain the policy structurally toward
+Phase-C BC, for example BC warm start, residual-on-BC, or a KL/BC-prior
+regularizer. A stronger scalar teacher-action penalty is possible as a quick
+ablation, but the previous results suggest simple penalties are a weak tool.

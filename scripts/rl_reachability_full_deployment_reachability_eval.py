@@ -45,6 +45,10 @@ POLICY_PATH_DEFAULTS = {
         "results/incremental/rl_reachability_debug/run23_full_reset_mixture_learned_high_penalty10_u250/"
         "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
     ),
+    "run24_oracle_reset_mixture_ppo": (
+        "results/incremental/rl_reachability_debug/run24_full_reset_mixture_oracle_target_penalty10_u250/"
+        "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
+    ),
 }
 
 
@@ -401,6 +405,7 @@ def main() -> None:
     parser.add_argument("--run21-low", default=POLICY_PATH_DEFAULTS["run21_long_full_ppo"])
     parser.add_argument("--run22-low", default=POLICY_PATH_DEFAULTS["run22_long_full_ppo"])
     parser.add_argument("--run23-low", default=POLICY_PATH_DEFAULTS["run23_reset_mixture_ppo"])
+    parser.add_argument("--run24-low", default=POLICY_PATH_DEFAULTS["run24_oracle_reset_mixture_ppo"])
     parser.add_argument(
         "--output",
         default="results/incremental/rl_reachability_debug/run21_full_deployment_reachability_512.json",
@@ -412,6 +417,7 @@ def main() -> None:
         "run21_long_full_ppo": Path(args.run21_low),
         "run22_long_full_ppo": Path(args.run22_low),
         "run23_reset_mixture_ppo": Path(args.run23_low),
+        "run24_oracle_reset_mixture_ppo": Path(args.run24_low),
     }
     rows = []
     for collector_policy in args.collector_policies:

@@ -231,6 +231,19 @@ bound. If that succeeds, the learned-high 28D-goal-to-pseudo-future-state
 construction is the bottleneck; if it fails, the issue is action/contact
 compatibility or the PPO objective.
 
+Oracle-target reset-mixture diagnostic:
+
+| Policy | Reset target source | Local terminal dist. | Oracle held success | Hold full-goal dist. | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Run 23 reset-mixture PPO | learned high pseudo future | 2.1294 | 0.00 | 4.3716 | 0.2712 |
+| Run 24 reset-mixture PPO | oracle future state diagnostic | 2.5682 | 0.03 | 3.0692 | 0.2519 |
+
+Oracle target states help held-goal distance and give a small success increase,
+but they do not close the gap to Phase-C full BC. That points away from pure
+target-quality failure and toward action/contact compatibility. The next
+full-state path should use BC structurally, for example BC warm start,
+residual-on-BC, or an explicit KL/BC-prior regularizer.
+
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
 

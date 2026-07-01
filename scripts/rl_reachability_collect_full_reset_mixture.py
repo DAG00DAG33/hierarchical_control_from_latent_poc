@@ -15,12 +15,14 @@ from tqdm import trange
 sys.path.append(str(Path(__file__).resolve().parent))
 
 from rl_reachability_goal_full_success_eval import _load_bc_low, _load_high, _low_action
+from rl_reachability_full_deployment_reachability_eval import _oracle_future_state
 from rl_reachability_privileged_tcp_ppo import _obs_state_np
 from rl_reachability_tcp_full_success_eval import _load_rl_low, _to_numpy
 
 from hcl_poc.config import load_config
 from hcl_poc.incremental import _pre_rl_phase_b_goal
 from hcl_poc.models import MLP
+from hcl_poc.rl import _rl_paths, load_ppo_agent
 from hcl_poc.rl_rerun import _make_benchmark_env
 from hcl_poc.utils import Standardizer, default_device, ensure_dir
 
@@ -114,18 +116,30 @@ def _collect_policy_batches(
 ) -> int:
     config = load_config(args.config)
     device = default_device()
-    high_model, high_payload = _load_high(high_path, GOAL_TYPE, device)
+    high_model = None
+    high_payload = None
+    teacher = None
+    if args.target_source == "learned_high":
+        high_model, high_payload = _load_high(high_path, GOAL_TYPE, device)
+    elif args.target_source == "teacher_oracle":
+        teacher = load_ppo_agent(_rl_paths(config).best, device)
+        teacher.eval()
+    else:
+        raise ValueError(f"Unknown target source: {args.target_source}")
     low_kind, low_model, low_payload = _load_low_policy(policy_name, low_path, device)
     horizon = int(args.horizon)
     max_steps = int(args.max_steps)
     num_envs = int(args.num_envs)
     control_freq = int(config.get("control_freq", 20))
     env = _make_benchmark_env(config, num_envs, "state")
+    action_low = torch.as_tensor(env.single_action_space.low, device=device, dtype=torch.float32)
+    action_high = torch.as_tensor(env.single_action_space.high, device=device, dtype=torch.float32)
     action_low_np = np.asarray(env.single_action_space.low, dtype=np.float32)
     action_high_np = np.asarray(env.single_action_space.high, dtype=np.float32)
     try:
         for batch in trange(args.deployed_batches_per_policy, desc=f"collect {source_label}"):
             batch_seed = int(args.seed_start + output_index)
+            branch_reset_seeds = [batch_seed + env_index for env_index in range(num_envs)]
             obs, _info = env.reset(seed=batch_seed)
             states: list[np.ndarray] = []
             raw_actions: list[np.ndarray] = []
@@ -143,14 +157,33 @@ def _collect_policy_batches(
             for step in range(max_steps):
                 state = _obs_state_np(obs)
                 if step % horizon == 0 and step + horizon <= max_steps:
-                    predicted_goal = _predict_high_goal(
-                        high_model,
-                        high_payload,
-                        state,
-                        previous,
-                        device,
-                    )
-                    target_future_state = _goal_to_pseudo_future_state(state, predicted_goal)
+                    if args.target_source == "learned_high":
+                        if high_model is None or high_payload is None:
+                            raise RuntimeError("Missing high-level predictor")
+                        predicted_goal = _predict_high_goal(
+                            high_model,
+                            high_payload,
+                            state,
+                            previous,
+                            device,
+                        )
+                        target_future_state = _goal_to_pseudo_future_state(
+                            state,
+                            predicted_goal,
+                        )
+                    else:
+                        if teacher is None:
+                            raise RuntimeError("Missing teacher policy")
+                        target_future_state = _oracle_future_state(
+                            config,
+                            teacher,
+                            env.unwrapped.get_state_dict(),
+                            branch_reset_seeds,
+                            horizon,
+                            action_low,
+                            action_high,
+                            device,
+                        )
                     valid_starts.append(step)
                 target_future_states[step] = target_future_state
                 remaining_value = max(horizon - (step % horizon), 1)
@@ -254,6 +287,11 @@ def main() -> None:
     parser.add_argument("--demo-batches", type=int, default=8)
     parser.add_argument("--deployed-batches-per-policy", type=int, default=4)
     parser.add_argument("--seed-start", type=int, default=4_520_000)
+    parser.add_argument(
+        "--target-source",
+        choices=["learned_high", "teacher_oracle"],
+        default="learned_high",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     output = Path(args.output)
@@ -273,7 +311,7 @@ def main() -> None:
         meta.attrs["demo_batches"] = int(args.demo_batches)
         meta.attrs["deployed_batches_per_policy"] = int(args.deployed_batches_per_policy)
         meta.attrs["mixture"] = "50% demo, 25% phase_c_full_bc, 25% run22_long_full_ppo"
-        meta.attrs["target_source"] = "learned_high_goal_converted_to_pseudo_future_state"
+        meta.attrs["target_source"] = str(args.target_source)
         meta.attrs["high_checkpoint"] = str(args.high_checkpoint)
         output_index = _copy_demo_batches(
             Path(args.demo_dataset),
