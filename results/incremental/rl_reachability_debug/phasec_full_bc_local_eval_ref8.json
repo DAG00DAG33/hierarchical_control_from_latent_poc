@@ -1,0 +1,18 @@
+{
+  "action_l2_mean": 0.7384920567539437,
+  "action_saturation": 0.1411651611328125,
+  "checkpoint": "artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt",
+  "dataset": "data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5",
+  "distance_reduction_mean": 12.751799583435059,
+  "fraction_improved_from_start": 0.931488037109375,
+  "goal_reach_rate_eps": 0.009552001953125,
+  "goal_type": "full",
+  "horizon": 10,
+  "initial_distance_mean": 14.408127784729004,
+  "local_episodes": 32768,
+  "p50_terminal_distance": 0.13988229632377625,
+  "p90_terminal_distance": 2.08720326423645,
+  "p99_terminal_distance": 29.9695987701416,
+  "references": 8,
+  "terminal_distance_mean": 1.6563270092010498
+}
