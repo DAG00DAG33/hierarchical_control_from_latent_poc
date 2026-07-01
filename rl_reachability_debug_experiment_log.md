@@ -1666,3 +1666,149 @@ therefore not explained by the Run 13 low-level failing to reach learned
 object-pose goals from deployed states. The more likely bottleneck is that the
 learned high-level object-pose goals are not sufficiently task/contact aligned,
 or that object-pose-only subgoals omit task-relevant robot/contact geometry.
+
+## 2026-07-01 - Run 16: Full-State Subgoal PPO
+
+Motivation:
+
+The original hierarchy idea is that the high level should output the desired
+future scene/robot state after the low-level option, not only the future TCP
+position. The TCP-only RL policies improved endpoint reachability without
+improving task success because a good future end-effector position does not
+imply the object/contact state was reached. Run 16 tests the same constrained
+scratch PPO recipe as Run 13, but with the `full` Phase-B goal representation.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type full \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 0.5 \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run16_full_goal_teacher_penalty05_b8_u250 \
+  --force
+```
+
+Local full-goal result:
+
+| Metric | Initial/random | Run 16 PPO | Shuffled-goal PPO |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 7.4381 | 1.9120 | 7.8599 |
+| distance reduction | 6.9701 | 12.4961 | 6.5483 |
+| fraction improved | 0.7801 | 0.9708 | 0.7381 |
+| p50 terminal distance | 4.9755 | 0.6572 | 4.8239 |
+| p90 terminal distance | 15.2186 | 3.7421 | 16.1092 |
+| action saturation | 0.0000 | 0.0058 | 0.0026 |
+| action L2 | 0.0068 | 0.5322 | 0.5378 |
+
+Training diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| updates | 250 |
+| env steps | 10.24M |
+| final train terminal full-goal distance | 3.7594 |
+| mean return per step | 1.0142 |
+| policy KL | 0.0137 |
+| clip fraction | 0.1789 |
+| value loss | 2.5507 |
+| explained variance | 0.9248 |
+| action saturation | 0.0174 |
+| teacher action MAE | 0.2849 |
+| NaN count | 0 |
+| elapsed | 2034s |
+
+The local result is strongly goal-sensitive: the trained policy reduces held
+full-goal distance far more than the shuffled-goal control. This supports the
+core hypothesis that full-state subgoals are a better RL objective than TCP-only
+subgoals.
+
+Learned full-goal high-level:
+
+```bash
+uv run python scripts/rl_reachability_goal_high_predictor.py \
+  --goal-type full \
+  --output artifacts/incremental/rl_reachability_debug/full_goal_high_predictor/seed0/predictor.pt
+```
+
+| Metric | Value |
+| --- | ---: |
+| train episodes | 1800 |
+| validation episodes | 200 |
+| validation full-goal L2 | 0.8019 |
+| validation full-goal MSE | 0.0522 |
+| validation p90 full-goal L2 | 1.5780 |
+| persistence full-goal L2 | 3.8790 |
+| persistence p90 full-goal L2 | 6.2743 |
+
+Held-subgoal full hierarchy evaluation:
+
+This is the primary hierarchy evaluation. The high-level subgoal is held for
+`k=10` primitive steps.
+
+```bash
+uv run python scripts/rl_reachability_goal_full_success_eval.py \
+  --goal-type full \
+  --goal-dim 28 \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle learned shuffled_learned \
+  --high-checkpoint artifacts/incremental/rl_reachability_debug/full_goal_high_predictor/seed0/predictor.pt \
+  --rl-low results/incremental/rl_reachability_debug/run16_full_goal_teacher_penalty05_b8_u250/privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --rl-low-name run16_full_goal_teacher_penalty05_ppo \
+  --output results/incremental/rl_reachability_debug/run16_full_goal_full_success_100.json
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Selected goal initial distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-B full BC | 0.01 | 0.1724 | 0.2226 | 13.0115 | 14.5368 | 0.2710 |
+| oracle | Run 16 full PPO | 0.00 | 0.1239 | 0.1668 | 5.2004 | 10.6121 | 0.3163 |
+| learned | Phase-B full BC | 0.01 | 0.1633 | 0.2115 | 20.9570 | 22.9705 | 0.3146 |
+| learned | Run 16 full PPO | 0.00 | 0.1311 | 0.1729 | 4.3042 | 6.5982 | 0.3486 |
+| shuffled learned | Phase-B full BC | 0.00 | 0.1113 | 0.1669 | 19.9949 | 20.7079 | 0.3937 |
+| shuffled learned | Run 16 full PPO | 0.00 | 0.1073 | 0.1438 | 13.8111 | 15.4410 | 0.4528 |
+
+Interpretation of the held-subgoal result:
+
+Run 16 solves the local held full-goal reachability problem much better than
+the Phase-B full BC low-level in the same full-rollout evaluator, but it still
+does not improve task success. The likely issue is not the full-state subgoal
+idea itself. It is that the scratch PPO policy still drifts too far from the
+teacher/contact action manifold: teacher-action MAE is worse than BC in both
+oracle and learned held-subgoal rollouts, and final task reward is lower despite
+better full-goal distance.
+
+Non-hierarchical one-step replan diagnostic:
+
+For comparison with the old Phase-B table, I also ran `--update-period 1`. This
+replans every primitive step, so it is **not** the hierarchy we are trying to
+test. It is a receding-horizon oracle/high-level diagnostic only.
+
+| Goal source | Low-level policy | Success | Final reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| oracle, update=1 | Phase-B full BC | 0.41 | 0.5759 | 9.0369 | 0.0974 |
+| oracle, update=1 | Run 16 full PPO | 0.00 | 0.1132 | 6.4169 | 0.4106 |
+| learned, update=1 | Phase-B full BC | 0.29 | 0.4863 | 7.2604 | 0.1117 |
+| learned, update=1 | Run 16 full PPO | 0.00 | 0.1116 | 6.0406 | 0.4222 |
+
+This cross-check explains why older Phase-B `full` rows looked much stronger:
+they used `action_horizon_steps=1`. That result is useful historically, but the
+held-subgoal evaluation is the correct metric for the hierarchical controller.
+
+Next action:
+
+Do not abandon full-state goals. Run 16 is the best evidence so far that the
+right subgoal semantics make local reachability meaningful. The next scoped
+full-state experiment should increase the teacher-action penalty or use a
+BC-warm-start/residual version so that full-state reachability improves without
+leaving the contact/task action manifold.

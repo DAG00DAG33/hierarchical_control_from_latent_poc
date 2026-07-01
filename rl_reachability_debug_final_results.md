@@ -123,14 +123,61 @@ terminal distances favor Run 13. This means the low learned-goal task success is
 not simply because Run 13 cannot reach learned object-pose goals from deployed
 states.
 
+### Full-State Subgoals Are Locally Promising but Need Stronger Action-Manifold Control
+
+Run 16 tested the original full-state subgoal idea with scratch PPO and the same
+teacher-action penalty used in Run 13.
+
+Local held-goal reachability strongly improved:
+
+| Metric | Initial/random | Run 16 full PPO | Shuffled-goal PPO |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 7.4381 | 1.9120 | 7.8599 |
+| p50 terminal distance | 4.9755 | 0.6572 | 4.8239 |
+| p90 terminal distance | 15.2186 | 3.7421 | 16.1092 |
+| fraction improved | 0.7801 | 0.9708 | 0.7381 |
+| action saturation | 0.0000 | 0.0058 | 0.0026 |
+
+This is the strongest local evidence that the right subgoal semantics matter:
+full-state goals are much more aligned with the desired option outcome than
+TCP-only endpoint goals.
+
+Held-subgoal full hierarchy evaluation, with the subgoal held for `k=10`, did
+not yet improve task success:
+
+| Goal source | Low-level | Success | Final reward | Hold full-goal dist. | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| oracle | Phase-B full BC | 0.01 | 0.1724 | 13.0115 | 0.2710 |
+| oracle | Run 16 full PPO | 0.00 | 0.1239 | 5.2004 | 0.3163 |
+| learned | Phase-B full BC | 0.01 | 0.1633 | 20.9570 | 0.3146 |
+| learned | Run 16 full PPO | 0.00 | 0.1311 | 4.3042 | 0.3486 |
+| shuffled learned | Phase-B full BC | 0.00 | 0.1113 | 19.9949 | 0.3937 |
+| shuffled learned | Run 16 full PPO | 0.00 | 0.1073 | 13.8111 | 0.4528 |
+
+The full PPO low-level reaches held full-state goals better than BC, but still
+has worse teacher-action drift and worse task reward. The next full-state
+variant should use a stronger teacher-action penalty, BC warm start, or residual
+formulation.
+
+For historical comparison only, update-period-1/full-state replanning reproduces
+the old Phase-B behavior but is not the target hierarchy:
+
+| Goal source | Low-level | Success |
+| --- | --- | ---: |
+| oracle, update=1 | Phase-B full BC | 0.41 |
+| oracle, update=1 | Run 16 full PPO | 0.00 |
+| learned, update=1 | Phase-B full BC | 0.29 |
+| learned, update=1 | Run 16 full PPO | 0.00 |
+
 ## Current Conclusion
 
-Reachability PPO is not a dead end, but the reward/interface matters. Pure TCP
-or pure reachability objectives can learn locally good but task-bad controllers.
-The strongest current result is constrained object-pose PPO with a teacher-action
-penalty: it improves local reachability and beats the matching object-pose BC
-low-level under both oracle and learned object-pose high-level goals.
+Reachability PPO is not a dead end, but the reward/interface and action-manifold
+constraint matter. TCP-only goals were a weak proxy for the desired option
+outcome. Object-pose goals improved task relevance, and full-state goals are the
+most semantically correct local reachability target so far.
 
-The remaining bottleneck is likely high-level goal quality/contact alignment or
-missing robot/contact geometry in the object-pose-only interface, not a simple
-low-level inability to reach learned object-pose goals.
+The strongest task-success result remains constrained object-pose PPO with a
+teacher-action penalty. The strongest local reachability result is now full-state
+PPO, but it still drifts too far from teacher/contact behavior to improve held
+k=10 hierarchy success. The next promising direction is full-state PPO with a
+stronger teacher-action penalty, BC warm start, or residual formulation.

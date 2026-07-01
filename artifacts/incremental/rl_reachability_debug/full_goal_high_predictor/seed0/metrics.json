@@ -1,0 +1,38 @@
+{
+  "condition_dim": 34,
+  "data": {
+    "dataset_path": "data/incremental/phase1_query_dataset.h5",
+    "label_kind": "deterministic_clipped",
+    "requested_train_episodes": 1800,
+    "subset": "successful",
+    "train_episodes": 1800,
+    "train_samples": 53115,
+    "usable_episodes": 2190,
+    "validation_episodes": 200,
+    "validation_samples": 5901
+  },
+  "goal_type": "full",
+  "hidden_dim": 512,
+  "horizon_steps": 10,
+  "low_checkpoint": "artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_tcp.pt",
+  "metadata": {
+    "config": "configs/pusht_incremental.yaml",
+    "control_freq": 20,
+    "controller": "pd_ee_delta_pos",
+    "cuda_available": true,
+    "device": "cuda",
+    "environment": "PushT-v1",
+    "git_commit": "e70609520d06e9a9e7f49133a23fbf4cd2a69a84",
+    "git_dirty": true,
+    "gymnasium_version": "1.3.0",
+    "mani_skill_version": "3.0.1",
+    "torch_version": "2.12.0+cu130"
+  },
+  "method": "rl_reachability_goal_high_predictor",
+  "persistence_goal_l2": 3.8790040016174316,
+  "persistence_goal_p90_l2": 6.274317741394043,
+  "target_dim": 28,
+  "validation_goal_l2": 0.8019189834594727,
+  "validation_goal_mse": 0.05221686512231827,
+  "validation_goal_p90_l2": 1.5779540538787842
+}
