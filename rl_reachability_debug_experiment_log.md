@@ -1954,3 +1954,104 @@ task reward, despite reducing full-goal distance locally. The next scoped PPO
 variant should not change the goal semantics again; it should constrain the
 policy harder, for example with a stronger teacher-action penalty, BC warm
 start, or residual-on-BC formulation.
+
+## 2026-07-01 - Run 20: Recomputed Full-State PPO With Teacher Penalty 1.0
+
+Motivation:
+
+Run 19 used the corrected full-state held-target semantics, but still drifted
+far from the Phase-C full BC action/contact manifold. Run 20 repeats the same
+setup with a stronger teacher-action penalty (`1.0` instead of `0.5`) to test
+whether a simple penalty increase preserves local reachability while reducing
+teacher-action drift.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type full \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 1.0 \
+  --recompute-held-goal-features \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run20_full_goal_recomputed_teacher_penalty10_b8_u250 \
+  --force
+```
+
+Local full-goal result:
+
+| Metric | Initial/random | Run 19 penalty 0.5 | Run 20 penalty 1.0 | Run 20 shuffled |
+| --- | ---: | ---: | ---: | ---: |
+| terminal full-goal distance | 7.4366 | 1.5264 | 1.4703 | 4.4992 |
+| distance reduction | 6.9715 | 12.8817 | 12.9379 | 9.9089 |
+| fraction improved | 0.7559 | 0.9727 | 0.9688 | 0.8101 |
+| p50 terminal distance | 4.9705 | 0.6987 | 0.6708 | 3.2720 |
+| p90 terminal distance | 15.2401 | 3.2267 | 2.9677 | 8.3182 |
+| action saturation | 0.0000 | 0.0221 | 0.0157 | 0.0100 |
+| action L2 | 0.0073 | 0.5404 | 0.5277 | 0.5458 |
+
+Training diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| updates | 250 |
+| env steps | 10.24M |
+| optimizer minibatch steps | 6000 |
+| final train terminal full-goal distance | 2.8243 |
+| mean return per step | 1.0635 |
+| policy KL | 0.0175 |
+| clip fraction | 0.2253 |
+| value loss | 5.3138 |
+| explained variance | 0.8589 |
+| action saturation | 0.0523 |
+| train teacher action MAE | 0.2801 |
+| NaN count | 0 |
+| elapsed | 2018s |
+
+Corrected held-target oracle rollout:
+
+```bash
+uv run python scripts/rl_reachability_goal_full_success_eval.py \
+  --goal-type full \
+  --goal-dim 28 \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle shuffled_oracle \
+  --recompute-held-goal-features \
+  --bc-low artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt \
+  --rl-low results/incremental/rl_reachability_debug/run20_full_goal_recomputed_teacher_penalty10_b8_u250/privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --rl-low-name run20_full_goal_recomputed_teacher_penalty10_ppo \
+  --output results/incremental/rl_reachability_debug/run20_full_goal_recomputed_oracle_success_100.json
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.72 | 0.8105 | 0.8119 | 1.8087 | 0.0414 |
+| oracle | Run 20 recomputed full PPO | 0.00 | 0.1342 | 0.1690 | 4.9881 | 0.2870 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.4041 | 0.4002 |
+| shuffled oracle | Run 20 recomputed full PPO | 0.00 | 0.1131 | 0.1448 | 10.6965 | 0.4034 |
+
+Interpretation:
+
+Increasing the teacher-action penalty from `0.5` to `1.0` slightly improves
+local full-goal reachability and reduces local action saturation, but it does
+not solve the full-rollout task failure. In corrected held-oracle rollout,
+Phase-C full BC still dominates:
+
+```text
+Phase-C full BC: success 0.72, hold distance 1.81, teacher MAE 0.041
+Run 20 full PPO: success 0.00, hold distance 4.99, teacher MAE 0.287
+```
+
+The simple teacher-action penalty is not enough. The next scoped experiment
+should use the Phase-C full BC policy structurally: BC warm start, residual
+policy on top of BC, or a much more conservative KL/behavior-cloning constraint.

@@ -167,10 +167,13 @@ semantics. Local reachability improved, but task success did not:
 | --- | ---: | ---: | ---: | ---: |
 | Phase-C full BC | n/a | 0.69 | 1.6358 | 0.0414 |
 | Run 19 recomputed full PPO | 1.5264 | 0.00 | 5.2944 | 0.2812 |
+| Run 20 recomputed full PPO, teacher penalty 1.0 | 1.4703 | 0.00 | 4.9881 | 0.2870 |
 | Run 19 shuffled-goal local eval | 4.5738 | n/a | n/a | n/a |
 
-The corrected PPO objective is goal-sensitive locally, but the learned policy is
-still far off the teacher/contact action manifold.
+The corrected PPO objective is goal-sensitive locally, and increasing the
+teacher-action penalty from `0.5` to `1.0` slightly improves local distance, but
+the learned policy is still far off the teacher/contact action manifold in
+rollout.
 
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
@@ -193,6 +196,7 @@ The strongest task-success result remains constrained object-pose PPO with a
 teacher-action penalty. The strongest hierarchy baseline is the corrected
 Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across
 seed banks). Recomputed full-state PPO still fails task success because it
-drifts too far from teacher/contact actions. The next promising direction is
-not another goal-semantics change, but stronger action-manifold control:
-stronger teacher-action penalty, BC warm start, or residual-on-BC full-state PPO.
+drifts too far from teacher/contact actions. A simple stronger teacher-action
+penalty was insufficient. The next promising direction is to use the BC policy
+structurally: BC warm start, residual-on-BC full-state PPO, or a stronger
+KL/behavior-cloning constraint.
