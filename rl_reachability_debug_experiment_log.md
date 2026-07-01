@@ -2055,3 +2055,97 @@ Run 20 full PPO: success 0.00, hold distance 4.99, teacher MAE 0.287
 The simple teacher-action penalty is not enough. The next scoped experiment
 should use the Phase-C full BC policy structurally: BC warm start, residual
 policy on top of BC, or a much more conservative KL/behavior-cloning constraint.
+
+## 2026-07-01 - Run 21: Longer Recomputed Full-State PPO
+
+Motivation:
+
+The user pointed out that the recomputed full-state PPO runs may simply need
+much longer training before moving to fine-tuning or residual variants. Run 21
+continues Run 20 for `1000` additional PPO updates, keeping the same corrected
+held-target semantics and teacher-action penalty `1.0`.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 1000 \
+  --horizon 10 \
+  --goal-type full \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 1.0 \
+  --recompute-held-goal-features \
+  --init-checkpoint results/incremental/rl_reachability_debug/run20_full_goal_recomputed_teacher_penalty10_b8_u250/privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 100 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run21_full_goal_recomputed_penalty10_continue_u1000 \
+  --force
+```
+
+Training budget:
+
+| Quantity | Value |
+| --- | ---: |
+| additional PPO updates | 1000 |
+| previous Run 20 updates | 250 |
+| total PPO updates from scratch | 1250 |
+| additional env steps | 40.96M |
+| total env steps from scratch | 51.20M |
+| additional optimizer minibatch steps | 24000 |
+| total optimizer minibatch steps from scratch | 30000 |
+
+Local fixed-bank result:
+
+| Metric | Run 20 | Run 21 | Run 21 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 1.4703 | 1.8744 | 4.7948 |
+| p50 terminal distance | 0.6708 | 0.5893 | 3.3125 |
+| p90 terminal distance | 2.9677 | 2.9423 | 8.3058 |
+| p99 terminal distance | 16.5195 | 30.0081 | 40.8741 |
+| fraction improved | 0.9688 | 0.9764 | 0.8072 |
+| action saturation | 0.0157 | 0.0096 | 0.0058 |
+| action L2 | 0.5277 | 0.5367 | 0.5397 |
+
+Training-window diagnostics at the end of Run 21:
+
+| Diagnostic | Value |
+| --- | ---: |
+| global env steps | 51.20M |
+| train terminal full-goal distance | 0.2055 |
+| train teacher action MAE | 0.1038 |
+| mean return per step | 0.3363 |
+| policy KL | 0.0463 |
+| clip fraction | 0.3957 |
+| value loss | 0.1279 |
+| explained variance | 0.9826 |
+| action saturation | 0.0005 |
+| NaN count | 0 |
+| elapsed | 8387s |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.72 | 0.8101 | 0.8115 | 1.6113 | 0.0420 |
+| oracle | Run 21 long PPO | 0.04 | 0.2172 | 0.2408 | 4.4384 | 0.2387 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3987 | 0.4002 |
+| shuffled oracle | Run 21 long PPO | 0.00 | 0.1187 | 0.1431 | 12.2622 | 0.4025 |
+
+Interpretation:
+
+Longer training helps, but not nearly enough yet. Compared with Run 20, Run 21
+reduces rollout teacher-action MAE (`0.287 -> 0.239`), improves hold full-goal
+distance (`4.99 -> 4.44`), and produces the first nonzero full-state PPO oracle
+held success (`0.04`). The fixed-bank local mean distance gets worse because
+the tail worsens, but median/P90 improve slightly.
+
+This supports continuing the scratch PPO training before moving to fine-tuning:
+the policy is not saturated. However, it remains far behind Phase-C full BC
+(`0.72` success, `0.042` teacher MAE), so if an 8x-style continuation still
+fails, the next step should be BC warm start or residual-on-BC.
