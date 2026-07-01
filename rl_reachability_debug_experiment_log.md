@@ -1250,3 +1250,105 @@ policy still does not reproduce the task-relevant interaction strategy, even
 when it reaches object-pose goals locally. The next useful variants are either
 a much stronger action-distribution constraint/warm start, or a reward/critic
 that directly scores task progress and contact dynamics during the branch.
+
+## 2026-07-01 - Run 10: Stronger Teacher-Action Penalty
+
+Motivation:
+
+Run 9 used a weak action penalty (`0.05`) and reduced teacher-action drift but
+still got zero full-task success. Run 10 increases the teacher-action penalty
+to `0.2` while keeping the object-pose reward and training budget fixed.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type object_pose \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 0.2 \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run10_object_pose_teacher_penalty02_b8_u250 \
+  --force
+```
+
+Local object-pose eval:
+
+| Metric | Run 8 no penalty | Run 9 penalty 0.05 | Run 10 penalty 0.2 |
+| --- | ---: | ---: | ---: |
+| terminal object-pose distance | 0.1517 | 0.0728 | 0.0527 |
+| distance reduction | 0.4380 | 0.5169 | 0.5370 |
+| reach under epsilon 0.0025 | 0.3160 | 0.4074 | 0.4334 |
+| p50 terminal distance | 0.0120 | 0.0055 | 0.0041 |
+| p90 terminal distance | 0.4894 | 0.1536 | 0.1062 |
+| p99 terminal distance | 1.9135 | 1.2180 | 0.9304 |
+| action saturation | 0.1214 | 0.1197 | 0.1207 |
+| action L2 | 0.7342 | 0.5813 | 0.6151 |
+| final train teacher-action MAE | n/a | 0.2723 | 0.2324 |
+
+Final PPO diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| updates | 250 |
+| env steps | 10.24M |
+| final train terminal object-pose distance | 0.1429 |
+| final train reach under epsilon | 0.1382 |
+| mean return per step | 0.0304 |
+| policy KL | 0.0158 |
+| clip fraction | 0.2081 |
+| value loss | 0.0393 |
+| explained variance | 0.8546 |
+| action saturation | 0.2570 |
+| NaN count | 0 |
+| elapsed | 2025s |
+
+Oracle object-pose full rollout:
+
+```bash
+uv run python scripts/rl_reachability_object_pose_full_success_eval.py \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle shuffled_oracle \
+  --run8-low results/incremental/rl_reachability_debug/run10_object_pose_teacher_penalty02_b8_u250/privileged_object_pose_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --run8-low-name run10_object_pose_teacher_penalty02_ppo \
+  --output results/incremental/rl_reachability_debug/run10_object_pose_teacher_penalty02_full_success_100.json
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Mean length | Hold object-pose distance | Teacher action MAE | Action L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle object-pose | Phase-B object-pose BC | 0.17 | 0.3679 | 0.3849 | 90.3 | 0.2935 | 0.1851 | 0.4794 |
+| oracle object-pose | Run 10 teacher-penalty PPO | 0.12 | 0.2982 | 0.3293 | 94.3 | 0.2558 | 0.2406 | 0.3585 |
+| shuffled oracle object-pose | Phase-B object-pose BC | 0.02 | 0.1822 | 0.2254 | 99.0 | 1.3863 | 0.3147 | 0.5551 |
+| shuffled oracle object-pose | Run 10 teacher-penalty PPO | 0.00 | 0.1479 | 0.1665 | 100.0 | 1.6080 | 0.3660 | 0.2994 |
+
+Interpretation:
+
+Run 10 is the first scratch RL low-level variant in this debug sequence that
+recovers nontrivial full-task success: `0.12` under oracle object-pose goals.
+It still trails the supervised object-pose BC baseline (`0.17`) and remains
+sensitive to shuffled object-pose goals (`0.00` success), but this is a
+meaningful improvement over Runs 8 and 9, which both had `0.00` success.
+
+The key difference is not just better object-pose distance. Run 10 also lowers
+teacher-action drift enough to preserve some task interaction behavior while
+still improving local reachability. This supports the current diagnosis:
+
+```text
+reachability reward needs an action-distribution/task-interaction constraint;
+pure local goal reaching optimizes the wrong controller behavior.
+```
+
+Next useful variants:
+
+- sweep stronger penalties around `0.2` (for example `0.1`, `0.3`, `0.5`);
+- warm-start from the object-pose BC low level instead of scratch;
+- add task reward or contact/progress reward during local branches.
