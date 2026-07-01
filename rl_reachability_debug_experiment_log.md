@@ -1836,3 +1836,121 @@ time-conditioned full-state BC is very strong under held oracle goals. The next
 scoped RL experiment should retrain/evaluate full-state PPO with the same
 held-target/recomputed-feature semantics as Phase C, rather than holding the raw
 Phase-B `full` vector fixed.
+
+## 2026-07-01 - Run 19: Full-State PPO With Recomputed Held-Goal Features
+
+Motivation:
+
+Run 16 trained PPO with a fixed raw `full` goal vector. That was inconsistent
+with the Phase-C held-target semantics because `full` contains error-to-go
+velocity/rate features. Run 19 retrains full-state PPO while holding the target
+future state fixed and recomputing the full-goal feature vector at every
+primitive step from the current state and remaining time.
+
+Code change:
+
+`scripts/rl_reachability_privileged_tcp_ppo.py` now supports:
+
+```text
+--recompute-held-goal-features
+```
+
+When enabled:
+
+- local reset stores the target future state;
+- each primitive step recomputes `goal = f(current_state, target_future_state, remaining_steps)`;
+- goal normalizers are fit over all offsets `1..k`, matching Phase-C style data;
+- shuffled-goal eval shuffles the held target future state, not only the raw goal vector.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type full \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 0.5 \
+  --recompute-held-goal-features \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run19_full_goal_recomputed_teacher_penalty05_b8_u250 \
+  --force
+```
+
+Local full-goal result:
+
+| Metric | Initial/random | Run 19 PPO | Shuffled-goal PPO |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 7.4366 | 1.5264 | 4.5738 |
+| distance reduction | 6.9715 | 12.8817 | 9.8344 |
+| fraction improved | 0.7559 | 0.9727 | 0.8095 |
+| p50 terminal distance | 4.9705 | 0.6987 | 3.2515 |
+| p90 terminal distance | 15.2401 | 3.2267 | 8.6473 |
+| action saturation | 0.0000 | 0.0221 | 0.0202 |
+| action L2 | 0.0073 | 0.5404 | 0.5665 |
+
+Training diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| updates | 250 |
+| env steps | 10.24M |
+| recomputed goal normalizer samples | 16.71M |
+| final train terminal full-goal distance | 2.8175 |
+| mean return per step | 1.1971 |
+| policy KL | 0.0154 |
+| clip fraction | 0.1972 |
+| value loss | 3.9498 |
+| explained variance | 0.8322 |
+| action saturation | 0.0712 |
+| teacher action MAE | 0.2960 |
+| NaN count | 0 |
+| elapsed | 2006s |
+
+Corrected held-target oracle rollout:
+
+```bash
+uv run python scripts/rl_reachability_goal_full_success_eval.py \
+  --goal-type full \
+  --goal-dim 28 \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle shuffled_oracle \
+  --recompute-held-goal-features \
+  --bc-low artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt \
+  --rl-low results/incremental/rl_reachability_debug/run19_full_goal_recomputed_teacher_penalty05_b8_u250/privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --rl-low-name run19_full_goal_recomputed_teacher_penalty05_ppo \
+  --output results/incremental/rl_reachability_debug/run19_full_goal_recomputed_oracle_success_100.json
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.69 | 0.7897 | 0.7918 | 1.6358 | 0.0414 |
+| oracle | Run 19 recomputed full PPO | 0.00 | 0.1587 | 0.1879 | 5.2944 | 0.2812 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3724 | 0.4002 |
+| shuffled oracle | Run 19 recomputed full PPO | 0.00 | 0.1141 | 0.1476 | 10.2356 | 0.4011 |
+
+Interpretation:
+
+The corrected full-state PPO objective improves local reachability and preserves
+goal sensitivity, but it still does not produce a task-useful low-level policy.
+The comparison against the correct Phase-C full BC baseline is stark:
+
+```text
+Phase-C full BC oracle held success: 0.69
+Run 19 recomputed full PPO oracle held success: 0.00
+```
+
+The main failure mode is still action/contact-manifold drift. Run 19 has much
+higher teacher-action MAE than Phase-C BC (`0.281` vs `0.041`) and much worse
+task reward, despite reducing full-goal distance locally. The next scoped PPO
+variant should not change the goal semantics again; it should constrain the
+policy harder, for example with a stronger teacher-action penalty, BC warm
+start, or residual-on-BC formulation.

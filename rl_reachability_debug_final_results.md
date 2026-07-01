@@ -160,6 +160,18 @@ it was an evaluator/baseline mismatch. Full-state subgoals are not weak. The
 time-conditioned full BC baseline is strong under the intended held-subgoal
 hierarchy.
 
+Run 19 retrained full-state PPO with the same recomputed held-target feature
+semantics. Local reachability improved, but task success did not:
+
+| Policy | Local terminal full-goal dist. | Oracle held success | Hold full-goal dist. | Teacher action MAE |
+| --- | ---: | ---: | ---: | ---: |
+| Phase-C full BC | n/a | 0.69 | 1.6358 | 0.0414 |
+| Run 19 recomputed full PPO | 1.5264 | 0.00 | 5.2944 | 0.2812 |
+| Run 19 shuffled-goal local eval | 4.5738 | n/a | n/a | n/a |
+
+The corrected PPO objective is goal-sensitive locally, but the learned policy is
+still far off the teacher/contact action manifold.
+
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
 
@@ -178,8 +190,9 @@ outcome. Object-pose goals improved task relevance, and full-state goals are the
 most semantically correct local reachability target so far.
 
 The strongest task-success result remains constrained object-pose PPO with a
-teacher-action penalty. The strongest hierarchy baseline is now the corrected
-Phase-C time-conditioned full-state BC (`0.74` oracle held success). The next
-promising direction is to retrain full-state PPO using the same held-target /
-recomputed-feature semantics as Phase C, then compare against this corrected
-baseline.
+teacher-action penalty. The strongest hierarchy baseline is the corrected
+Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across
+seed banks). Recomputed full-state PPO still fails task success because it
+drifts too far from teacher/contact actions. The next promising direction is
+not another goal-semantics change, but stronger action-manifold control:
+stronger teacher-action penalty, BC warm start, or residual-on-BC full-state PPO.

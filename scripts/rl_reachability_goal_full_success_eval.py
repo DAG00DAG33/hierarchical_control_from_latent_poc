@@ -56,8 +56,35 @@ def _load_high(path: Path, goal_type: str, device: torch.device) -> tuple[nn.Mod
     return model, payload
 
 
+def _goals_to_targets(
+    current_state: np.ndarray,
+    target_future_state: np.ndarray,
+    remaining_steps: np.ndarray,
+    control_freq: int,
+    goal_type: str,
+) -> np.ndarray:
+    remaining = np.asarray(remaining_steps, dtype=np.int32).reshape(-1)
+    goals = np.zeros((len(current_state), _pre_rl_phase_b_goal(
+        current_state[:1],
+        target_future_state[:1],
+        int(max(1, remaining[0] if len(remaining) else 1)),
+        control_freq,
+        goal_type,
+    ).shape[-1]), dtype=np.float32)
+    for value in np.unique(remaining):
+        mask = remaining == value
+        goals[mask] = _pre_rl_phase_b_goal(
+            current_state[mask],
+            target_future_state[mask],
+            int(max(1, value)),
+            control_freq,
+            goal_type,
+        ).astype(np.float32)
+    return goals
+
+
 @torch.inference_mode()
-def _oracle_goal(
+def _oracle_future_state(
     config: Any,
     teacher: Any,
     state_dict: dict[str, Any],
@@ -67,7 +94,6 @@ def _oracle_goal(
     control_freq: int,
     action_low: torch.Tensor,
     action_high: torch.Tensor,
-    goal_type: str,
     device: torch.device,
 ) -> np.ndarray:
     branch_env = _make_state_env(
@@ -85,14 +111,7 @@ def _oracle_goal(
             state = torch.from_numpy(_obs_state_np(obs)).to(device).float()
             action = torch.clamp(teacher.actor_mean(state), action_low, action_high)
             obs, _reward, _terminated, _truncated, _info = branch_env.step(action)
-        future_state = _obs_state_np(obs)
-        return _pre_rl_phase_b_goal(
-            current_state,
-            future_state,
-            horizon,
-            control_freq,
-            goal_type,
-        ).astype(np.float32)
+        return _obs_state_np(obs).astype(np.float32)
     finally:
         branch_env.close()
 
@@ -116,6 +135,11 @@ def _low_action(
         cond_norm = Standardizer.from_state_dict(entry["cond_norm"])
         previous_norm = action_norm.transform(previous_action_raw)
         condition = np.concatenate([state, goal, previous_norm], axis=-1).astype(np.float32)
+        if bool(entry.get("time_conditioned", False)):
+            condition = np.concatenate(
+                [condition, (remaining / horizon)[:, None]],
+                axis=-1,
+            ).astype(np.float32)
         normalized = low_model(
             torch.from_numpy(cond_norm.transform(condition)).to(device).float()
         ).cpu().numpy()
@@ -192,6 +216,11 @@ def evaluate_policy(
     hold_goal_distances: list[float] = []
     selected_goal_initial_distances: list[float] = []
     high_decisions = 0
+    if args.recompute_held_goal_features and goal_source in {"learned", "shuffled_learned"}:
+        raise ValueError(
+            "--recompute-held-goal-features currently supports oracle/shuffled_oracle "
+            "goal sources, where the evaluator has the full target future state."
+        )
     progress = trange(args.episodes, desc=f"{low_kind} {goal_type} {goal_source}")
     try:
         for batch_start in range(0, args.episodes, num_envs):
@@ -207,6 +236,7 @@ def evaluate_policy(
                 else None
             )
             goal = np.zeros((batch_envs, int(args.goal_dim)), dtype=np.float32)
+            target_future_state = np.zeros((batch_envs, 31), dtype=np.float32)
             countdown = np.zeros(batch_envs, dtype=np.int32)
             active = np.ones(batch_envs, dtype=bool)
             success_once = np.zeros(batch_envs, dtype=bool)
@@ -218,7 +248,7 @@ def evaluate_policy(
                 replan = active & (countdown <= 0)
                 if np.any(replan):
                     if goal_source in {"oracle", "shuffled_oracle"}:
-                        selected = _oracle_goal(
+                        selected_future_state = _oracle_future_state(
                             config,
                             teacher,
                             env.unwrapped.get_state_dict(),
@@ -228,9 +258,19 @@ def evaluate_policy(
                             control_freq,
                             action_low,
                             action_high,
-                            goal_type,
                             device,
                         )
+                        if goal_source.startswith("shuffled_"):
+                            selected_future_state = selected_future_state[
+                                np.roll(np.arange(batch_envs), 1)
+                            ]
+                        selected = _pre_rl_phase_b_goal(
+                            state,
+                            selected_future_state,
+                            horizon,
+                            control_freq,
+                            goal_type,
+                        ).astype(np.float32)
                     elif goal_source in {"learned", "shuffled_learned"}:
                         if (
                             high_model is None
@@ -254,9 +294,13 @@ def evaluate_policy(
                         ).astype(np.float32)
                     else:
                         raise ValueError(f"Unknown goal_source: {goal_source}")
-                    if goal_source.startswith("shuffled_"):
+                    if goal_source.startswith("shuffled_") and goal_source not in {
+                        "shuffled_oracle"
+                    }:
                         selected = selected[np.roll(np.arange(batch_envs), 1)]
                     goal[replan] = selected[replan]
+                    if goal_source in {"oracle", "shuffled_oracle"}:
+                        target_future_state[replan] = selected_future_state[replan]
                     selected_goal_initial_distances.extend(
                         _goal_distance(
                             state[replan],
@@ -269,6 +313,14 @@ def evaluate_policy(
                     countdown[replan] = update_period
                     high_decisions += int(np.sum(replan))
                 remaining = np.maximum(countdown, 1).astype(np.float32)
+                if args.recompute_held_goal_features:
+                    goal[active] = _goals_to_targets(
+                        state[active],
+                        target_future_state[active],
+                        remaining[active].astype(np.int32),
+                        control_freq,
+                        goal_type,
+                    )
                 raw_action = _low_action(
                     low_kind,
                     low_model,
@@ -312,10 +364,21 @@ def evaluate_policy(
                 next_state = _obs_state_np(obs)
                 completed_hold = active & (countdown <= 0)
                 if np.any(completed_hold):
+                    completed_goal = (
+                        _goals_to_targets(
+                            next_state[completed_hold],
+                            target_future_state[completed_hold],
+                            np.ones(int(np.sum(completed_hold)), dtype=np.int32),
+                            control_freq,
+                            goal_type,
+                        )
+                        if args.recompute_held_goal_features
+                        else goal[completed_hold]
+                    )
                     hold_goal_distances.extend(
                         _goal_distance(
                             next_state[completed_hold],
-                            goal[completed_hold],
+                            completed_goal,
                             goal_type,
                             horizon,
                             control_freq,
@@ -381,6 +444,7 @@ def main() -> None:
     parser.add_argument("--seed-start", type=int, default=2_380_000)
     parser.add_argument("--horizon", type=int, default=10)
     parser.add_argument("--update-period", type=int)
+    parser.add_argument("--recompute-held-goal-features", action="store_true")
     parser.add_argument("--high-checkpoint")
     parser.add_argument(
         "--bc-low",
