@@ -1607,3 +1607,62 @@ Next scoped debugging if learned-goal success stays low:
    Phase-B object-pose BC low-level.
 3. Only continue to new plan experiments after this rollout-state reachability
    gap is explained.
+
+## 2026-07-01 - Run 15: Object-Pose Reachability from Deployed States
+
+Motivation:
+
+Run 14 learned-goal task success remained low even though Run 13 PPO beat the
+BC low-level under learned high-level goals. This diagnostic follows the user
+requested check: collect states produced by deploying the architecture, then
+branch both candidate low-level policies from those exact states toward the same
+learned high-level object-pose goals.
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_object_pose_deployment_reachability_eval.py \
+  --decisions 512 \
+  --num-envs 16 \
+  --output results/incremental/rl_reachability_debug/run15_object_pose_deployment_reachability_512.json
+```
+
+Setup:
+
+- high-level goal source: learned object-pose predictor from Run 14
+- collectors: Phase-B object-pose BC, Run 13 penalty `0.5` PPO
+- candidates branched from each collected replan state: same two low-levels
+- decisions per collector: about `512`
+- branch horizon: `10` primitive steps
+- reach epsilon: object-pose squared distance `<= 0.01`
+- shuffled learned goals are included as a goal-use control
+
+Results:
+
+| Collector trajectory | Candidate low-level | Shuffled | Initial dist. | Terminal dist. | Reach eps | Improved | P90 terminal | Action sat. |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-B BC | Phase-B BC | no | 0.4784 | 0.2757 | 0.404 | 0.584 | 0.8362 | 0.046 |
+| Phase-B BC | Run 13 PPO | no | 0.4784 | 0.2358 | 0.429 | 0.594 | 0.7265 | 0.101 |
+| Phase-B BC | Phase-B BC | yes | 1.2610 | 1.0610 | 0.0716 | 0.569 | 3.1982 | 0.089 |
+| Phase-B BC | Run 13 PPO | yes | 1.2610 | 1.0749 | 0.0716 | 0.590 | 3.2240 | 0.105 |
+| Run 13 PPO | Phase-B BC | no | 0.3859 | 0.3042 | 0.313 | 0.571 | 1.0070 | 0.036 |
+| Run 13 PPO | Run 13 PPO | no | 0.3859 | 0.2347 | 0.301 | 0.557 | 0.7251 | 0.070 |
+| Run 13 PPO | Phase-B BC | yes | 1.2043 | 1.0852 | 0.0971 | 0.536 | 3.1207 | 0.059 |
+| Run 13 PPO | Run 13 PPO | yes | 1.2043 | 1.0866 | 0.0835 | 0.551 | 3.1473 | 0.077 |
+
+Interpretation:
+
+From identical deployed architecture states and identical learned high-level
+goals, Run 13 PPO has better mean and P90 object-pose terminal distance than
+the Phase-B object-pose BC low-level. This holds both on BC-collected states
+and on Run-13-collected states. The threshold reach-rate metric is mixed on
+Run-13-collected states (`0.301` vs `0.313`), but the distributional metrics
+favor Run 13 (`0.2347` mean terminal distance vs `0.3042`, and `0.7251` P90 vs
+`1.0070`).
+
+Shuffled learned goals are much harder and have low reach rates, so the
+diagnostic still shows goal sensitivity. The remaining low task success is
+therefore not explained by the Run 13 low-level failing to reach learned
+object-pose goals from deployed states. The more likely bottleneck is that the
+learned high-level object-pose goals are not sufficiently task/contact aligned,
+or that object-pose-only subgoals omit task-relevant robot/contact geometry.
