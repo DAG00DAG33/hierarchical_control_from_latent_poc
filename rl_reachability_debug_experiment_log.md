@@ -830,3 +830,85 @@ that make the BC/teacher hierarchy solve PushT. Longer endpoint-only PPO is
 unlikely to fix task success unless the reward or diagnostic target includes
 task-relevant interaction state, stronger goal selectivity, or imitation-style
 constraints on the low-level behavior.
+
+## 2026-07-01 - Run 7: Low-Level Input Ablation Audit
+
+Motivation:
+
+The plan requires checking whether the low-level controller is actually using
+live observations, previous action, remaining time, and goals. Earlier results
+showed near-zero task success despite strong local TCP endpoint reachability,
+so the key question is whether the RL policy ignores goals or whether it
+follows TCP goals in a task-misaligned way.
+
+Diagnostic:
+
+`scripts/rl_reachability_low_input_ablation.py` reuses the local reset-bank
+evaluation but runs each low-level policy under controlled input ablations:
+
+- live inputs
+- cached start observation
+- cached previous action
+- constant remaining time
+- shuffled goal
+- shuffled observation
+
+For shuffled goals it reports both distance to the original reference goal and
+distance to the commanded shuffled goal. This avoids conflating "goal ignored"
+with "policy followed the wrong goal."
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_low_input_ablation.py \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --run2-low results/incremental/rl_reachability_debug/run6_true_tcp_b8_u1000/privileged_tcp_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --run5-low results/incremental/rl_reachability_debug/run7_dpsi_progress_b8_u1000/privileged_tcp_ppo_progress_n4096_seed0/latest.pt \
+  --eval-refs 2 \
+  --output results/incremental/rl_reachability_debug/run7_low_input_ablation_b8_ref2.json
+```
+
+Results on the same two b8 references used by the local comparison:
+
+| Policy | Ablation | Original-goal reach | Original terminal sq dist | Commanded-goal reach | Commanded terminal sq dist | Action delta from live | Saturation |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BC 1800 | live | 0.9834 | 0.000261 | 0.9834 | 0.000261 | 0.0000 | 0.2337 |
+| BC 1800 | cached start observation | 0.0260 | 0.062012 | 0.0260 | 0.062012 | 0.9583 | 0.4874 |
+| BC 1800 | cached previous action | 0.7197 | 0.002116 | 0.7197 | 0.002116 | 0.1937 | 0.2348 |
+| BC 1800 | constant remaining time | 0.8220 | 0.001693 | 0.8220 | 0.001693 | 0.0854 | 0.1965 |
+| BC 1800 | shuffled goal | 0.2975 | 0.013693 | 0.2285 | 0.011329 | 0.3581 | 0.1949 |
+| BC 1800 | shuffled observation | 0.0415 | 0.058948 | 0.0415 | 0.058948 | 1.1211 | 0.3068 |
+| Run 6 true-TCP | live | 0.9752 | 0.000460 | 0.9752 | 0.000460 | 0.0000 | 0.3238 |
+| Run 6 true-TCP | cached start observation | 0.0361 | 0.037900 | 0.0361 | 0.037900 | 1.3250 | 0.8431 |
+| Run 6 true-TCP | cached previous action | 0.9192 | 0.000964 | 0.9192 | 0.000964 | 0.2363 | 0.3466 |
+| Run 6 true-TCP | constant remaining time | 0.7034 | 0.002140 | 0.7034 | 0.002140 | 0.3467 | 0.3022 |
+| Run 6 true-TCP | shuffled goal | 0.0944 | 0.036725 | 0.9205 | 0.001013 | 1.3656 | 0.3304 |
+| Run 6 true-TCP | shuffled observation | 0.0260 | 0.074295 | 0.0260 | 0.074295 | 1.6906 | 0.7502 |
+| Run 7 progress D_psi | live | 0.9849 | 0.000336 | 0.9849 | 0.000336 | 0.0000 | 0.2693 |
+| Run 7 progress D_psi | cached start observation | 0.0375 | 0.027410 | 0.0375 | 0.027410 | 1.0879 | 0.7717 |
+| Run 7 progress D_psi | cached previous action | 0.8840 | 0.001133 | 0.8840 | 0.001133 | 0.2116 | 0.2586 |
+| Run 7 progress D_psi | constant remaining time | 0.7632 | 0.001880 | 0.7632 | 0.001880 | 0.2540 | 0.2361 |
+| Run 7 progress D_psi | shuffled goal | 0.0923 | 0.036822 | 0.9237 | 0.000930 | 1.1665 | 0.2729 |
+| Run 7 progress D_psi | shuffled observation | 0.0361 | 0.059667 | 0.0361 | 0.059667 | 1.4048 | 0.6189 |
+
+Interpretation:
+
+The low-level policies do use live observations. Caching the start observation
+or shuffling observations collapses reachability for all policies, especially
+the RL policies where action saturation rises sharply under bad observations.
+Previous action and remaining-time conditioning matter, but less than the
+current observation and goal.
+
+The RL policies are not simply goal-ignoring on the local TCP objective. When
+given shuffled goals, original-goal reach drops to about `0.09`, while
+commanded shuffled-goal reach stays high (`0.92` for Run 6 true-TCP and
+`0.924` for Run 7 progress D_psi). This means the RL low levels are strongly
+able to chase arbitrary TCP endpoint commands.
+
+That result sharpens the failure diagnosis: endpoint-goal conditioning works
+locally, but it is too permissive and task-misaligned. BC is less capable of
+reaching arbitrary shuffled endpoints, yet succeeds in the full task. The RL
+policies are better short-horizon TCP servos but worse task controllers.
+Future RL rewards should therefore include task-relevant object/contact state
+or an imitation/action-distribution constraint, rather than only more
+endpoint-distance optimization.
