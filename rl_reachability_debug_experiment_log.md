@@ -1352,3 +1352,83 @@ Next useful variants:
 - sweep stronger penalties around `0.2` (for example `0.1`, `0.3`, `0.5`);
 - warm-start from the object-pose BC low level instead of scratch;
 - add task reward or contact/progress reward during local branches.
+
+## 2026-07-01 - Run 11/12: Teacher-Action Penalty Sweep
+
+Motivation:
+
+Run 10 recovered nontrivial task success with penalty `0.2`. Runs 11 and 12
+bracket that setting with penalties `0.1` and `0.3` while keeping the same
+object-pose reward, PPO setup, dataset, and training budget.
+
+Training commands:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type object_pose \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight {0.1 or 0.3} \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run{11 or 12}_object_pose_teacher_penalty*_b8_u250 \
+  --force
+```
+
+Local object-pose eval:
+
+| Run | Penalty | Terminal distance | Reach | P90 distance | Shuffled terminal distance | Train teacher MAE | Clip fraction | Eval action L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Run 8 | 0.00 | 0.1517 | 0.3160 | 0.4894 | 0.3422 | n/a | 0.1132 | 0.7342 |
+| Run 9 | 0.05 | 0.0728 | 0.4074 | 0.1536 | 0.3271 | 0.2723 | 0.1580 | 0.5813 |
+| Run 11 | 0.10 | 0.0646 | 0.4311 | 0.1265 | 0.3063 | 0.2510 | 0.2050 | 0.6026 |
+| Run 10 | 0.20 | 0.0527 | 0.4334 | 0.1062 | 0.2813 | 0.2324 | 0.2081 | 0.6151 |
+| Run 12 | 0.30 | 0.0426 | 0.4702 | 0.0790 | 0.2613 | 0.1836 | 0.2002 | 0.6695 |
+
+Oracle object-pose full rollout:
+
+| Run | Low-level policy | Success | Final reward | Max reward | Hold object-pose distance | Teacher action MAE | Action L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-B baseline | object-pose BC | 0.16-0.18 | 0.355-0.374 | 0.372-0.391 | 0.268-0.301 | 0.178-0.190 | 0.472-0.486 |
+| Run 8 | no-penalty PPO | 0.00 | 0.1407 | 0.1544 | 0.2606 | 0.5181 | 0.5940 |
+| Run 9 | penalty 0.05 PPO | 0.00 | 0.1546 | 0.1979 | 0.3184 | 0.2939 | 0.3575 |
+| Run 11 | penalty 0.10 PPO | 0.03 | 0.2285 | 0.2506 | 0.2650 | 0.2590 | 0.3164 |
+| Run 10 | penalty 0.20 PPO | 0.12 | 0.2982 | 0.3293 | 0.2558 | 0.2406 | 0.3585 |
+| Run 12 | penalty 0.30 PPO | 0.16 | 0.3533 | 0.3720 | 0.2073 | 0.1766 | 0.3761 |
+
+Run 12 shuffled-goal full rollout:
+
+| Goal source | Policy | Success | Final reward | Max reward | Hold object-pose distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| shuffled oracle object-pose | Phase-B object-pose BC | 0.02 | 0.1848 | 0.2296 | 1.4296 | 0.3272 |
+| shuffled oracle object-pose | Run 12 penalty 0.30 PPO | 0.00 | 0.1514 | 0.1803 | 1.5550 | 0.3250 |
+
+Interpretation:
+
+The penalty sweep shows a clear monotonic trend over the tested range:
+
+```text
+higher teacher-action penalty -> lower teacher-action drift,
+better local object-pose reachability,
+and better oracle-goal full-task success.
+```
+
+Run 12 is the best scratch RL low-level so far. With oracle object-pose goals
+it matches the Phase-B object-pose BC baseline's success (`0.16`) while having
+lower hold object-pose distance (`0.2073` versus `0.2819` in the same eval)
+and comparable teacher-action MAE (`0.1766` versus `0.1814`). Shuffled
+object-pose goals still remove success, so the full rollout behavior is goal
+sensitive.
+
+This is the strongest evidence so far that PPO can improve local reachability
+without destroying task behavior, but only when constrained strongly enough
+toward the teacher/action manifold. The next scoped experiment should test
+whether a warm start from the object-pose BC baseline or an even stronger
+penalty (`0.5`) can surpass the BC baseline rather than merely match it.
