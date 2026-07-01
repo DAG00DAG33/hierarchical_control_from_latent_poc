@@ -253,11 +253,13 @@ BC-structured reset-mixture diagnostic:
 | Run 23 reset-mixture PPO | 50% demo, 25% BC-deployed, 25% PPO-deployed | 2.1294 | 0.00 | 4.3716 | 0.2712 |
 | Run 24 oracle-target reset PPO | reset mixture, oracle future-state diagnostic | 2.5682 | 0.03 | 3.0692 | 0.2519 |
 | Run 25 BC-warm-start reset PPO | reset mixture, BC-warm-started actor | 3.6321 | 0.16 | 2.3472 | 0.1314 |
+| Run 26 BC-prior reset PPO | reset mixture, BC warm start + BC-prior loss | 3.6656 | 0.21 | 2.7468 | 0.1241 |
 
 Run 25 is the first full-state PPO variant with meaningful held-subgoal task
-recovery, but it is still far below the Phase-C full BC baseline. The result
-supports the reset-distribution-shift hypothesis, while also showing that reset
-coverage alone is insufficient: the PPO policy needs stronger BC/action-manifold
+recovery, and Run 26 improves it further with an explicit BC-prior loss. Both
+are still far below the Phase-C full BC baseline. The result supports the
+reset-distribution-shift hypothesis, while also showing that reset coverage
+alone is insufficient: the PPO policy needs stronger BC/action-manifold
 structure.
 
 Run 25 deployment-state branch reachability:
@@ -267,15 +269,20 @@ Run 25 deployment-state branch reachability:
 | Phase-C full BC | Phase-C full BC | 0.8697 | 0.1672 | 1.5919 | 0.8583 |
 | Phase-C full BC | Run 22 long PPO | 0.8122 | 0.1750 | 2.1522 | 0.9553 |
 | Phase-C full BC | Run 25 BC-warm-start PPO | 1.0739 | 0.3142 | 2.3017 | 0.9029 |
+| Phase-C full BC | Run 26 BC-prior PPO | 0.9837 | 0.2861 | 2.0272 | 0.9316 |
 | Run 25 BC-warm-start PPO | Phase-C full BC | 2.9800 | 0.6122 | 6.7456 | 0.7698 |
 | Run 25 BC-warm-start PPO | Run 22 long PPO | 1.1469 | 0.3602 | 2.6900 | 0.9768 |
 | Run 25 BC-warm-start PPO | Run 25 BC-warm-start PPO | 2.0967 | 0.9046 | 4.0808 | 0.8801 |
+| Run 26 BC-prior PPO | Phase-C full BC | 2.5858 | 0.5424 | 6.0685 | 0.7615 |
+| Run 26 BC-prior PPO | Run 22 long PPO | 1.0501 | 0.3572 | 2.5966 | 0.9596 |
+| Run 26 BC-prior PPO | Run 26 BC-prior PPO | 1.6019 | 0.8024 | 3.9200 | 0.8981 |
 
-Do not continue plain same-bank training as the main line. The next scoped
-experiments should change or broaden the reset-state distribution and keep
-oracle branching as diagnostic/upper-bound evidence only. Main POC candidates
-are residual-on-BC PPO on the reset mixture, KL/BC-prior regularization, and
-disturbed demo/deployed resets that do not require online expert action labels.
+Do not continue plain same-bank training as the main line. Since static reset
+mixtures plus BC structure still trail BC, the next scoped experiment should be
+iterative reset-bank aggregation: deploy the current learned hierarchy, record
+those states and the hierarchy's own held full-state subgoals, add them to the
+bank, and continue training. Oracle branching should remain diagnostic or
+upper-bound evidence only.
 
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
@@ -299,7 +306,7 @@ teacher-action penalty. The strongest hierarchy baseline is the corrected
 Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across
 seed banks). Recomputed full-state PPO still fails task success after 2250 total
 updates on the same reset bank. Reset-mixture plus BC warm start improves
-full-state PPO task success to `0.16`, which is meaningful but still below BC.
-The next promising direction is not more same-bank continuation; it is
-reset-distribution broadening with stronger BC structure, especially
-residual-on-BC or KL/behavior-cloning constraints.
+full-state PPO task success to `0.16`, and adding a BC-prior loss improves it
+to `0.21`; both remain below BC. The next promising direction is iterative
+reset-distribution broadening from actual learned-hierarchy rollouts, with BC
+structure retained and no online expert relabeling as the core method.

@@ -301,6 +301,39 @@ class LocalTcpPpo:
             eps=1e-5,
         )
         self.bc_warm_start_summary: dict[str, Any] | None = None
+        self.bc_prior_model: nn.Module | None = None
+        self.bc_prior_action_norm: Standardizer | None = None
+        self.bc_prior_cond_norm: Standardizer | None = None
+        self.state_norm_mean_t = torch.as_tensor(
+            self.state_norm.mean,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.state_norm_std_t = torch.as_tensor(
+            self.state_norm.std,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.goal_norm_mean_t = torch.as_tensor(
+            self.goal_norm.mean,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.goal_norm_std_t = torch.as_tensor(
+            self.goal_norm.std,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.action_norm_mean_t = torch.as_tensor(
+            self.action_norm.mean,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.action_norm_std_t = torch.as_tensor(
+            self.action_norm.std,
+            device=self.device,
+            dtype=torch.float32,
+        )
         self.teacher = None
         self.teacher_action_penalty_weight = float(
             getattr(args, "teacher_action_penalty_weight", 0.0)
@@ -372,6 +405,17 @@ class LocalTcpPpo:
             self.bc_cond_norm = Standardizer.from_state_dict(bc_entry["cond_norm"])
             self.bc_branch_env = _make_benchmark_env(self.config, self.num_envs, "state")
             self.bc_branch_env.reset(seed=args.seed + 4_115_000)
+        if float(getattr(args, "bc_prior_weight", 0.0)) > 0.0:
+            bc_prior_path = Path(args.bc_prior_checkpoint)
+            if not bc_prior_path.exists():
+                raise FileNotFoundError(bc_prior_path)
+            (
+                self.bc_prior_model,
+                _bc_prior_payload,
+                self.bc_prior_action_norm,
+                self.bc_prior_cond_norm,
+            ) = _load_bc_policy(bc_prior_path, self.goal_type, self.device)
+            self.bc_prior_model.requires_grad_(False)
         self.local_step = 0
         self.reset_errors: list[float] = []
         self.normalizer_meta = norm_meta
@@ -509,6 +553,50 @@ class LocalTcpPpo:
             "initial_mse": losses[0] if losses else None,
             "final_mse": losses[-1] if losses else None,
         }
+
+    def bc_prior_action(self, condition: torch.Tensor) -> torch.Tensor:
+        if (
+            self.bc_prior_model is None
+            or self.bc_prior_action_norm is None
+            or self.bc_prior_cond_norm is None
+        ):
+            raise RuntimeError("BC prior requested before loading a BC policy")
+        state_end = self.state_dim
+        goal_end = state_end + self.goal_dim
+        previous_end = goal_end + self.action_dim
+        state = condition[:, :state_end] * self.state_norm_std_t + self.state_norm_mean_t
+        goal = condition[:, state_end:goal_end] * self.goal_norm_std_t + self.goal_norm_mean_t
+        previous_raw = (
+            condition[:, goal_end:previous_end] * self.action_norm_std_t
+            + self.action_norm_mean_t
+        )
+        remaining = condition[:, previous_end:]
+        bc_action_mean = torch.as_tensor(
+            self.bc_prior_action_norm.mean,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        bc_action_std = torch.as_tensor(
+            self.bc_prior_action_norm.std,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        bc_cond_mean = torch.as_tensor(
+            self.bc_prior_cond_norm.mean,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        bc_cond_std = torch.as_tensor(
+            self.bc_prior_cond_norm.std,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        previous_bc_norm = (previous_raw - bc_action_mean) / bc_action_std
+        bc_condition = torch.cat([state, goal, previous_bc_norm, remaining], dim=-1)
+        bc_condition_norm = (bc_condition - bc_cond_mean) / bc_cond_std
+        normalized_action = self.bc_prior_model(bc_condition_norm)
+        raw_action = normalized_action * bc_action_std + bc_action_mean
+        return torch.clamp(raw_action, self.action_low, self.action_high)
 
     def close(self) -> None:
         if self.bc_branch_env is not None:
@@ -945,6 +1033,10 @@ class LocalTcpPpo:
                 if args.reward_mode == "bc_advantage_terminal"
                 else None
             ),
+            "bc_prior_checkpoint": (
+                str(args.bc_prior_checkpoint) if float(args.bc_prior_weight) > 0.0 else None
+            ),
+            "bc_prior_weight": float(args.bc_prior_weight),
             "dpsi_target_scale": float(args.dpsi_target_scale),
                 "reward": args.reward_mode,
                 "terminal_weight": float(args.terminal_weight),
@@ -1050,6 +1142,7 @@ class LocalTcpPpo:
                 entropies = []
                 clipfracs = []
                 approx_kls = []
+                bc_prior_losses = []
                 self.agent.train()
                 for _epoch in range(args.update_epochs):
                     self.rng.shuffle(batch_indices)
@@ -1076,6 +1169,15 @@ class LocalTcpPpo:
                         value_loss = 0.5 * ((newvalue - b_returns[mb]) ** 2).mean()
                         entropy_loss = entropy.mean()
                         loss = pg_loss - ent_coef * entropy_loss + value_coef * value_loss
+                        if float(args.bc_prior_weight) > 0.0:
+                            with torch.no_grad():
+                                bc_prior_target = self.bc_prior_action(b_conditions[mb])
+                            bc_prior_loss = torch.mean(
+                                (self.agent.mean_action(b_conditions[mb]) - bc_prior_target)
+                                ** 2
+                            )
+                            loss = loss + float(args.bc_prior_weight) * bc_prior_loss
+                            bc_prior_losses.append(float(bc_prior_loss.detach().cpu()))
                         self.optimizer.zero_grad(set_to_none=True)
                         loss.backward()
                         torch.nn.utils.clip_grad_norm_(self.agent.parameters(), max_grad_norm)
@@ -1109,6 +1211,9 @@ class LocalTcpPpo:
                     "entropy": float(np.mean(entropies)),
                     "policy_loss": float(np.mean(policy_losses)),
                     "value_loss": float(np.mean(value_losses)),
+                    "bc_prior_loss": (
+                        float(np.mean(bc_prior_losses)) if bc_prior_losses else None
+                    ),
                     "explained_variance": explained_variance,
                     "nan_count": int(nan_count),
                     "reset_state_l2_recent_mean": float(np.mean(self.reset_errors[-16:])),
@@ -1185,6 +1290,11 @@ def main() -> None:
     parser.add_argument("--bc-warm-start-steps", type=int, default=0)
     parser.add_argument("--bc-warm-start-batch-size", type=int, default=8192)
     parser.add_argument("--bc-warm-start-lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--bc-prior-checkpoint",
+        default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt",
+    )
+    parser.add_argument("--bc-prior-weight", type=float, default=0.0)
     parser.add_argument(
         "--bc-low-checkpoint",
         default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_tcp.pt",

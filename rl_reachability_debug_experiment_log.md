@@ -2627,3 +2627,88 @@ plain scratch continuation. The most direct candidates are residual-on-Phase-C
 BC PPO on the same reset mixture, an explicit KL/BC-prior regularizer on the
 PPO actor, or a disturbed-reset variant that trains recovery around demo and
 deployed states without requiring new online expert action labels.
+
+## 2026-07-01 - Run 26: BC-Prior Reset-Mixture Full-State PPO
+
+Motivation:
+
+Run 25 showed that BC warm start helps but does not keep the PPO actor close
+enough to the Phase-C full BC action/contact manifold. Run 26 keeps the same
+reset-mixture data and BC warm start, removes the online teacher-action penalty,
+and adds an offline BC-prior loss during PPO updates:
+
+```text
+loss = PPO loss + bc_prior_weight * MSE(actor_mean(condition), Phase-C-BC(condition))
+```
+
+The BC prior uses the fixed Phase-C full BC checkpoint and the same state,
+full-state goal, previous-action, and remaining-time condition as PPO. It does
+not query an online expert.
+
+Reset-mixture fixed-bank local result:
+
+| Metric | Run 26 initial | Run 26 trained | Run 26 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 5.3252 | 3.6656 | 8.6369 |
+| p50 terminal distance | 1.5708 | 1.6724 | 6.5977 |
+| p90 terminal distance | 12.1632 | 7.2180 | 15.1600 |
+| fraction improved | 0.7678 | 0.8568 | 0.5936 |
+| action saturation | 0.1384 | 0.0362 | 0.0362 |
+| action L2 | 0.7965 | 0.6985 | 0.6628 |
+
+Training-window diagnostics at the end of Run 26:
+
+| Diagnostic | Value |
+| --- | ---: |
+| BC-prior weight | 1.0 |
+| train BC-prior MSE | 0.0123 |
+| mean return per step | 0.5182 |
+| clip fraction | 0.1401 |
+| policy KL | 0.0102 |
+| action saturation | 0.0032 |
+| NaN count | 0 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.74 | 0.8242 | 0.8256 | 1.6095 | 0.0394 |
+| oracle | Run 26 BC-prior reset-mixture PPO | 0.21 | 0.4302 | 0.4397 | 2.7468 | 0.1241 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3951 | 0.4002 |
+| shuffled oracle | Run 26 BC-prior reset-mixture PPO | 0.00 | 0.1387 | 0.1606 | 10.6828 | 0.3596 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.8494 | 0.8616 | 0.1661 | 1.7163 | 0.8594 |
+| Phase-C full BC | Run 22 long PPO | no | 8.8494 | 0.7998 | 0.1695 | 2.1502 | 0.9609 |
+| Phase-C full BC | Run 25 BC-warm-start PPO | no | 8.8494 | 1.0737 | 0.3155 | 2.2884 | 0.9121 |
+| Phase-C full BC | Run 26 BC-prior PPO | no | 8.8494 | 0.9837 | 0.2861 | 2.0272 | 0.9316 |
+| Run 26 BC-prior PPO | Phase-C full BC | no | 7.2687 | 2.5858 | 0.5424 | 6.0685 | 0.7615 |
+| Run 26 BC-prior PPO | Run 22 long PPO | no | 7.2687 | 1.0501 | 0.3572 | 2.5966 | 0.9596 |
+| Run 26 BC-prior PPO | Run 25 BC-warm-start PPO | no | 7.2687 | 1.7256 | 0.7293 | 4.2324 | 0.8827 |
+| Run 26 BC-prior PPO | Run 26 BC-prior PPO | no | 7.2687 | 1.6019 | 0.8024 | 3.9200 | 0.8981 |
+
+Interpretation:
+
+Run 26 improves held-subgoal success over Run 25 (`0.16 -> 0.21`) and keeps
+shuffled-goal success at zero, so the BC-prior direction is useful. It still
+does not approach the Phase-C full BC baseline (`0.74`) and its own deployed
+states remain a harder distribution than the original demo/BC reset bank.
+
+Next action:
+
+Move from a static reset mixture to iterative reset-bank aggregation:
+
+1. Start from expert/demo local windows plus Phase-C BC deployed trajectories.
+2. Train/continue PPO from the BC-structured checkpoint.
+3. Deploy the learned low level with the learned high-level policy.
+4. Record those deployed hierarchy states and the hierarchy's own held
+   full-state subgoals.
+5. Add them to the reset bank and continue training.
+6. Repeat for multiple aggregation rounds.
+
+This is not DAgger-style online expert relabeling. The main labels are the
+subgoals already produced by the hierarchy. Oracle branches may still be used
+only as diagnostics or upper bounds.

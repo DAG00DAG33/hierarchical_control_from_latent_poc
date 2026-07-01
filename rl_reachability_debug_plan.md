@@ -658,6 +658,56 @@ low-level reaches high-level-generated full-state subgoals from those deployed
 states better than Phase-C BC, and whether it preserves task-compatible contact
 actions.
 
+### Iterative reset-bank aggregation
+
+If a static reset mixture with BC warm start or BC-prior regularization still
+trails the Phase-C BC baseline, move to an iterative dataset aggregation loop.
+This is the preferred next branch after Run 26.
+
+Algorithm:
+
+```text
+initial bank:
+  expert/demo local windows
+  Phase-C BC hierarchy deployed trajectories with modest task success
+
+round i:
+  train or continue BC-structured PPO on current reset bank
+  deploy the learned low level inside the hierarchy with the learned high-level policy
+  record the resulting hierarchy rollout states
+  record the held full-state subgoals produced by the hierarchy
+  add these learned-policy deployed states to the reset bank
+  continue training from the current PPO checkpoint
+```
+
+Important constraint:
+
+```text
+Do not use online expert action relabeling as the core method.
+The main target for deployed states is the subgoal already produced by the hierarchy.
+Teacher/oracle branches are allowed only for diagnostics or upper bounds.
+```
+
+Recommended first aggregation run:
+
+| Component | Setting |
+| --- | --- |
+| base checkpoint | latest BC-structured PPO, e.g. Run 26 |
+| bank round 0 | demo windows + Phase-C BC deployed states + Run 26 deployed states |
+| target source | learned high-level full-state subgoal |
+| continuation | load Run 26 checkpoint and normalizers |
+| regularization | keep BC-prior loss; test residual-on-BC later |
+| evaluation | held oracle subgoals, learned-high subgoals, deployed-state branch reachability, shuffled goals |
+
+Stop criteria for an aggregation round:
+
+```text
+oracle held success improves
+learned-high success improves or stays neutral
+shuffled-goal success remains low
+deployed-state terminal full-goal distance improves on the newest rollout distribution
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero
