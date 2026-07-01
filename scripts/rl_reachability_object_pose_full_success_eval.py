@@ -40,6 +40,21 @@ def _load_phase_b_low(path: Path, device: torch.device) -> tuple[nn.Module, dict
     return model, payload
 
 
+def _load_high(path: Path, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
+    payload = torch.load(path, map_location=device, weights_only=False)
+    if payload.get("goal_type") != GOAL_TYPE:
+        raise ValueError(f"{path} is not an object_pose high-level checkpoint")
+    model = MLP(
+        int(payload["condition_dim"]),
+        int(payload["target_dim"]),
+        int(payload["hidden_dim"]),
+        depth=4,
+    ).to(device)
+    model.load_state_dict(payload["model"])
+    model.eval()
+    return model, payload
+
+
 @torch.inference_mode()
 def _oracle_goal(
     config: Any,
@@ -135,6 +150,16 @@ def evaluate_policy(
     config = load_config(args.config)
     device = default_device()
     teacher = load_ppo_agent(_rl_paths(config).best, device)
+    high_model = None
+    high_payload = None
+    high_input_norm = None
+    high_target_norm = None
+    high_action_norm = None
+    if goal_source in {"learned", "shuffled_learned"}:
+        high_model, high_payload = _load_high(Path(args.high_checkpoint), device)
+        high_input_norm = Standardizer.from_state_dict(high_payload["input_norm"])
+        high_target_norm = Standardizer.from_state_dict(high_payload["target_norm"])
+        high_action_norm = Standardizer.from_state_dict(high_payload["action_norm"])
     base_low_kind = "run8_object_pose_ppo" if low_kind.startswith("run") else low_kind
     if low_kind == "phase_b_object_pose_bc":
         low_model, low_payload = _load_phase_b_low(low_path, device)
@@ -165,6 +190,7 @@ def evaluate_policy(
     action_l2: list[float] = []
     teacher_maes: list[float] = []
     hold_goal_distances: list[float] = []
+    learned_high_goal_distances: list[float] = []
     high_decisions = 0
     progress = trange(args.episodes, desc=f"{low_kind} {goal_source}")
     try:
@@ -175,6 +201,11 @@ def evaluate_policy(
             reset_seeds = [args.seed_start + batch_start + i for i in range(batch_envs)]
             obs, _info = env.reset(seed=reset_seeds)
             previous_action = np.zeros((batch_envs, 3), dtype=np.float32)
+            high_previous_norm = (
+                high_action_norm.transform(previous_action)
+                if high_action_norm is not None
+                else None
+            )
             goal = np.zeros((batch_envs, 4), dtype=np.float32)
             countdown = np.zeros(batch_envs, dtype=np.int32)
             active = np.ones(batch_envs, dtype=bool)
@@ -186,23 +217,54 @@ def evaluate_policy(
                 state = _obs_state_np(obs)
                 replan = active & (countdown <= 0)
                 if np.any(replan):
-                    selected = _oracle_goal(
-                        config,
-                        teacher,
-                        env.unwrapped.get_state_dict(),
-                        reset_seeds,
-                        state,
-                        horizon,
-                        control_freq,
-                        action_low,
-                        action_high,
-                        device,
-                    )
-                    if goal_source == "shuffled_oracle":
-                        selected = selected[np.roll(np.arange(batch_envs), 1)]
-                    elif goal_source != "oracle":
+                    if goal_source in {"oracle", "shuffled_oracle"}:
+                        selected = _oracle_goal(
+                            config,
+                            teacher,
+                            env.unwrapped.get_state_dict(),
+                            reset_seeds,
+                            state,
+                            horizon,
+                            control_freq,
+                            action_low,
+                            action_high,
+                            device,
+                        )
+                    elif goal_source in {"learned", "shuffled_learned"}:
+                        if (
+                            high_model is None
+                            or high_input_norm is None
+                            or high_target_norm is None
+                            or high_previous_norm is None
+                        ):
+                            raise RuntimeError("Missing high-level object-pose predictor")
+                        selected = high_target_norm.inverse(
+                            high_model(
+                                torch.from_numpy(
+                                    high_input_norm.transform(
+                                        np.concatenate([state, high_previous_norm], axis=-1)
+                                    )
+                                )
+                                .to(device)
+                                .float()
+                            )
+                            .cpu()
+                            .numpy()
+                        ).astype(np.float32)
+                    else:
                         raise ValueError(f"Unknown goal_source: {goal_source}")
+                    if goal_source.startswith("shuffled_"):
+                        selected = selected[np.roll(np.arange(batch_envs), 1)]
                     goal[replan] = selected[replan]
+                    learned_high_goal_distances.extend(
+                        _goal_distance(
+                            state[replan],
+                            selected[replan],
+                            GOAL_TYPE,
+                            horizon,
+                            control_freq,
+                        ).astype(float).tolist()
+                    )
                     countdown[replan] = update_period
                     high_decisions += int(np.sum(replan))
                 remaining = np.maximum(countdown, 1).astype(np.float32)
@@ -243,6 +305,8 @@ def evaluate_policy(
                 )
                 countdown -= 1
                 previous_action = clipped
+                if high_action_norm is not None:
+                    high_previous_norm = high_action_norm.transform(previous_action)
                 next_state = _obs_state_np(obs)
                 completed_hold = active & (countdown <= 0)
                 if np.any(completed_hold):
@@ -300,6 +364,7 @@ def evaluate_policy(
         "action_saturation_rate": float(np.mean(action_saturation)),
         "action_l2_mean": float(np.mean(action_l2)),
         "hold_object_pose_distance": float(np.mean(hold_goal_distances)),
+        "selected_goal_initial_distance": float(np.mean(learned_high_goal_distances)),
         "high_level_decisions_per_episode": float(high_decisions / max(len(successes_np), 1)),
     }
 
@@ -312,6 +377,10 @@ def main() -> None:
     parser.add_argument("--seed-start", type=int, default=2_180_000)
     parser.add_argument("--horizon", type=int, default=10)
     parser.add_argument("--update-period", type=int)
+    parser.add_argument(
+        "--high-checkpoint",
+        default="artifacts/incremental/rl_reachability_debug/object_pose_high_predictor/seed0/predictor.pt",
+    )
     parser.add_argument(
         "--phase-b-low",
         default="artifacts/incremental/pre_rl/phase_b/k10/seed0/oracle_goal_decomposition.pt",
@@ -327,8 +396,8 @@ def main() -> None:
     parser.add_argument(
         "--goal-sources",
         nargs="+",
-        choices=["oracle", "shuffled_oracle"],
-        default=["oracle", "shuffled_oracle"],
+        choices=["oracle", "learned", "shuffled_oracle", "shuffled_learned"],
+        default=["oracle", "learned", "shuffled_oracle"],
     )
     parser.add_argument(
         "--output",
@@ -348,6 +417,7 @@ def main() -> None:
         "run": "rl_reachability_debug_object_pose_full_success",
         "episodes_per_setting": int(args.episodes),
         "goal_type": GOAL_TYPE,
+        "high_checkpoint": str(args.high_checkpoint),
         "rows": rows,
     }
     output = Path(args.output)

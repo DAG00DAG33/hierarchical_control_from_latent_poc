@@ -1,0 +1,38 @@
+{
+  "condition_dim": 34,
+  "data": {
+    "dataset_path": "data/incremental/phase1_query_dataset.h5",
+    "label_kind": "deterministic_clipped",
+    "requested_train_episodes": 1800,
+    "subset": "successful",
+    "train_episodes": 1800,
+    "train_samples": 53115,
+    "usable_episodes": 2190,
+    "validation_episodes": 200,
+    "validation_samples": 5901
+  },
+  "goal_type": "object_pose",
+  "hidden_dim": 512,
+  "horizon_steps": 10,
+  "low_checkpoint": "artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_tcp.pt",
+  "metadata": {
+    "config": "configs/pusht_incremental.yaml",
+    "control_freq": 20,
+    "controller": "pd_ee_delta_pos",
+    "cuda_available": true,
+    "device": "cuda",
+    "environment": "PushT-v1",
+    "git_commit": "5a30819a79ce7d86b7f944f60fcbd6506bb2d852",
+    "git_dirty": true,
+    "gymnasium_version": "1.3.0",
+    "mani_skill_version": "3.0.1",
+    "torch_version": "2.12.0+cu130"
+  },
+  "method": "rl_reachability_object_pose_high_predictor",
+  "persistence_object_pose_l2": 0.5042060613632202,
+  "persistence_xy_l2_m": 0.05968260392546654,
+  "target_dim": 4,
+  "validation_object_pose_l2": 0.05606929957866669,
+  "validation_xy_l2_m": 0.008516375906765461,
+  "validation_yaw_abs_rad": 0.05167141929268837
+}

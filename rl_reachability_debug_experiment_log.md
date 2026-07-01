@@ -1533,3 +1533,77 @@ This is still an oracle-goal result. To make it deployable, the next scoped
 step is to train/evaluate a learned high-level object-pose predictor or to port
 the same constrained-RL idea back to the deployable TCP high-level interface
 with task/contact-aware reward terms.
+
+## 2026-07-01 - Run 14: Learned Object-Pose High-Level Predictor
+
+Motivation:
+
+Run 13 beat the matching object-pose BC low-level under oracle object-pose
+subgoals. The plan also requires the deployability check with a matching
+learned high-level policy. Run 14 trains a deterministic object-pose high-level
+predictor from the same Phase-7 privileged teacher episodes, then evaluates
+Phase-B object-pose BC and Run 13 PPO under oracle, learned, and shuffled
+learned subgoals.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_object_pose_high_predictor.py \
+  --output artifacts/incremental/rl_reachability_debug/object_pose_high_predictor/seed0/predictor.pt
+```
+
+High-level validation:
+
+| Metric | Value |
+| --- | ---: |
+| train episodes | 1800 |
+| validation episodes | 200 |
+| train samples | 53115 |
+| validation samples | 5901 |
+| validation object-pose L2 | 0.0561 |
+| validation xy L2 | 0.0085 m |
+| validation yaw abs | 0.0517 rad |
+| persistence object-pose L2 | 0.5042 |
+| persistence xy L2 | 0.0597 m |
+
+Full-rollout command:
+
+```bash
+uv run python scripts/rl_reachability_object_pose_full_success_eval.py \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle learned shuffled_learned \
+  --high-checkpoint artifacts/incremental/rl_reachability_debug/object_pose_high_predictor/seed0/predictor.pt \
+  --run8-low results/incremental/rl_reachability_debug/run13_object_pose_teacher_penalty05_b8_u250/privileged_object_pose_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --run8-low-name run13_object_pose_teacher_penalty05_ppo \
+  --output results/incremental/rl_reachability_debug/run14_object_pose_learned_high_full_success_100.json
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold object-pose distance | Selected goal initial distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-B object-pose BC | 0.17 | 0.3647 | 0.3837 | 0.2986 | 0.1922 | 0.1835 |
+| oracle | Run 13 penalty 0.5 PPO | 0.20 | 0.3972 | 0.4063 | 0.2227 | 0.1303 | 0.1604 |
+| learned | Phase-B object-pose BC | 0.13 | 0.3404 | 0.3581 | 0.5900 | 0.5296 | 0.1643 |
+| learned | Run 13 penalty 0.5 PPO | 0.17 | 0.3697 | 0.3811 | 0.3141 | 0.2694 | 0.1688 |
+| shuffled learned | Phase-B object-pose BC | 0.04 | 0.2068 | 0.2439 | 1.5780 | 1.6085 | 0.3036 |
+| shuffled learned | Run 13 penalty 0.5 PPO | 0.01 | 0.1673 | 0.1985 | 1.4187 | 1.4060 | 0.2957 |
+
+Interpretation:
+
+The learned object-pose high-level predictor is strong in supervised validation,
+but the full-rollout learned goals are farther from the current state than the
+oracle goals and reduce task success. Even so, Run 13 PPO remains better than
+the Phase-B object-pose BC baseline with the learned high-level (`0.17` vs
+`0.13` success), and shuffled learned goals largely remove success. This keeps
+the main conclusion intact: the constrained object-pose PPO low-level is useful
+and goal-sensitive, but the deployable stack still has a high-level distribution
+gap relative to oracle object-pose subgoals.
+
+Next scoped debugging if learned-goal success stays low:
+
+1. Measure reachability to learned high-level goals in the states produced by
+   full architecture deployment, not only on reset/teacher branch states.
+2. Compare those deployment-state reachability numbers directly against the
+   Phase-B object-pose BC low-level.
+3. Only continue to new plan experiments after this rollout-state reachability
+   gap is explained.
