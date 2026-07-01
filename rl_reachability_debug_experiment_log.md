@@ -702,3 +702,55 @@ metrics files and ranks variants by local reachability score. The companion
 comparisons and full-task success evaluations for terminal-only, progress-only,
 and BC-advantage D_psi checkpoints. This should be run only after the detached
 Run 7 training queue has completed all three variants.
+
+Run 7 update:
+
+The original detached queue stalled during the terminal-only variant. The
+terminal-only process wrote history through update `52/1000` and then stopped
+updating files while still consuming CPU/GPU. The last healthy terminal-only
+history row was:
+
+- update: `52`
+- global step: `2,129,920`
+- mean terminal distance: `0.002574`
+- local reach rate: `0.6731`
+- action saturation: `0.0413`
+- NaNs: `0`
+- elapsed: `429s`
+
+Because this was a hang rather than a completed training run, terminal-only is
+marked unstable/incomplete for now. The process was terminated and the remaining
+variants were launched separately with wall-clock timeout guards.
+
+Progress-only D_psi completed successfully:
+
+| Metric | Value |
+| --- | ---: |
+| updates | 1000 |
+| env steps | 40.96M |
+| eval terminal squared distance | 0.000339 |
+| eval reach rate | 0.9872 |
+| eval p50/p90/p99 squared distance | 0.000156 / 0.000806 / 0.002845 |
+| eval action saturation | 0.2735 |
+| runner shuffled-goal reach | 0.0919 |
+| final train terminal squared distance | 0.000201 |
+| final train reach rate | 0.9902 |
+| elapsed | 8402s |
+
+BC-advantage D_psi was relaunched separately with an `8h` timeout guard:
+
+```bash
+timeout 8h uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 1000 \
+  --horizon 10 \
+  --reward-mode bc_advantage_terminal \
+  --reward-distance-source dpsi \
+  --dpsi-checkpoint artifacts/incremental/rl_reachability_debug/run4_tcp_dpsi_ensemble/tcp_dpsi_ensemble.pt \
+  --checkpoint-every-updates 250 \
+  --eval-episodes 2 \
+  --output-dir results/incremental/rl_reachability_debug/run7_dpsi_bc_advantage_b8_u1000 \
+  --force
+```
