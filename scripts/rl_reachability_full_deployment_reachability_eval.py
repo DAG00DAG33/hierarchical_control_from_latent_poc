@@ -37,6 +37,10 @@ POLICY_PATH_DEFAULTS = {
         "results/incremental/rl_reachability_debug/run21_full_goal_recomputed_penalty10_continue_u1000/"
         "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
     ),
+    "run22_long_full_ppo": (
+        "results/incremental/rl_reachability_debug/run22_full_goal_recomputed_penalty10_continue2_u1000/"
+        "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
+    ),
 }
 
 
@@ -391,6 +395,7 @@ def main() -> None:
     parser.add_argument("--phase-c-full-bc", default=POLICY_PATH_DEFAULTS["phase_c_full_bc"])
     parser.add_argument("--run20-low", default=POLICY_PATH_DEFAULTS["run20_full_ppo"])
     parser.add_argument("--run21-low", default=POLICY_PATH_DEFAULTS["run21_long_full_ppo"])
+    parser.add_argument("--run22-low", default=POLICY_PATH_DEFAULTS["run22_long_full_ppo"])
     parser.add_argument(
         "--output",
         default="results/incremental/rl_reachability_debug/run21_full_deployment_reachability_512.json",
@@ -400,6 +405,7 @@ def main() -> None:
         "phase_c_full_bc": Path(args.phase_c_full_bc),
         "run20_full_ppo": Path(args.run20_low),
         "run21_long_full_ppo": Path(args.run21_low),
+        "run22_long_full_ppo": Path(args.run22_low),
     }
     rows = []
     for collector_policy in args.collector_policies:

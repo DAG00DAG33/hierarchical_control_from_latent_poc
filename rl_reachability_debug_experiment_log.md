@@ -2209,3 +2209,109 @@ especially on BC-collected states. PPO is partly learning a generic corrective
 motion prior in addition to goal-conditioned reachability. Therefore, the next
 long continuation is still justified, but task success should be judged with
 held-subgoal rollout metrics, not reset-bank terminal distance alone.
+
+## 2026-07-01 - Run 22: Second Longer Recomputed Full-State PPO Continuation
+
+Motivation:
+
+Run 21 was not saturated and showed lower rollout teacher-action MAE than Run
+20, so Run 22 continued the same corrected full-state PPO objective for another
+`1000` updates. This is the stop point for same-reset-bank continuation unless
+held-subgoal task success improves substantially.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 1000 \
+  --horizon 10 \
+  --goal-type full \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 1.0 \
+  --recompute-held-goal-features \
+  --init-checkpoint results/incremental/rl_reachability_debug/run21_full_goal_recomputed_penalty10_continue_u1000/privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 100 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run22_full_goal_recomputed_penalty10_continue2_u1000 \
+  --force
+```
+
+Training budget:
+
+| Quantity | Value |
+| --- | ---: |
+| additional PPO updates | 1000 |
+| total PPO updates from Run 20 scratch init | 2250 |
+| additional env steps | 40.96M |
+| total env steps from Run 20 scratch init | 92.16M |
+| additional optimizer minibatch steps | 24000 |
+| total optimizer minibatch steps from Run 20 scratch init | 54000 |
+| elapsed | 2h 19m 41s |
+
+Local fixed-bank result:
+
+| Metric | Phase-C full BC | Run 21 | Run 22 | Run 22 shuffled |
+| --- | ---: | ---: | ---: | ---: |
+| terminal full-goal distance | 1.6563 | 1.8744 | 1.5018 | 4.4356 |
+| p50 terminal distance | 0.1399 | 0.5893 | 0.5154 | 3.1201 |
+| p90 terminal distance | 2.0872 | 2.9423 | 2.7939 | 7.8654 |
+| p99 terminal distance | 29.9696 | 30.0081 | 20.5832 | 32.7371 |
+| fraction improved | 0.9315 | 0.9764 | 0.9844 | 0.8164 |
+| action saturation | 0.1412 | 0.0096 | 0.0050 | 0.0053 |
+| action L2 | 0.7385 | 0.5367 | 0.5382 | 0.5499 |
+
+Training-window diagnostics at the end of Run 22:
+
+| Diagnostic | Value |
+| --- | ---: |
+| train teacher action MAE | 0.0837 |
+| mean return per step | 0.3624 |
+| clip fraction | 0.3896 |
+| explained variance | 0.9839 |
+| action saturation | 0.0008 |
+| NaN count | 0 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.69 | 0.7898 | 0.7915 | 1.6297 | 0.0410 |
+| oracle | Run 22 long PPO | 0.01 | 0.1540 | 0.1934 | 5.1632 | 0.2493 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3789 | 0.4002 |
+| shuffled oracle | Run 22 long PPO | 0.00 | 0.1133 | 0.1458 | 8.6494 | 0.3897 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.7485 | 0.8645 | 0.1353 | 1.8000 | 0.8850 |
+| Phase-C full BC | Run 21 long PPO | no | 8.7485 | 0.8135 | 0.1675 | 2.2483 | 0.9591 |
+| Phase-C full BC | Run 22 long PPO | no | 8.7485 | 0.7904 | 0.1597 | 2.1517 | 0.9669 |
+| Run 22 long PPO | Phase-C full BC | no | 9.8928 | 8.4377 | 1.7301 | 16.3957 | 0.6816 |
+| Run 22 long PPO | Run 21 long PPO | no | 9.8928 | 5.4068 | 1.3543 | 7.0409 | 0.8809 |
+| Run 22 long PPO | Run 22 long PPO | no | 9.8928 | 4.1308 | 1.2215 | 5.8609 | 0.8906 |
+
+Interpretation:
+
+Run 22 improves same-reset-bank local reachability over Run 21 and has a much
+lower final training-window teacher-action MAE (`0.0837`). This still does not
+transfer to held-subgoal task success: oracle full-state success is only
+`0.01`, far below Phase-C BC (`0.69`), and hold full-goal distance is worse
+than both BC and Run 21. The deployed-state branch audit still argues against
+pure fixed-bank overfitting, because Run 22 reaches oracle targets better than
+BC from Run-22-collected states. The stronger conclusion is that additional
+same-bank training is the wrong next lever.
+
+Next action:
+
+Follow Phase 4B of `rl_reachability_debug_plan.md`: train/evaluate full-state
+PPO on a reset mixture containing original demo windows, BC-hierarchy deployed
+states, and PPO-hierarchy deployed states. Treat oracle teacher branching from
+deployed states as a diagnostic or upper bound, not the core proof-of-concept
+method.

@@ -518,6 +518,105 @@ If `D_psi` improves but real rollout distance or success worsens, the metric is 
 
 ---
 
+## Phase 4B: Reset-Distribution Debugging for Full-State Low-Level PPO
+
+### Purpose
+
+If long same-bank full-state PPO improves local reset-bank reachability but still
+has poor held-subgoal task success, do not keep extending the same reset-bank
+training indefinitely. The next hypothesis is reset-distribution shift:
+
+```text
+The low level trains on states close to teacher/demo rollouts, but deployment
+creates shifted states after previous imperfect subgoals.
+```
+
+This phase tests whether training on deployed hierarchy states improves actual
+held-subgoal success.
+
+### Constraint: no online expert relabeling as the core method
+
+For the proof of concept, avoid DAgger-style online expert-action relabeling as
+the main solution. In the real setting, an expert will not be available.
+
+Allowed use of oracle/teacher branching:
+
+```text
+diagnostic only
+upper-bound evaluation only
+```
+
+Do not make online expert action labels the central POC method. If a
+teacher-action penalty is used, treat it as regularization from already
+available demonstrations and report it explicitly.
+
+### Main reset mixture experiment
+
+Collect low-level reset states from actual held-subgoal hierarchy rollouts and
+train/evaluate the same full-state PPO objective on a mixture:
+
+| Source | Fraction |
+| --- | ---: |
+| original demo/teacher local windows | 50% |
+| Phase-C BC hierarchy deployed states | 25% |
+| current PPO hierarchy deployed states, e.g. Run 21/22 | 25% |
+
+Use held full-state subgoals and recomputed goal features as in the corrected
+full-state evaluator. The POC-friendly version should use the subgoal target
+already available to the hierarchy, not new online expert action labels.
+
+Recommended variants:
+
+| Variant | Regularization |
+| --- | --- |
+| reset mixture, no teacher-action penalty | tests pure reachability on the new distribution |
+| reset mixture, existing teacher-action penalty | tests whether demo regularization preserves task-compatible actions |
+| reset mixture, KL or BC-prior to Phase-C low level | tests a less direct action-manifold constraint |
+
+### Disturbed demo/oracle reset ablation
+
+As a cheaper controlled variant, start from demo local windows and perturb the
+state before the 10-step low-level episode:
+
+```text
+small object-pose perturbations
+small TCP perturbations
+1-3 random, BC, or PPO warm-up steps before the subgoal starts
+action noise before subgoal start
+```
+
+For small perturbations, keep the original future demo/full-state target as the
+goal. For larger perturbations, use oracle teacher branching only as a diagnostic
+upper bound to measure whether a good recovery target exists.
+
+### Diagnostic: oracle target from deployed states
+
+Optionally branch the teacher from deployed hierarchy states to compute the
+ideal `t+10` full-state target. Use this to answer:
+
+```text
+If the low level had the right local target from these bad deployed states,
+could it recover?
+```
+
+This separates reset-distribution failure from goal-quality failure, but it is
+not the main POC method.
+
+### Success criteria
+
+Pass if the reset-mixture policy improves:
+
+```text
+held-subgoal task success
+terminal full-goal distance on deployed states
+correct-vs-shuffled goal separation
+```
+
+It must not collapse into generic corrective motions. Shuffled-goal reachability
+should remain clearly worse than correct-goal reachability.
+
+---
+
 ## Phase 5: Full Visual/VAE PPO From Zero
 
 ### Purpose
