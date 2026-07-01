@@ -209,6 +209,28 @@ BC-hierarchy deployed states, and PPO-hierarchy deployed states. Online expert
 branching should remain diagnostic or upper-bound evidence, not the core POC
 method.
 
+First reset-mixture result:
+
+| Policy | Reset distribution | Local terminal dist. | Oracle held success | Hold full-goal dist. | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Run 22 long PPO | demo/teacher bank | 1.5018 | 0.01 | 5.1632 | 0.2493 |
+| Run 23 reset-mixture PPO | 50% demo, 25% BC-deployed, 25% PPO-deployed | 2.1294 | 0.00 | 4.3716 | 0.2712 |
+
+Run 23 improves deployed-state branch reachability on its own rollout
+distribution:
+
+| Collector rollout | Candidate branch | Terminal full-goal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Run 23 reset-mixture PPO | Phase-C full BC | 6.6453 | 1.7248 | 13.6863 | 0.6855 |
+| Run 23 reset-mixture PPO | Run 22 long PPO | 1.9530 | 1.0845 | 3.4902 | 0.9180 |
+| Run 23 reset-mixture PPO | Run 23 reset-mixture PPO | 1.8358 | 1.0318 | 3.2796 | 0.9219 |
+
+But task success remains zero. The next diagnostic should isolate target
+quality by using oracle target future states from deployed resets as an upper
+bound. If that succeeds, the learned-high 28D-goal-to-pseudo-future-state
+construction is the bottleneck; if it fails, the issue is action/contact
+compatibility or the PPO objective.
+
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
 

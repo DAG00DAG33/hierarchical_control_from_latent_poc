@@ -2315,3 +2315,119 @@ PPO on a reset mixture containing original demo windows, BC-hierarchy deployed
 states, and PPO-hierarchy deployed states. Treat oracle teacher branching from
 deployed states as a diagnostic or upper bound, not the core proof-of-concept
 method.
+
+## 2026-07-01 - Run 23: Full-State PPO on Learned-High Reset Mixture
+
+Motivation:
+
+Run 22 showed that continuing on the same teacher/demo reset bank improves local
+metrics but not task success. Run 23 changes the reset-state distribution:
+
+| Source | Batches | Fraction |
+| --- | ---: | ---: |
+| original demo/teacher local windows | 8 | 50% |
+| Phase-C full BC deployed hierarchy states | 4 | 25% |
+| Run 22 PPO deployed hierarchy states | 4 | 25% |
+
+The deployed-state targets do not use online teacher branching. They use the
+learned full-state high-level predictor and convert its 28D full-goal output
+into a pseudo future privileged state so the low level can still use recomputed
+full-goal features. This is a POC-friendly approximation; oracle target
+branching remains a diagnostic only.
+
+Dataset:
+
+```text
+data/rl_reachability_debug/full_reset_mixture_demo8_bc4_run22_4.h5
+```
+
+Implementation changes:
+
+- `scripts/rl_reachability_collect_full_reset_mixture.py` creates the mixture
+  HDF5 file.
+- `scripts/rl_reachability_privileged_tcp_ppo.py` now supports optional
+  `valid_starts` and `target_future_states` datasets.
+- Run 23 reuses Run 22 normalizers via `--use-init-normalizers`, so the loaded
+  policy sees the same input scaling as before.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_reachability_debug/full_reset_mixture_demo8_bc4_run22_4.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type full \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 1.0 \
+  --recompute-held-goal-features \
+  --init-checkpoint results/incremental/rl_reachability_debug/run22_full_goal_recomputed_penalty10_continue2_u1000/privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --use-init-normalizers \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run23_full_reset_mixture_learned_high_penalty10_u250 \
+  --force
+```
+
+Mixture fixed-bank local result:
+
+| Metric | Run 23 initial | Run 23 trained | Run 23 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 2.3732 | 2.1294 | 5.1502 |
+| p50 terminal distance | 1.4899 | 1.3197 | 4.2200 |
+| p90 terminal distance | 4.3697 | 3.8530 | 8.2776 |
+| p99 terminal distance | 20.4742 | 17.0256 | 25.5973 |
+| fraction improved | 0.9464 | 0.9600 | 0.7555 |
+| action saturation | 0.0034 | 0.0033 | 0.0025 |
+| action L2 | 0.5401 | 0.5639 | 0.5792 |
+
+Training-window diagnostics at the end of Run 23:
+
+| Diagnostic | Value |
+| --- | ---: |
+| train teacher action MAE | 0.2822 |
+| mean return per step | 0.3080 |
+| clip fraction | 0.4952 |
+| explained variance | 0.8812 |
+| action saturation | 0.0059 |
+| NaN count | 0 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.74 | 0.8237 | 0.8258 | 1.5759 | 0.0406 |
+| oracle | Run 23 reset-mixture PPO | 0.00 | 0.1461 | 0.1892 | 4.3716 | 0.2712 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3783 | 0.4002 |
+| shuffled oracle | Run 23 reset-mixture PPO | 0.01 | 0.1224 | 0.1518 | 9.4336 | 0.3960 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.6567 | 0.9078 | 0.1658 | 1.8327 | 0.8613 |
+| Phase-C full BC | Run 22 long PPO | no | 8.6567 | 0.8008 | 0.1618 | 2.1821 | 0.9512 |
+| Phase-C full BC | Run 23 reset-mixture PPO | no | 8.6567 | 0.7509 | 0.1987 | 1.9158 | 0.9297 |
+| Run 23 reset-mixture PPO | Phase-C full BC | no | 9.2914 | 6.6453 | 1.7248 | 13.6863 | 0.6855 |
+| Run 23 reset-mixture PPO | Run 22 long PPO | no | 9.2914 | 1.9530 | 1.0845 | 3.4902 | 0.9180 |
+| Run 23 reset-mixture PPO | Run 23 reset-mixture PPO | no | 9.2914 | 1.8358 | 1.0318 | 3.2796 | 0.9219 |
+
+Interpretation:
+
+The reset mixture does what it was meant to do locally: Run 23 improves
+terminal full-goal distance on the mixture bank, and deployed-state branch
+distance on its own rollout distribution is much better than BC and better than
+Run 22. However, task success remains zero and teacher-action MAE remains high.
+
+This means reset coverage alone is not sufficient in this formulation. The
+next diagnostic should isolate target quality: train or evaluate the same
+reset-mixture idea with oracle target future states from deployed resets as an
+upper bound. If oracle-target reset mixture still fails, the bottleneck is more
+likely action/contact compatibility or the PPO objective. If it succeeds, the
+learned-high 28D-goal-to-pseudo-future-state target construction is the main
+problem.

@@ -51,6 +51,28 @@ def _batch_keys(h5: h5py.File) -> list[str]:
     return keys
 
 
+def _valid_starts(group: h5py.Group, horizon: int) -> np.ndarray:
+    if "valid_starts" in group:
+        starts = np.asarray(group["valid_starts"], dtype=np.int64).reshape(-1)
+    else:
+        max_start = int(group["executed_actions"].shape[0]) - horizon + 1
+        starts = np.arange(max_start, dtype=np.int64)
+    if len(starts) == 0:
+        raise ValueError(f"{group.name} has no valid starts for horizon={horizon}")
+    return starts
+
+
+def _target_future_states(
+    group: h5py.Group,
+    states: np.ndarray,
+    starts: np.ndarray,
+    horizon: int,
+) -> np.ndarray:
+    if "target_future_states" in group:
+        return np.asarray(group["target_future_states"][starts], dtype=np.float32)
+    return np.asarray(states[starts + horizon], dtype=np.float32)
+
+
 def _fit_normalizers(
     h5: h5py.File,
     batch_keys: list[str],
@@ -66,16 +88,15 @@ def _fit_normalizers(
         group = h5[key]
         state = np.asarray(group["observations_state"], dtype=np.float32)
         action = np.asarray(group["executed_actions"], dtype=np.float32)
-        max_start = action.shape[0] - horizon + 1
-        if max_start <= 0:
+        if action.shape[0] - horizon + 1 <= 0:
             raise ValueError(f"{key} is shorter than horizon={horizon}")
-        starts = np.arange(max_start)
+        starts = _valid_starts(group, horizon)
+        future = _target_future_states(group, state, starts, horizon)
         states.append(state.reshape(-1, state.shape[-1]))
         actions.append(action.reshape(-1, action.shape[-1]))
         if recompute_held_goal_features:
             for offset in range(1, horizon + 1):
                 current = state[starts + horizon - offset]
-                future = state[starts + horizon]
                 goals.append(
                     _pre_rl_phase_b_goal(
                         current,
@@ -87,7 +108,6 @@ def _fit_normalizers(
                 )
         else:
             current = state[starts]
-            future = state[starts + horizon]
             goals.append(
                 _pre_rl_phase_b_goal(current, future, horizon, control_freq, goal_type).reshape(
                     -1,
@@ -216,6 +236,19 @@ class LocalTcpPpo:
         self.state_dim = int(norm_meta["state_dim"])
         self.action_dim = int(norm_meta["action_dim"])
         self.goal_dim = int(norm_meta["goal_dim"])
+        self.normalizer_source = "dataset"
+        if bool(getattr(args, "use_init_normalizers", False)):
+            if not args.init_checkpoint:
+                raise ValueError("--use-init-normalizers requires --init-checkpoint")
+            init_payload = torch.load(
+                args.init_checkpoint,
+                map_location=self.device,
+                weights_only=False,
+            )
+            self.state_norm = Standardizer.from_state_dict(init_payload["state_norm"])
+            self.action_norm = Standardizer.from_state_dict(init_payload["action_norm"])
+            self.goal_norm = Standardizer.from_state_dict(init_payload["goal_norm"])
+            self.normalizer_source = str(args.init_checkpoint)
         self.condition_dim = self.state_dim + self.goal_dim + self.action_dim + 1
         if self.num_envs != int(self.h5[self.batch_keys[0]]["observations_state"].shape[1]):
             raise ValueError(
@@ -332,8 +365,8 @@ class LocalTcpPpo:
         for _ in range(count):
             key = str(rng.choice(self.batch_keys))
             group = self.h5[key]
-            max_start = int(group["executed_actions"].shape[0]) - self.horizon + 1
-            refs.append((key, int(rng.integers(0, max_start))))
+            starts = _valid_starts(group, self.horizon)
+            refs.append((key, int(rng.choice(starts))))
         return refs
 
     @torch.inference_mode()
@@ -341,8 +374,8 @@ class LocalTcpPpo:
         if reference is None:
             key = str(self.rng.choice(self.batch_keys))
             group = self.h5[key]
-            max_start = int(group["executed_actions"].shape[0]) - self.horizon + 1
-            t = int(self.rng.integers(0, max_start))
+            starts = _valid_starts(group, self.horizon)
+            t = int(self.rng.choice(starts))
         else:
             key, t = reference
             group = self.h5[key]
@@ -360,10 +393,13 @@ class LocalTcpPpo:
         self.previous_action_norm = self.action_norm.transform(
             np.asarray(group["previous_executed_actions"][t], dtype=np.float32)
         )
-        future_state = np.asarray(
-            group["observations_state"][t + self.horizon],
-            dtype=np.float32,
-        )
+        if "target_future_states" in group:
+            future_state = np.asarray(group["target_future_states"][t], dtype=np.float32)
+        else:
+            future_state = np.asarray(
+                group["observations_state"][t + self.horizon],
+                dtype=np.float32,
+            )
         self.target_future_state = future_state
         self.goal = _pre_rl_phase_b_goal(
             live_state,
@@ -739,6 +775,7 @@ class LocalTcpPpo:
             "reward_mode": args.reward_mode,
             "reward_distance_source": args.reward_distance_source,
             "recompute_held_goal_features": bool(self.recompute_held_goal_features),
+            "normalizer_source": self.normalizer_source,
             "dpsi_checkpoint": str(args.dpsi_checkpoint) if args.dpsi_checkpoint else None,
             "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
             "init_global_step": int(init_global_step),
@@ -980,6 +1017,7 @@ def main() -> None:
     )
     parser.add_argument("--dpsi-checkpoint")
     parser.add_argument("--init-checkpoint")
+    parser.add_argument("--use-init-normalizers", action="store_true")
     parser.add_argument(
         "--bc-low-checkpoint",
         default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_tcp.pt",
