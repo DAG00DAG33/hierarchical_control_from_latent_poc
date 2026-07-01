@@ -1432,3 +1432,104 @@ without destroying task behavior, but only when constrained strongly enough
 toward the teacher/action manifold. The next scoped experiment should test
 whether a warm start from the object-pose BC baseline or an even stronger
 penalty (`0.5`) can surpass the BC baseline rather than merely match it.
+
+## 2026-07-01 - Run 13: Teacher-Action Penalty 0.5
+
+Motivation:
+
+Run 12 matched the object-pose BC baseline at penalty `0.3`. Run 13 tests the
+next stronger penalty, `0.5`, to see whether scratch PPO can surpass the
+supervised object-pose BC baseline while still improving object-pose
+reachability.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type object_pose \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 0.5 \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run13_object_pose_teacher_penalty05_b8_u250 \
+  --force
+```
+
+Local object-pose eval:
+
+| Run | Penalty | Terminal distance | Reach | P90 distance | Shuffled terminal distance | Train teacher MAE | Eval action saturation | Eval action L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Run 12 | 0.3 | 0.0426 | 0.4702 | 0.0790 | 0.2613 | 0.1836 | 0.1671 | 0.6695 |
+| Run 13 | 0.5 | 0.0414 | 0.4800 | 0.0754 | 0.2531 | 0.1662 | 0.1947 | 0.6742 |
+
+Final PPO diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| updates | 250 |
+| env steps | 10.24M |
+| final train terminal object-pose distance | 0.1255 |
+| final train reach under epsilon | 0.1746 |
+| mean return per step | -0.0028 |
+| policy KL | 0.0151 |
+| clip fraction | 0.1998 |
+| value loss | 0.0651 |
+| explained variance | 0.7794 |
+| action saturation | 0.3375 |
+| NaN count | 0 |
+| elapsed | 2033s |
+
+Oracle object-pose full rollout:
+
+```bash
+uv run python scripts/rl_reachability_object_pose_full_success_eval.py \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle shuffled_oracle \
+  --run8-low results/incremental/rl_reachability_debug/run13_object_pose_teacher_penalty05_b8_u250/privileged_object_pose_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --run8-low-name run13_object_pose_teacher_penalty05_ppo \
+  --output results/incremental/rl_reachability_debug/run13_object_pose_teacher_penalty05_full_success_100.json
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Mean length | Hold object-pose distance | Teacher action MAE | Action saturation | Action L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle object-pose | Phase-B object-pose BC | 0.16 | 0.3561 | 0.3739 | 91.0 | 0.2839 | 0.1792 | 0.0500 | 0.4703 |
+| oracle object-pose | Run 13 penalty 0.5 PPO | 0.21 | 0.4015 | 0.4110 | 89.0 | 0.2315 | 0.1649 | 0.0544 | 0.3785 |
+| shuffled oracle object-pose | Phase-B object-pose BC | 0.01 | 0.1786 | 0.2227 | 99.5 | 1.4147 | 0.3127 | 0.0723 | 0.5509 |
+| shuffled oracle object-pose | Run 13 penalty 0.5 PPO | 0.00 | 0.1549 | 0.1784 | 100.0 | 1.6670 | 0.3319 | 0.0431 | 0.3444 |
+
+Interpretation:
+
+Run 13 is the first scratch RL low-level in this sequence to beat the matching
+supervised object-pose BC baseline under oracle object-pose goals:
+
+```text
+Phase-B object-pose BC: 0.16 success
+Run 13 penalty 0.5 PPO: 0.21 success
+```
+
+It also has better final/max reward, lower hold object-pose distance, lower
+teacher-action MAE, and lower action L2 than the BC baseline in the same
+evaluation. Shuffled object-pose goals still remove success, so the behavior is
+not merely a goal-independent default policy.
+
+The result confirms the central debugging conclusion: PPO can improve the
+low-level controller, but only when the reachability objective is paired with a
+strong enough action-manifold constraint. Pure reachability learns a task-bad
+servo; constrained reachability can now surpass the supervised object-pose
+baseline under oracle goals.
+
+Remaining gap:
+
+This is still an oracle-goal result. To make it deployable, the next scoped
+step is to train/evaluate a learned high-level object-pose predictor or to port
+the same constrained-RL idea back to the deployable TCP high-level interface
+with task/contact-aware reward terms.
