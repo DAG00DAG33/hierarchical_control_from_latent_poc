@@ -229,7 +229,7 @@ def evaluate_policy(
                         .cpu()
                         .numpy()
                     )
-                    if goal_source == "oracle":
+                    if goal_source in {"oracle", "shuffled_oracle"}:
                         oracle = _oracle_endpoint(
                             config,
                             teacher,
@@ -245,10 +245,12 @@ def evaluate_policy(
                             np.linalg.norm(predicted_endpoint[replan] - oracle[replan], axis=-1).tolist()
                         )
                         selected = oracle
-                    elif goal_source == "learned":
+                    elif goal_source in {"learned", "shuffled_learned"}:
                         selected = predicted_endpoint
                     else:
                         raise ValueError(f"Unknown goal_source: {goal_source}")
+                    if goal_source.startswith("shuffled_"):
+                        selected = selected[np.roll(np.arange(batch_envs), 1)]
                     endpoint[replan] = selected[replan]
                     countdown[replan] = update_period
                     high_decisions += int(np.sum(replan))
@@ -324,6 +326,8 @@ def evaluate_policy(
         "low_policy": low_kind,
         "low_checkpoint": str(low_path),
         "goal_source": goal_source,
+        "base_goal_source": goal_source.removeprefix("shuffled_"),
+        "shuffled_goal": bool(goal_source.startswith("shuffled_")),
         "episodes": int(len(successes_np)),
         "seed_start": int(args.seed_start),
         "num_envs": int(num_envs),
@@ -364,7 +368,12 @@ def main() -> None:
         "--run5-low",
         default="results/incremental/rl_reachability_debug/run5_tcp_dpsi_ppo/privileged_tcp_ppo_progress_terminal_n4096_seed0/latest.pt",
     )
-    parser.add_argument("--goal-sources", nargs="+", choices=["oracle", "learned"], default=["oracle", "learned"])
+    parser.add_argument(
+        "--goal-sources",
+        nargs="+",
+        choices=["oracle", "learned", "shuffled_oracle", "shuffled_learned"],
+        default=["oracle", "learned"],
+    )
     parser.add_argument(
         "--output",
         default="results/incremental/rl_reachability_debug/run5_low_level_success_comparison.json",

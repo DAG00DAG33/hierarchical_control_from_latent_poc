@@ -912,3 +912,68 @@ policies are better short-horizon TCP servos but worse task controllers.
 Future RL rewards should therefore include task-relevant object/contact state
 or an imitation/action-distribution constraint, rather than only more
 endpoint-distance optimization.
+
+## 2026-07-01 - Run 7: Full-Rollout Shuffled Goal Metric
+
+Motivation:
+
+The plan requires full rollout metrics for learned, oracle/replay, and
+shuffled goals. Earlier Run 7 full-task evaluations included oracle and learned
+TCP endpoints but not shuffled full-rollout goals.
+
+Implementation:
+
+`scripts/rl_reachability_tcp_full_success_eval.py` now supports two additional
+goal sources:
+
+- `shuffled_oracle`: oracle TCP endpoints are computed per env, then shuffled
+  across envs before being sent to the low level.
+- `shuffled_learned`: learned high-level TCP endpoints are shuffled across
+  envs before being sent to the low level.
+
+Command:
+
+```bash
+uv run python scripts/rl_reachability_tcp_full_success_eval.py \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle learned shuffled_oracle shuffled_learned \
+  --run2-low results/incremental/rl_reachability_debug/run6_true_tcp_b8_u1000/privileged_tcp_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --run5-low results/incremental/rl_reachability_debug/run7_dpsi_progress_b8_u1000/privileged_tcp_ppo_progress_n4096_seed0/latest.pt \
+  --output results/incremental/rl_reachability_debug/run7_progress_full_success_with_shuffled_100.json
+```
+
+Results:
+
+| Goal source | Policy | Success | Final reward | Max reward | Mean length | Hold endpoint error | Action saturation |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle | BC 1800 | 0.65 | 0.7605 | 0.7627 | 63.5 | 0.0359 | 0.0845 |
+| oracle | Run 6 true-TCP | 0.00 | 0.1404 | 0.1850 | 100.0 | 0.0567 | 0.1371 |
+| oracle | Run 7 progress D_psi | 0.01 | 0.1476 | 0.1995 | 99.5 | 0.0644 | 0.0620 |
+| learned | BC 1800 | 0.63 | 0.7469 | 0.7490 | 68.0 | 0.0336 | 0.0757 |
+| learned | Run 6 true-TCP | 0.02 | 0.1466 | 0.1947 | 98.8 | 0.0679 | 0.1369 |
+| learned | Run 7 progress D_psi | 0.00 | 0.1442 | 0.1904 | 100.0 | 0.0578 | 0.0456 |
+| shuffled oracle | BC 1800 | 0.03 | 0.2076 | 0.2545 | 98.0 | 0.1408 | 0.0872 |
+| shuffled oracle | Run 6 true-TCP | 0.00 | 0.1262 | 0.1541 | 100.0 | 0.0618 | 0.1237 |
+| shuffled oracle | Run 7 progress D_psi | 0.00 | 0.1227 | 0.1535 | 100.0 | 0.0590 | 0.0448 |
+| shuffled learned | BC 1800 | 0.02 | 0.2071 | 0.2573 | 98.8 | 0.1234 | 0.0766 |
+| shuffled learned | Run 6 true-TCP | 0.00 | 0.1215 | 0.1580 | 100.0 | 0.0690 | 0.1189 |
+| shuffled learned | Run 7 progress D_psi | 0.00 | 0.1192 | 0.1526 | 100.0 | 0.0654 | 0.0398 |
+
+Interpretation:
+
+BC behaves as expected: full-task success drops from about `0.63-0.65` to
+`0.02-0.03` when full-rollout goals are shuffled. The RL policies have near
+zero task success even under correct oracle/learned goals, so the shuffled
+full-rollout rows cannot distinguish much further; they mainly confirm that
+the RL failure is not caused by high-level goal prediction alone.
+
+Combined with the local input ablation, the picture is now consistent:
+
+```text
+RL low level can chase TCP endpoints locally,
+but endpoint chasing does not produce successful PushT behavior.
+```
+
+The next useful training experiment should change the local reward or policy
+constraint, not simply increase endpoint-only PPO length.
