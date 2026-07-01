@@ -254,10 +254,12 @@ BC-structured reset-mixture diagnostic:
 | Run 24 oracle-target reset PPO | reset mixture, oracle future-state diagnostic | 2.5682 | 0.03 | 3.0692 | 0.2519 |
 | Run 25 BC-warm-start reset PPO | reset mixture, BC-warm-started actor | 3.6321 | 0.16 | 2.3472 | 0.1314 |
 | Run 26 BC-prior reset PPO | reset mixture, BC warm start + BC-prior loss | 3.6656 | 0.21 | 2.7468 | 0.1241 |
+| Run 27 iterative aggregation PPO | demo + BC-deployed + Run26-deployed bank | 1.8723 | 0.06 | 2.0819 | 0.1326 |
 
 Run 25 is the first full-state PPO variant with meaningful held-subgoal task
-recovery, and Run 26 improves it further with an explicit BC-prior loss. Both
-are still far below the Phase-C full BC baseline. The result supports the
+recovery, and Run 26 improves it further with an explicit BC-prior loss. Run 27
+confirms that iterative reset aggregation can improve local/deployed full-goal
+reachability, but task success regresses. The result supports the
 reset-distribution-shift hypothesis, while also showing that reset coverage
 alone is insufficient: the PPO policy needs stronger BC/action-manifold
 structure.
@@ -276,13 +278,16 @@ Run 25 deployment-state branch reachability:
 | Run 26 BC-prior PPO | Phase-C full BC | 2.5858 | 0.5424 | 6.0685 | 0.7615 |
 | Run 26 BC-prior PPO | Run 22 long PPO | 1.0501 | 0.3572 | 2.5966 | 0.9596 |
 | Run 26 BC-prior PPO | Run 26 BC-prior PPO | 1.6019 | 0.8024 | 3.9200 | 0.8981 |
+| Run 27 iterative aggregation PPO | Phase-C full BC | 2.5061 | 0.5853 | 5.1988 | 0.7793 |
+| Run 27 iterative aggregation PPO | Run 26 BC-prior PPO | 1.7118 | 0.8763 | 3.6595 | 0.8791 |
+| Run 27 iterative aggregation PPO | Run 27 iterative aggregation PPO | 1.3109 | 0.6035 | 3.0399 | 0.9021 |
 
-Do not continue plain same-bank training as the main line. Since static reset
-mixtures plus BC structure still trail BC, the next scoped experiment should be
-iterative reset-bank aggregation: deploy the current learned hierarchy, record
-those states and the hierarchy's own held full-state subgoals, add them to the
-bank, and continue training. Oracle branching should remain diagnostic or
-upper-bound evidence only.
+Do not continue plain same-bank training as the main line. Static reset mixtures
+plus BC structure still trail BC, and the first iterative aggregation round
+improves reachability while hurting success. The next scoped experiment should
+keep iterative reset-bank aggregation but strengthen the action/contact
+constraint, for example residual-on-BC PPO or a stronger BC-prior/KL schedule.
+Oracle branching should remain diagnostic or upper-bound evidence only.
 
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
@@ -307,6 +312,8 @@ Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across
 seed banks). Recomputed full-state PPO still fails task success after 2250 total
 updates on the same reset bank. Reset-mixture plus BC warm start improves
 full-state PPO task success to `0.16`, and adding a BC-prior loss improves it
-to `0.21`; both remain below BC. The next promising direction is iterative
-reset-distribution broadening from actual learned-hierarchy rollouts, with BC
-structure retained and no online expert relabeling as the core method.
+to `0.21`; both remain below BC. The first iterative aggregation round improves
+local/deployed reachability but drops success to `0.06`. The next promising
+direction is iterative reset-distribution broadening from actual learned
+hierarchy rollouts with stronger action/contact structure, especially
+residual-on-BC or a stronger KL/behavior-cloning constraint.

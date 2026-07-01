@@ -57,6 +57,10 @@ POLICY_PATH_DEFAULTS = {
         "results/incremental/rl_reachability_debug/run26_full_bc_prior_learned_high_mixture_u250/"
         "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
     ),
+    "run27_iterative_agg_ppo": (
+        "results/incremental/rl_reachability_debug/run27_full_iterative_agg_round1_bc_prior_u250/"
+        "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
+    ),
 }
 
 
@@ -416,6 +420,7 @@ def main() -> None:
     parser.add_argument("--run24-low", default=POLICY_PATH_DEFAULTS["run24_oracle_reset_mixture_ppo"])
     parser.add_argument("--run25-low", default=POLICY_PATH_DEFAULTS["run25_bc_warm_start_ppo"])
     parser.add_argument("--run26-low", default=POLICY_PATH_DEFAULTS["run26_bc_prior_ppo"])
+    parser.add_argument("--run27-low", default=POLICY_PATH_DEFAULTS["run27_iterative_agg_ppo"])
     parser.add_argument(
         "--output",
         default="results/incremental/rl_reachability_debug/run21_full_deployment_reachability_512.json",
@@ -430,6 +435,7 @@ def main() -> None:
         "run24_oracle_reset_mixture_ppo": Path(args.run24_low),
         "run25_bc_warm_start_ppo": Path(args.run25_low),
         "run26_bc_prior_ppo": Path(args.run26_low),
+        "run27_iterative_agg_ppo": Path(args.run27_low),
     }
     rows = []
     for collector_policy in args.collector_policies:

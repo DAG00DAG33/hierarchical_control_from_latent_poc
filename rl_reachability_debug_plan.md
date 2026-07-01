@@ -708,6 +708,15 @@ shuffled-goal success remains low
 deployed-state terminal full-goal distance improves on the newest rollout distribution
 ```
 
+Run 27 caution:
+
+```text
+Iterative aggregation can improve terminal full-goal distance while reducing
+task success. Do not advance rounds based only on geometric reachability.
+If success regresses, the next round must strengthen the action/contact
+constraint before adding more self-generated reset states.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero

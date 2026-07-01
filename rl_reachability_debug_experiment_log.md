@@ -2712,3 +2712,86 @@ Move from a static reset mixture to iterative reset-bank aggregation:
 This is not DAgger-style online expert relabeling. The main labels are the
 subgoals already produced by the hierarchy. Oracle branches may still be used
 only as diagnostics or upper bounds.
+
+## 2026-07-01 - Run 27: Iterative Reset Aggregation Round 1
+
+Motivation:
+
+Run 26 still trailed Phase-C BC. Per the reset-distribution hypothesis, Run 27
+starts the iterative aggregation loop: collect reset states from the current
+learned hierarchy, add them to the reset bank, and continue BC-structured PPO
+from the previous checkpoint.
+
+Dataset:
+
+```text
+data/rl_reachability_debug/full_reset_agg_round1_demo8_bc4_run26_4.h5
+```
+
+Mixture:
+
+| Source | Batches |
+| --- | ---: |
+| original demo/teacher local windows | 8 |
+| Phase-C full BC deployed hierarchy states | 4 |
+| Run 26 BC-prior PPO deployed hierarchy states | 4 |
+
+The deployed targets use the learned high-level full-state subgoal converted to
+a pseudo future state. No online expert action labels are used.
+
+Training setup:
+
+| Field | Value |
+| --- | --- |
+| init checkpoint | Run 26 latest |
+| normalizers | Run 26 latest |
+| reward | true full-goal progress + terminal |
+| regularization | BC-prior loss, weight 1.0 |
+| PPO updates | 250 |
+| envs | 4096 |
+
+Round-1 aggregation-bank local result:
+
+| Metric | Run 27 initial | Run 27 trained | Run 27 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 2.5236 | 1.8723 | 7.1062 |
+| p50 terminal distance | 0.9220 | 0.5393 | 5.3328 |
+| p90 terminal distance | 4.3332 | 3.0827 | 13.1209 |
+| fraction improved | 0.9368 | 0.9578 | 0.6475 |
+| action saturation | 0.0440 | 0.0665 | 0.0499 |
+| action L2 | 0.6367 | 0.6489 | 0.6364 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.74 | 0.8235 | 0.8251 | 1.6095 | 0.0425 |
+| oracle | Run 27 iterative aggregation PPO | 0.06 | 0.3079 | 0.3228 | 2.0819 | 0.1326 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3946 | 0.4002 |
+| shuffled oracle | Run 27 iterative aggregation PPO | 0.00 | 0.1325 | 0.1544 | 10.3694 | 0.3570 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.7948 | 0.9012 | 0.1849 | 1.7518 | 0.8779 |
+| Phase-C full BC | Run 26 BC-prior PPO | no | 8.7948 | 1.0211 | 0.3279 | 2.1136 | 0.9419 |
+| Phase-C full BC | Run 27 iterative aggregation PPO | no | 8.7948 | 0.7323 | 0.2451 | 1.4923 | 0.9419 |
+| Run 27 iterative aggregation PPO | Phase-C full BC | no | 7.6443 | 2.5061 | 0.5853 | 5.1988 | 0.7793 |
+| Run 27 iterative aggregation PPO | Run 26 BC-prior PPO | no | 7.6443 | 1.7118 | 0.8763 | 3.6595 | 0.8791 |
+| Run 27 iterative aggregation PPO | Run 27 iterative aggregation PPO | no | 7.6443 | 1.3109 | 0.6035 | 3.0399 | 0.9021 |
+
+Interpretation:
+
+The iterative reset-bank idea works for the local metric: Run 27 improves
+terminal full-goal distance on the new aggregation bank and on deployed-state
+branch audits, including its own rollout distribution. However, held-oracle
+task success regresses from Run 26 (`0.21 -> 0.06`) despite a better hold-goal
+distance (`2.7468 -> 2.0819`).
+
+This is important evidence: more in-distribution reset states improve geometric
+reachability but can still damage task-compatible contact behavior. The next
+aggregation round should not simply add more Run 27 states and continue with
+the same objective. It should add a stronger action/contact constraint, such
+as residual-on-Phase-C-BC PPO or a stronger BC-prior/KL schedule, while keeping
+the iterative reset-bank collection mechanism.

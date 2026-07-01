@@ -34,6 +34,14 @@ POLICY_PATH_DEFAULTS = {
         "results/incremental/rl_reachability_debug/run22_full_goal_recomputed_penalty10_continue2_u1000/"
         "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
     ),
+    "run25_bc_warm_start_ppo": (
+        "results/incremental/rl_reachability_debug/run25_full_bc_warm_start_learned_high_mixture_penalty10_u250/"
+        "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
+    ),
+    "run26_bc_prior_ppo": (
+        "results/incremental/rl_reachability_debug/run26_full_bc_prior_learned_high_mixture_u250/"
+        "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
+    ),
 }
 
 
@@ -277,6 +285,14 @@ def main() -> None:
     )
     parser.add_argument("--phase-c-full-bc", default=POLICY_PATH_DEFAULTS["phase_c_full_bc"])
     parser.add_argument("--run22-low", default=POLICY_PATH_DEFAULTS["run22_long_full_ppo"])
+    parser.add_argument("--run25-low", default=POLICY_PATH_DEFAULTS["run25_bc_warm_start_ppo"])
+    parser.add_argument("--run26-low", default=POLICY_PATH_DEFAULTS["run26_bc_prior_ppo"])
+    parser.add_argument(
+        "--collector-policies",
+        nargs="+",
+        choices=list(POLICY_PATH_DEFAULTS),
+        default=["phase_c_full_bc", "run22_long_full_ppo"],
+    )
     parser.add_argument(
         "--output",
         default="data/rl_reachability_debug/full_reset_mixture_demo8_bc4_run22_4.h5",
@@ -310,7 +326,11 @@ def main() -> None:
         meta.attrs["max_steps"] = int(args.max_steps)
         meta.attrs["demo_batches"] = int(args.demo_batches)
         meta.attrs["deployed_batches_per_policy"] = int(args.deployed_batches_per_policy)
-        meta.attrs["mixture"] = "50% demo, 25% phase_c_full_bc, 25% run22_long_full_ppo"
+        meta.attrs["collector_policies"] = ",".join(args.collector_policies)
+        meta.attrs["mixture"] = (
+            f"{int(args.demo_batches)} demo batches + "
+            f"{int(args.deployed_batches_per_policy)} deployed batches per collector"
+        )
         meta.attrs["target_source"] = str(args.target_source)
         meta.attrs["high_checkpoint"] = str(args.high_checkpoint)
         output_index = _copy_demo_batches(
@@ -319,24 +339,22 @@ def main() -> None:
             output_index=0,
             demo_batches=int(args.demo_batches),
         )
-        output_index = _collect_policy_batches(
-            args,
-            h5,
-            output_index=output_index,
-            policy_name="phase_c_full_bc",
-            low_path=Path(args.phase_c_full_bc),
-            high_path=Path(args.high_checkpoint),
-            source_label="phase_c_full_bc_deployed",
-        )
-        output_index = _collect_policy_batches(
-            args,
-            h5,
-            output_index=output_index,
-            policy_name="run22_long_full_ppo",
-            low_path=Path(args.run22_low),
-            high_path=Path(args.high_checkpoint),
-            source_label="run22_long_full_ppo_deployed",
-        )
+        policy_paths = {
+            "phase_c_full_bc": Path(args.phase_c_full_bc),
+            "run22_long_full_ppo": Path(args.run22_low),
+            "run25_bc_warm_start_ppo": Path(args.run25_low),
+            "run26_bc_prior_ppo": Path(args.run26_low),
+        }
+        for policy_name in args.collector_policies:
+            output_index = _collect_policy_batches(
+                args,
+                h5,
+                output_index=output_index,
+                policy_name=policy_name,
+                low_path=policy_paths[policy_name],
+                high_path=Path(args.high_checkpoint),
+                source_label=f"{policy_name}_deployed",
+            )
         meta.attrs["batches"] = int(output_index)
     tmp.replace(output)
     print(output)
