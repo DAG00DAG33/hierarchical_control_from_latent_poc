@@ -1139,3 +1139,114 @@ the learned action distribution is task-destructive.
 The next aligned experiment should explicitly penalize action drift or train a
 reward/critic that includes task progress/contact dynamics, rather than only
 changing the goal representation.
+
+## 2026-07-01 - Run 9: Object-Pose PPO With Teacher-Action Penalty
+
+Motivation:
+
+Run 8 showed the same core failure as the TCP runs: the RL low level improved
+short-horizon goal distance but moved far from the teacher action
+distribution. Run 9 adds a simple opt-in imitation penalty to the local PPO
+reward:
+
+```text
+reward = progress_terminal_object_pose_reward
+         - 0.05 * mean_abs(clipped_action - teacher_action)
+```
+
+Implementation:
+
+`scripts/rl_reachability_privileged_tcp_ppo.py` now supports:
+
+```text
+--teacher-action-penalty-weight
+```
+
+The default is `0.0`, so previous runs are unchanged. When the weight is
+nonzero, the runner loads the privileged teacher and logs train-time
+`teacher_action_mae`.
+
+Training command:
+
+```bash
+uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
+  --config configs/pusht_incremental.yaml \
+  --dataset data/rl_rerun/pusht_vector_state_demos_n4096_b8.h5 \
+  --num-envs 4096 \
+  --updates 250 \
+  --horizon 10 \
+  --goal-type object_pose \
+  --reward-mode progress_terminal \
+  --reward-distance-source true_goal \
+  --teacher-action-penalty-weight 0.05 \
+  --num-minibatches 8 \
+  --update-epochs 3 \
+  --checkpoint-every-updates 50 \
+  --eval-episodes 8 \
+  --output-dir results/incremental/rl_reachability_debug/run9_object_pose_teacher_penalty_b8_u250 \
+  --force
+```
+
+Local object-pose eval:
+
+| Metric | Run 8 object-pose PPO | Run 9 + teacher penalty |
+| --- | ---: | ---: |
+| terminal object-pose distance | 0.1517 | 0.0728 |
+| distance reduction | 0.4380 | 0.5169 |
+| reach under epsilon 0.0025 | 0.3160 | 0.4074 |
+| p50 terminal distance | 0.0120 | 0.0055 |
+| p90 terminal distance | 0.4894 | 0.1536 |
+| p99 terminal distance | 1.9135 | 1.2180 |
+| action saturation | 0.1214 | 0.1197 |
+| action L2 | 0.7342 | 0.5813 |
+| final train teacher-action MAE | n/a | 0.2723 |
+
+Final PPO diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| updates | 250 |
+| env steps | 10.24M |
+| final train terminal object-pose distance | 0.1829 |
+| final train reach under epsilon | 0.1213 |
+| mean return per step | 0.0552 |
+| policy KL | 0.0114 |
+| clip fraction | 0.1580 |
+| value loss | 0.0382 |
+| explained variance | 0.8753 |
+| action saturation | 0.2691 |
+| NaN count | 0 |
+| elapsed | 2014s |
+
+Oracle object-pose full rollout:
+
+```bash
+uv run python scripts/rl_reachability_object_pose_full_success_eval.py \
+  --episodes 100 \
+  --num-envs 10 \
+  --goal-sources oracle shuffled_oracle \
+  --run8-low results/incremental/rl_reachability_debug/run9_object_pose_teacher_penalty_b8_u250/privileged_object_pose_ppo_progress_terminal_n4096_seed0/latest.pt \
+  --run8-low-name run9_object_pose_teacher_penalty_ppo \
+  --output results/incremental/rl_reachability_debug/run9_object_pose_teacher_penalty_full_success_100.json
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Mean length | Hold object-pose distance | Teacher action MAE | Action L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| oracle object-pose | Phase-B object-pose BC | 0.17 | 0.3650 | 0.3840 | 90.2 | 0.2721 | 0.1896 | 0.4863 |
+| oracle object-pose | Run 9 teacher-penalty PPO | 0.00 | 0.1546 | 0.1979 | 100.0 | 0.3184 | 0.2939 | 0.3575 |
+| shuffled oracle object-pose | Phase-B object-pose BC | 0.01 | 0.1805 | 0.2225 | 99.5 | 1.5011 | 0.3160 | 0.5419 |
+| shuffled oracle object-pose | Run 9 teacher-penalty PPO | 0.00 | 0.1239 | 0.1648 | 100.0 | 1.8513 | 0.4196 | 0.3456 |
+
+Interpretation:
+
+The teacher-action penalty improves the local object-pose objective even beyond
+Run 8 and reduces action magnitude/teacher-action drift, but it still does not
+recover full-task success. Under oracle object-pose goals, Run 9 has lower
+teacher MAE than Run 8 (`0.2939` versus `0.5181`) but remains worse than the
+Phase-B BC baseline (`0.1896`) and gets `0.00` success.
+
+This narrows the issue further: a weak imitation penalty is not enough. The
+policy still does not reproduce the task-relevant interaction strategy, even
+when it reaches object-pose goals locally. The next useful variants are either
+a much stronger action-distribution constraint/warm start, or a reward/critic
+that directly scores task progress and contact dynamics during the branch.

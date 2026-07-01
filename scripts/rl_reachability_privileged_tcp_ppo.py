@@ -18,6 +18,7 @@ from hcl_poc.incremental import PRE_RL_PHASE_B_GOAL_TYPES, _pre_rl_phase_b_goal
 from hcl_poc.low_level_rl import ScratchLowActorCritic
 from hcl_poc.models import MLP
 from hcl_poc.privileged_z import _clone_mani_state_dict
+from hcl_poc.rl import _rl_paths, load_ppo_agent
 from hcl_poc.rl_rerun import _make_benchmark_env, _to_numpy
 from hcl_poc.utils import Standardizer, default_device, ensure_dir, set_seed, write_json
 
@@ -224,6 +225,13 @@ class LocalTcpPpo:
             lr=float(args.learning_rate),
             eps=1e-5,
         )
+        self.teacher = None
+        self.teacher_action_penalty_weight = float(
+            getattr(args, "teacher_action_penalty_weight", 0.0)
+        )
+        if self.teacher_action_penalty_weight:
+            self.teacher = load_ppo_agent(_rl_paths(self.config).best, self.device)
+            self.teacher.eval()
         self.rng = np.random.default_rng(args.seed + 4_110_000)
         self.dpsi_models: list[TcpDpsi] = []
         self.dpsi_input_norm: Standardizer | None = None
@@ -484,6 +492,23 @@ class LocalTcpPpo:
                 )
         else:
             raise ValueError(f"Unknown reward mode: {self.args.reward_mode}")
+        teacher_action_mae = np.full(self.num_envs, np.nan, dtype=np.float32)
+        if self.teacher is not None and self.teacher_action_penalty_weight:
+            teacher_action = torch.clamp(
+                self.teacher.actor_mean(
+                    torch.from_numpy(self.current_state).to(self.device).float()
+                ),
+                self.action_low,
+                self.action_high,
+            )
+            teacher_action_mae = (
+                torch.mean(torch.abs(clipped - teacher_action), dim=-1)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+            )
+            reward = reward - self.teacher_action_penalty_weight * teacher_action_mae
         self.obs = next_obs
         self.current_state = next_state
         self.current_state_norm = self.state_norm.transform(next_state)
@@ -501,6 +526,7 @@ class LocalTcpPpo:
             .astype(np.bool_),
             "saturated": torch.any(raw_action != clipped, dim=-1).detach().cpu().numpy(),
             "action_l2": torch.linalg.vector_norm(clipped, dim=-1).detach().cpu().numpy(),
+            "teacher_action_mae": teacher_action_mae,
         }
         if segment_end and auto_reset:
             self.reset_local_episode()
@@ -655,10 +681,11 @@ class LocalTcpPpo:
                 else None
             ),
             "dpsi_target_scale": float(args.dpsi_target_scale),
-            "reward": args.reward_mode,
-            "terminal_weight": float(args.terminal_weight),
-            "distance_progress_weight": float(args.distance_progress_weight),
-            "success_epsilon": float(args.success_epsilon),
+                "reward": args.reward_mode,
+                "terminal_weight": float(args.terminal_weight),
+                "distance_progress_weight": float(args.distance_progress_weight),
+                "teacher_action_penalty_weight": float(args.teacher_action_penalty_weight),
+                "success_epsilon": float(args.success_epsilon),
             "learning_rate": float(args.learning_rate),
             "initial_logstd": float(args.initial_logstd),
             "gamma": gamma,
@@ -694,6 +721,7 @@ class LocalTcpPpo:
                 terminal_distances = []
                 rewards = []
                 action_l2 = []
+                teacher_action_maes = []
                 saturated = 0
                 nan_count = 0
                 self.agent.eval()
@@ -716,6 +744,11 @@ class LocalTcpPpo:
                     distances.extend(distance.tolist())
                     rewards.extend(reward.tolist())
                     action_l2.extend(metrics["action_l2"].tolist())
+                    teacher_action_maes.extend(
+                        np.asarray(metrics["teacher_action_mae"], dtype=np.float32)
+                        .reshape(-1)
+                        .tolist()
+                    )
                     saturated += int(np.sum(metrics["saturated"]))
                     if step == self.horizon - 1:
                         terminal_distances.extend(metrics["next_distance"].tolist())
@@ -801,6 +834,11 @@ class LocalTcpPpo:
                     ),
                     "action_saturation": float(saturated / float(batch_size)),
                     "action_l2_mean": float(np.mean(action_l2)),
+                    "teacher_action_mae": (
+                        float(np.nanmean(teacher_action_maes))
+                        if np.any(~np.isnan(np.asarray(teacher_action_maes, dtype=np.float32)))
+                        else None
+                    ),
                     "policy_kl": float(np.mean(approx_kls)),
                     "clip_fraction": float(np.mean(clipfracs)),
                     "entropy": float(np.mean(entropies)),
@@ -881,6 +919,7 @@ def main() -> None:
     parser.add_argument("--dpsi-target-scale", type=float, default=1000.0)
     parser.add_argument("--terminal-weight", type=float, default=1.0)
     parser.add_argument("--distance-progress-weight", type=float, default=1.0)
+    parser.add_argument("--teacher-action-penalty-weight", type=float, default=0.0)
     parser.add_argument("--success-epsilon", type=float, default=0.0025)
     parser.add_argument("--num-minibatches", type=int, default=8)
     parser.add_argument("--update-epochs", type=int, default=3)

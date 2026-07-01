@@ -135,6 +135,7 @@ def evaluate_policy(
     config = load_config(args.config)
     device = default_device()
     teacher = load_ppo_agent(_rl_paths(config).best, device)
+    base_low_kind = "run8_object_pose_ppo" if low_kind.startswith("run") else low_kind
     if low_kind == "phase_b_object_pose_bc":
         low_model, low_payload = _load_phase_b_low(low_path, device)
     else:
@@ -206,7 +207,7 @@ def evaluate_policy(
                     high_decisions += int(np.sum(replan))
                 remaining = np.maximum(countdown, 1).astype(np.float32)
                 raw_action = _low_action(
-                    low_kind,
+                    base_low_kind,
                     low_model,
                     low_payload,
                     state,
@@ -322,6 +323,7 @@ def main() -> None:
             "privileged_object_pose_ppo_progress_terminal_n4096_seed0/latest.pt"
         ),
     )
+    parser.add_argument("--run8-low-name", default="run8_object_pose_ppo")
     parser.add_argument(
         "--goal-sources",
         nargs="+",
@@ -335,7 +337,7 @@ def main() -> None:
     args = parser.parse_args()
     policies = [
         ("phase_b_object_pose_bc", Path(args.phase_b_low)),
-        ("run8_object_pose_ppo", Path(args.run8_low)),
+        (args.run8_low_name, Path(args.run8_low)),
     ]
     rows = [
         evaluate_policy(args, low_kind, path, goal_source)
