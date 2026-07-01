@@ -19,6 +19,7 @@ from rl_reachability_tcp_full_success_eval import (
     _load_high,
     _load_rl_low,
     _low_action,
+    _to_numpy,
 )
 from rl_reachability_privileged_tcp_ppo import _obs_state_np
 
@@ -79,6 +80,8 @@ def _branch_rollout(
     prev = previous_action.copy()
     action_saturation = np.zeros(len(goal_endpoint), dtype=np.float32)
     action_l2 = np.zeros(len(goal_endpoint), dtype=np.float32)
+    terminal_reward = np.zeros(len(goal_endpoint), dtype=np.float32)
+    max_reward = np.full(len(goal_endpoint), -np.inf, dtype=np.float32)
     for step in range(horizon):
         state = _obs_state_np(obs)
         remaining = np.full(len(goal_endpoint), max(horizon - step, 1), dtype=np.float32)
@@ -101,9 +104,12 @@ def _branch_rollout(
         clipped = np.clip(raw_action, action_low_np, action_high_np).astype(np.float32)
         action_saturation += saturated
         action_l2 += np.linalg.norm(clipped, axis=-1).astype(np.float32)
-        obs, _reward, _terminated, _truncated, _info = branch_env.step(
+        obs, reward, _terminated, _truncated, _info = branch_env.step(
             torch.from_numpy(clipped).to(device).float()
         )
+        reward_np = _to_numpy(reward).reshape(-1).astype(np.float32)
+        terminal_reward = reward_np
+        max_reward = np.maximum(max_reward, reward_np)
         prev = clipped
     terminal_state = _obs_state_np(obs)
     terminal_distance = _sq_tcp_distance(terminal_state, goal_endpoint)
@@ -115,6 +121,8 @@ def _branch_rollout(
         "improved": (terminal_distance[mask] < start_distance[mask]).astype(np.float32),
         "action_saturation": (action_saturation[mask] / float(horizon)).astype(np.float32),
         "action_l2": (action_l2[mask] / float(horizon)).astype(np.float32),
+        "terminal_reward": terminal_reward[mask],
+        "max_reward": max_reward[mask],
     }
 
 
@@ -149,6 +157,8 @@ def _summary(
         "fraction_improved_from_start": float(np.mean(store["improved"])),
         "action_saturation": float(np.mean(store["action_saturation"])),
         "action_l2_mean": float(np.mean(store["action_l2"])),
+        "terminal_reward": float(np.mean(store["terminal_reward"])),
+        "max_reward": float(np.mean(store["max_reward"])),
     }
 
 

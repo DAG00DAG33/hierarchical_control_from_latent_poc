@@ -754,3 +754,79 @@ timeout 8h uv run python scripts/rl_reachability_privileged_tcp_ppo.py \
   --output-dir results/incremental/rl_reachability_debug/run7_dpsi_bc_advantage_b8_u1000 \
   --force
 ```
+
+Run 7 final reward-variant results:
+
+| Variant | Status | Updates | Eval terminal sq dist | Eval reach | Eval p90/p99 sq dist | Eval action saturation |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| terminal-only D_psi | incomplete/hung | 52 | 0.002574 train last | 0.6731 train last | n/a | 0.0413 train last |
+| progress-only D_psi | complete | 1000 | 0.000339 | 0.9872 | 0.000806 / 0.002845 | 0.2735 |
+| BC-advantage terminal D_psi | complete | 1000 | 0.001448 | 0.8599 | 0.003155 / 0.012149 | 0.2909 |
+
+Local reset-bank comparison on the larger b8 reset bank:
+
+| Goal split | Policy | Reach | Terminal sq dist | TCP error | Action saturation |
+| --- | --- | ---: | ---: | ---: | ---: |
+| true goal | BC 1800 | 0.9834 | 0.000261 | 0.0105 m | 0.2337 |
+| true goal | Run 6 true-TCP | 0.9752 | 0.000460 | 0.0175 m | 0.3238 |
+| true goal | Run 7 progress D_psi | 0.9849 | 0.000336 | 0.0142 m | 0.2693 |
+| shuffled goal | BC 1800 | 0.2285 | 0.011329 | 0.0921 m | 0.1949 |
+| shuffled goal | Run 6 true-TCP | 0.9205 | 0.001013 | 0.0230 m | 0.3304 |
+| shuffled goal | Run 7 progress D_psi | 0.9237 | 0.000930 | 0.0208 m | 0.2729 |
+| true goal | Run 7 BC-advantage D_psi | 0.9059 | 0.001175 | 0.0277 m | 0.2905 |
+| shuffled goal | Run 7 BC-advantage D_psi | 0.8356 | 0.002136 | 0.0331 m | 0.3013 |
+
+Full-task success with oracle and learned high-level goals:
+
+| Variant | Goal source | BC 1800 success | Run 6 true-TCP success | RL variant success |
+| --- | --- | ---: | ---: | ---: |
+| Run 7 progress D_psi eval | oracle TCP endpoint | 0.67 | 0.00 | 0.01 |
+| Run 7 progress D_psi eval | learned high endpoint | 0.59 | 0.02 | 0.00 |
+| Run 7 BC-advantage eval | oracle TCP endpoint | 0.69 | 0.00 | 0.00 |
+| Run 7 BC-advantage eval | learned high endpoint | 0.68 | 0.02 | 0.00 |
+
+The reward variants did not solve task success. Progress-only is the best
+completed local reachability variant, but its full-task success remains near
+zero. Per the stop rule, the next step was deployment-distribution debugging
+instead of advancing to other planned experiments.
+
+Deployment-distribution reachability for Run 7 progress-only:
+
+This diagnostic deploys a collector hierarchy, snapshots learned high-level
+replanning states, then branch-evaluates candidate low levels on the learned
+high-level TCP endpoint from those actual rollout states. The same branch
+rollout also records the environment task reward over the low-level segment.
+
+| Collector | Candidate | Goal | Reach | Terminal sq dist | TCP error | Terminal reward | Max reward |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| BC 1800 | BC 1800 | learned | 0.9561 | 0.000993 | 0.0184 m | 0.2767 | 0.2978 |
+| BC 1800 | BC 1800 | shuffled learned | 0.5610 | 0.009021 | 0.0644 m | 0.2706 | 0.2805 |
+| BC 1800 | Run 6 true-TCP | learned | 0.9366 | 0.000506 | 0.0165 m | 0.2794 | 0.2934 |
+| BC 1800 | Run 6 true-TCP | shuffled learned | 0.8780 | 0.001849 | 0.0239 m | 0.2469 | 0.2716 |
+| BC 1800 | Run 7 progress D_psi | learned | 0.9756 | 0.000380 | 0.0144 m | 0.2680 | 0.2795 |
+| BC 1800 | Run 7 progress D_psi | shuffled learned | 0.9171 | 0.000739 | 0.0189 m | 0.2432 | 0.2688 |
+| Run 7 progress D_psi | BC 1800 | learned | 0.4800 | 0.009509 | 0.0726 m | 0.1533 | 0.1614 |
+| Run 7 progress D_psi | BC 1800 | shuffled learned | 0.2500 | 0.019532 | 0.1089 m | 0.1495 | 0.1586 |
+| Run 7 progress D_psi | Run 6 true-TCP | learned | 0.8900 | 0.001459 | 0.0276 m | 0.1466 | 0.1534 |
+| Run 7 progress D_psi | Run 6 true-TCP | shuffled learned | 0.8000 | 0.003191 | 0.0352 m | 0.1411 | 0.1535 |
+| Run 7 progress D_psi | Run 7 progress D_psi | learned | 0.9350 | 0.000792 | 0.0229 m | 0.1479 | 0.1548 |
+| Run 7 progress D_psi | Run 7 progress D_psi | shuffled learned | 0.8500 | 0.002816 | 0.0326 m | 0.1431 | 0.1550 |
+
+Interpretation:
+
+The best RL low level can reach learned high-level TCP endpoints from both
+BC-collected and RL-collected hierarchy states. However, it also reaches
+shuffled learned endpoints nearly as well, so it is still weakly
+goal-selective. More importantly, when the collector is the RL hierarchy, all
+candidate branch rollouts have much lower task reward than from BC-collected
+states. This suggests the RL low level is driving the system into a bad
+deployment state distribution even while satisfying short-horizon TCP endpoint
+reachability.
+
+The current hypothesis is that TCP endpoint reachability is an insufficient
+training target for this low-level controller. The RL policy learns a generic
+motion that reaches endpoints but does not preserve the contact/object dynamics
+that make the BC/teacher hierarchy solve PushT. Longer endpoint-only PPO is
+unlikely to fix task success unless the reward or diagnostic target includes
+task-relevant interaction state, stronger goal selectivity, or imitation-style
+constraints on the low-level behavior.
