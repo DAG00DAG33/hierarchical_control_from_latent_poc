@@ -1,0 +1,50 @@
+{
+  "episodes_per_setting": 50,
+  "goal_type": "full",
+  "high_checkpoint": "artifacts/incremental/rl_reachability_debug/full_goal_high_predictor/seed0/predictor.pt",
+  "learned_goal_scale": 1.0,
+  "learned_robot_target_mode": "predicted",
+  "rows": [
+    {
+      "action_l2_mean": 0.5626044246375871,
+      "action_saturation_rate": 0.08969696969696969,
+      "episodes": 50,
+      "final_reward": 0.7342150573432445,
+      "goal_source": "learned",
+      "goal_type": "full",
+      "high_level_decisions_per_episode": 6.88,
+      "hold_goal_distance": 2.8428151625903353,
+      "low_checkpoint": "artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt",
+      "low_policy": "phase_b_bc",
+      "max_reward": 0.7381973128020763,
+      "mean_episode_length": 66.0,
+      "num_envs": 10,
+      "seed_start": 2380000,
+      "selected_goal_initial_distance": 8.276724570963482,
+      "shuffled_goal": false,
+      "success": 0.6200000047683716,
+      "teacher_action_mae": 0.07994469923323556
+    },
+    {
+      "action_l2_mean": 0.49576657725616174,
+      "action_saturation_rate": 0.06764789131050099,
+      "episodes": 50,
+      "final_reward": 0.6839383217692375,
+      "goal_source": "learned",
+      "goal_type": "full",
+      "high_level_decisions_per_episode": 7.34,
+      "hold_goal_distance": 1.572489795520046,
+      "low_checkpoint": "results/incremental/rl_reachability_debug/run37_full_success_filtered_round4_residual_bc_alpha015_u250/privileged_full_ppo_progress_terminal_n4096_seed0/checkpoints/update_0025.pt",
+      "low_policy": "run37_u0025",
+      "max_reward": 0.6871373426914215,
+      "mean_episode_length": 70.66,
+      "num_envs": 10,
+      "seed_start": 2380000,
+      "selected_goal_initial_distance": 6.576795185683929,
+      "shuffled_goal": false,
+      "success": 0.5400000214576721,
+      "teacher_action_mae": 0.059349579473477916
+    }
+  ],
+  "run": "rl_reachability_debug_goal_full_success"
+}

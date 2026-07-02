@@ -391,6 +391,17 @@ with the same sampler/objective. A better aggregation variant should filter or
 weight useful/successful deployed rollouts and keep a strong contact/action
 prior.
 
+The success-filtered version of that idea also failed. Run 37 collected 12
+Phase-C BC deployed batches and 12 Run 30 deployed batches, kept the top 4 per
+policy by any-success rate, and continued Run 30 residual-on-BC PPO for 250
+updates. The selected Run 30 deployed batches had better rollout scores than
+Run 36's unfiltered bank, and same-bank terminal distance improved, but held
+task success got worse: `0.57` oracle success and `0.47` learned-high success.
+The 50-episode checkpoint screen did not reveal a clearly better intermediate
+checkpoint. This closes the simple deployed-bank aggregation branch: batch
+filtering alone still optimizes reachability at the expense of task-compatible
+behavior.
+
 The strongest task-success result remains constrained object-pose PPO with a
 teacher-action penalty. The strongest hierarchy baseline is the corrected
 Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across

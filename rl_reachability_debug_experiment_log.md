@@ -3332,3 +3332,62 @@ and objective. The next version would need to change the data selection or
 weighting, for example filtering/weighting successful BC deployments or adding
 a stronger contact/action prior, rather than simply appending all deployed
 states.
+
+## 2026-07-02 - Run 37: Success-Filtered Deployed Reset-Bank Continuation
+
+Purpose:
+
+Test whether Run 36 failed because the deployed reset bank included too many
+low-quality rollout batches. A larger candidate bank was collected from 12
+Phase-C BC deployed batches and 12 Run 30 deployed batches, then filtered down
+to the top 4 batches per policy by per-env any-success rate. The 8 demo batches
+were kept unchanged.
+
+Selected deployed batches:
+
+| Collector policy | Selected any-success scores |
+| --- | --- |
+| Phase-C full BC | 0.6160, 0.6123, 0.6118, 0.6113 |
+| Run 30 residual-on-BC PPO | 0.5923, 0.5901, 0.5850, 0.5837 |
+
+Training setup:
+
+```text
+dataset: data/rl_reachability_debug/full_reset_agg_round4_success_filtered_demo8_bc4_run30_4.h5
+init checkpoint: Run 30 residual-on-BC PPO
+policy mode: bc_residual
+residual alpha: 0.15
+residual penalty: 0.01
+updates: 250
+num envs: 4096
+reward: true full-goal progress + terminal
+```
+
+Result:
+
+| Evaluation | Phase-C full BC success | Run 30 residual success | Run 36 success | Run 37 success |
+| --- | ---: | ---: | ---: | ---: |
+| oracle full-state subgoal | 0.68-0.73 | 0.73 | 0.68 | 0.57 |
+| learned-high full-state subgoal | 0.62-0.66 | 0.55 | 0.53 | 0.47 |
+| shuffled learned | 0.00 | 0.00 | 0.00 | 0.00 |
+
+Checkpoint screen:
+
+```text
+50-episode learned-high screen:
+update 25:  0.54
+update 50:  0.52
+update 100: 0.58
+update 150: 0.58
+update 200: 0.48
+```
+
+Interpretation:
+
+Success filtering improved the selected deployed batch quality and same-bank
+training terminal distance, but it made task success worse. This is stronger
+evidence that local full-goal reachability metrics and deployed reset-bank
+coverage are not sufficient. Continuing residual PPO on deployed states can
+optimize geometric reachability while eroding task-compatible behavior. Stop
+this aggregation branch unless the next variant changes the objective or policy
+constraint more substantially than batch filtering.

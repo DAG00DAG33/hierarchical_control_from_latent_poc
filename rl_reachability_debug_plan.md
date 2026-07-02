@@ -755,6 +755,18 @@ data selection or weighting, for example filtering/weighting useful successful
 deployed rollouts, while keeping a strong residual/BC action prior.
 ```
 
+Run 37 caution:
+
+```text
+Success-filtering deployed reset batches also does not fix the gap. Run 37
+selected the top Phase-C and Run 30 deployed batches by rollout any-success,
+then continued Run 30 residual-on-BC PPO. Same-bank terminal distance improved,
+but held task success worsened to 0.57 oracle and 0.47 learned-high. Do not
+continue this deployed-bank aggregation branch with only batch filtering. The
+next full-state PPO attempt would need a different objective/policy constraint,
+not just more or cleaner deployed reset states.
+```
+
 Run 30 update:
 
 ```text
