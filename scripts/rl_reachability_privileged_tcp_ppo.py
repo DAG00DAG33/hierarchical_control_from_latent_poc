@@ -273,6 +273,13 @@ class LocalTcpPpo:
             self.goal_norm = Standardizer.from_state_dict(init_payload["goal_norm"])
             self.normalizer_source = str(args.init_checkpoint)
         self.condition_dim = self.state_dim + self.goal_dim + self.action_dim + 1
+        self.policy_mode = str(getattr(args, "policy_mode", "direct"))
+        if self.policy_mode not in {"direct", "bc_residual"}:
+            raise ValueError(f"Unknown policy mode: {self.policy_mode}")
+        self.residual_alpha = float(getattr(args, "residual_alpha", 0.1))
+        self.residual_penalty_weight = float(
+            getattr(args, "residual_penalty_weight", 0.0)
+        )
         if self.num_envs != int(self.h5[self.batch_keys[0]]["observations_state"].shape[1]):
             raise ValueError(
                 "Run 2 currently expects --num-envs to match the vector dataset num_envs"
@@ -405,7 +412,10 @@ class LocalTcpPpo:
             self.bc_cond_norm = Standardizer.from_state_dict(bc_entry["cond_norm"])
             self.bc_branch_env = _make_benchmark_env(self.config, self.num_envs, "state")
             self.bc_branch_env.reset(seed=args.seed + 4_115_000)
-        if float(getattr(args, "bc_prior_weight", 0.0)) > 0.0:
+        if (
+            float(getattr(args, "bc_prior_weight", 0.0)) > 0.0
+            or self.policy_mode == "bc_residual"
+        ):
             bc_prior_path = Path(args.bc_prior_checkpoint)
             if not bc_prior_path.exists():
                 raise FileNotFoundError(bc_prior_path)
@@ -597,6 +607,22 @@ class LocalTcpPpo:
         normalized_action = self.bc_prior_model(bc_condition_norm)
         raw_action = normalized_action * bc_action_std + bc_action_mean
         return torch.clamp(raw_action, self.action_low, self.action_high)
+
+    def action_from_policy_output(
+        self,
+        condition: torch.Tensor,
+        raw_action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.policy_mode == "direct":
+            unclipped = raw_action
+            clipped = torch.clamp(unclipped, self.action_low, self.action_high)
+            residual = torch.zeros_like(clipped)
+            return clipped, unclipped, residual
+        base_action = self.bc_prior_action(condition)
+        residual = self.residual_alpha * torch.tanh(raw_action)
+        unclipped = base_action + residual
+        clipped = torch.clamp(unclipped, self.action_low, self.action_high)
+        return clipped, unclipped, residual
 
     def close(self) -> None:
         if self.bc_branch_env is not None:
@@ -790,12 +816,13 @@ class LocalTcpPpo:
     def step_local(
         self,
         action: torch.Tensor,
+        condition: torch.Tensor,
         previous_distance: np.ndarray,
         *,
         auto_reset: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         raw_action = action
-        clipped = torch.clamp(raw_action, self.action_low, self.action_high)
+        clipped, unclipped, residual = self.action_from_policy_output(condition, raw_action)
         next_obs, _env_reward, _terminated, _truncated, info = self.env.step(clipped)
         next_state = _obs_state_np(next_obs)
         next_goal = (
@@ -838,6 +865,9 @@ class LocalTcpPpo:
                 )
         else:
             raise ValueError(f"Unknown reward mode: {self.args.reward_mode}")
+        residual_penalty = torch.mean(residual.square(), dim=-1).detach().cpu().numpy()
+        if self.policy_mode == "bc_residual" and self.residual_penalty_weight:
+            reward = reward - self.residual_penalty_weight * residual_penalty
         teacher_action_mae = np.full(self.num_envs, np.nan, dtype=np.float32)
         if self.teacher is not None and self.teacher_action_penalty_weight:
             teacher_action = torch.clamp(
@@ -873,8 +903,10 @@ class LocalTcpPpo:
             "success": _to_numpy(info.get("success", np.zeros(self.num_envs, dtype=np.bool_)))
             .reshape(-1)
             .astype(np.bool_),
-            "saturated": torch.any(raw_action != clipped, dim=-1).detach().cpu().numpy(),
+            "saturated": torch.any(unclipped != clipped, dim=-1).detach().cpu().numpy(),
             "action_l2": torch.linalg.vector_norm(clipped, dim=-1).detach().cpu().numpy(),
+            "residual_l2": torch.linalg.vector_norm(residual, dim=-1).detach().cpu().numpy(),
+            "residual_penalty": residual_penalty.astype(np.float32),
             "teacher_action_mae": teacher_action_mae,
         }
         if segment_end and auto_reset:
@@ -897,6 +929,7 @@ class LocalTcpPpo:
         terminal_distances = []
         reductions = []
         action_l2 = []
+        residual_l2 = []
         saturated = 0
         total_actions = 0
         for reference in references:
@@ -913,10 +946,12 @@ class LocalTcpPpo:
                 )
                 _reward, _done, metrics = self.step_local(
                     action,
+                    condition.float(),
                     distance,
                     auto_reset=False,
                 )
                 action_l2.extend(metrics["action_l2"].tolist())
+                residual_l2.extend(metrics["residual_l2"].tolist())
                 saturated += int(np.sum(metrics["saturated"]))
                 total_actions += self.num_envs
             terminal = metrics["next_distance"]
@@ -938,6 +973,7 @@ class LocalTcpPpo:
             "fraction_improved_from_start": float(np.mean(reduction_np > 0.0)),
             "action_saturation": float(saturated / max(total_actions, 1)),
             "action_l2_mean": float(np.mean(action_l2)),
+            "residual_l2_mean": float(np.mean(residual_l2)) if residual_l2 else 0.0,
             "reset_state_l2_mean": float(np.mean(self.reset_errors[-max(episodes, 1) :])),
         }
 
@@ -965,6 +1001,7 @@ class LocalTcpPpo:
                 "goal_dim": self.goal_dim,
                 "goal_type": self.goal_type,
                 "action_dim": self.action_dim,
+                "policy_mode": self.policy_mode,
             },
             path,
         )
@@ -1033,10 +1070,15 @@ class LocalTcpPpo:
                 if args.reward_mode == "bc_advantage_terminal"
                 else None
             ),
-            "bc_prior_checkpoint": (
-                str(args.bc_prior_checkpoint) if float(args.bc_prior_weight) > 0.0 else None
+                "bc_prior_checkpoint": (
+                str(args.bc_prior_checkpoint)
+                if (float(args.bc_prior_weight) > 0.0 or self.policy_mode == "bc_residual")
+                else None
             ),
             "bc_prior_weight": float(args.bc_prior_weight),
+            "policy_mode": self.policy_mode,
+            "residual_alpha": float(self.residual_alpha),
+            "residual_penalty_weight": float(self.residual_penalty_weight),
             "dpsi_target_scale": float(args.dpsi_target_scale),
                 "reward": args.reward_mode,
                 "terminal_weight": float(args.terminal_weight),
@@ -1078,6 +1120,8 @@ class LocalTcpPpo:
                 terminal_distances = []
                 rewards = []
                 action_l2 = []
+                residual_l2 = []
+                residual_penalties = []
                 teacher_action_maes = []
                 saturated = 0
                 nan_count = 0
@@ -1095,12 +1139,18 @@ class LocalTcpPpo:
                     raw_action_buf[step] = raw_action
                     logprob_buf[step] = logprob
                     value_buf[step] = value
-                    reward, done, metrics = self.step_local(raw_action, distance)
+                    reward, done, metrics = self.step_local(
+                        raw_action,
+                        condition.float(),
+                        distance,
+                    )
                     reward_buf[step] = torch.from_numpy(reward).to(self.device)
                     next_done = torch.from_numpy(done.astype(np.float32)).to(self.device)
                     distances.extend(distance.tolist())
                     rewards.extend(reward.tolist())
                     action_l2.extend(metrics["action_l2"].tolist())
+                    residual_l2.extend(metrics["residual_l2"].tolist())
+                    residual_penalties.extend(metrics["residual_penalty"].tolist())
                     teacher_action_maes.extend(
                         np.asarray(metrics["teacher_action_mae"], dtype=np.float32)
                         .reshape(-1)
@@ -1169,7 +1219,7 @@ class LocalTcpPpo:
                         value_loss = 0.5 * ((newvalue - b_returns[mb]) ** 2).mean()
                         entropy_loss = entropy.mean()
                         loss = pg_loss - ent_coef * entropy_loss + value_coef * value_loss
-                        if float(args.bc_prior_weight) > 0.0:
+                        if float(args.bc_prior_weight) > 0.0 and self.policy_mode == "direct":
                             with torch.no_grad():
                                 bc_prior_target = self.bc_prior_action(b_conditions[mb])
                             bc_prior_loss = torch.mean(
@@ -1201,6 +1251,10 @@ class LocalTcpPpo:
                     ),
                     "action_saturation": float(saturated / float(batch_size)),
                     "action_l2_mean": float(np.mean(action_l2)),
+                    "residual_l2_mean": float(np.mean(residual_l2)) if residual_l2 else 0.0,
+                    "residual_penalty_mean": (
+                        float(np.mean(residual_penalties)) if residual_penalties else 0.0
+                    ),
                     "teacher_action_mae": (
                         float(np.nanmean(teacher_action_maes))
                         if np.any(~np.isnan(np.asarray(teacher_action_maes, dtype=np.float32)))
@@ -1295,6 +1349,9 @@ def main() -> None:
         default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt",
     )
     parser.add_argument("--bc-prior-weight", type=float, default=0.0)
+    parser.add_argument("--policy-mode", choices=["direct", "bc_residual"], default="direct")
+    parser.add_argument("--residual-alpha", type=float, default=0.1)
+    parser.add_argument("--residual-penalty-weight", type=float, default=0.0)
     parser.add_argument(
         "--bc-low-checkpoint",
         default="artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_tcp.pt",

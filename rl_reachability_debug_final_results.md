@@ -257,6 +257,7 @@ BC-structured reset-mixture diagnostic:
 | Run 27 iterative aggregation PPO | demo + BC-deployed + Run26-deployed bank | 1.8723 | 0.06 | 2.0819 | 0.1326 |
 | Run 28 iterative aggregation BC-prior-5 PPO | same bank as Run 27, stronger BC prior | 1.9199 | 0.25 | 1.4907 | 0.0870 |
 | Run 29 iterative aggregation round-2 PPO | demo + BC-deployed + Run28-deployed bank | 1.6893 | 0.25 | 1.7237 | 0.1032 |
+| Run 30 residual-on-BC PPO | round-2 bank, BC base + bounded residual | 1.9028 | 0.73 | 2.7548 | 0.0513 |
 
 Run 25 is the first full-state PPO variant with meaningful held-subgoal task
 recovery, and Run 26 improves it further with an explicit BC-prior loss. Run 27
@@ -265,9 +266,11 @@ reachability, but task success regresses when the BC prior is too weak. Run 28
 uses the same aggregation bank with a stronger BC prior and gives the best
 full-state PPO result so far (`0.25` oracle held success). Run 29 improves
 deployed-state reachability in a second aggregation round, but task success is
-flat. The result supports the reset-distribution-shift hypothesis, while also
-showing that reset coverage alone is insufficient: the PPO policy needs stronger
-BC/action-manifold structure.
+flat. Run 30 changes the policy parameterization to residual-on-BC and gives
+the best full-state task result so far (`0.73` oracle held success, shuffled
+success `0.00`). The result supports the reset-distribution-shift hypothesis,
+while also showing that reset coverage alone is insufficient: the PPO policy
+needs stronger BC/action-manifold structure.
 
 Run 25 deployment-state branch reachability:
 
@@ -292,13 +295,16 @@ Run 25 deployment-state branch reachability:
 | Run 29 iterative aggregation round-2 PPO | Phase-C full BC | 2.7721 | 0.5745 | 5.2880 | 0.7390 |
 | Run 29 iterative aggregation round-2 PPO | Run 28 BC-prior-5 PPO | 1.5585 | 0.5494 | 2.7619 | 0.8419 |
 | Run 29 iterative aggregation round-2 PPO | Run 29 round-2 PPO | 1.4397 | 0.4837 | 2.3993 | 0.8914 |
+| Run 30 residual-on-BC PPO | Phase-C full BC | 1.2460 | 0.2036 | 2.3291 | 0.8281 |
+| Run 30 residual-on-BC PPO | Run 29 round-2 PPO | 0.9670 | 0.2088 | 1.6343 | 0.9180 |
+| Run 30 residual-on-BC PPO | Run 30 residual-on-BC PPO | 1.6468 | 0.2095 | 2.3214 | 0.8516 |
 
 Do not continue plain same-bank training as the main line. Static reset mixtures
 plus BC structure still trail BC, and the first iterative aggregation round only
 works when the BC/action constraint is strong enough. The next scoped experiment
 should keep the aggregated reset banks but change the policy constraint:
-residual-on-BC PPO or a more explicit KL-to-BC objective. Oracle branching
-should remain diagnostic or upper-bound evidence only.
+residual-on-BC PPO is now validated as the stronger task-success direction.
+Oracle branching should remain diagnostic or upper-bound evidence only.
 
 For historical comparison only, update-period-1/full-state replanning reproduces
 the old Phase-B behavior but is not the target hierarchy:
@@ -328,5 +334,7 @@ reachability but drops success to `0.06` with a weak BC prior; increasing the
 BC-prior weight recovers and improves success to `0.25`. The next promising
 direction is not more identical aggregation rounds; Run 29 shows that round 2
 improves deployed reachability but not success. The next step should use the
-aggregated reset banks with residual-on-BC or a stronger explicit
-KL/behavior-cloning constraint.
+aggregated reset banks with residual-on-BC. Run 30 already reaches BC-level
+task success, so the next residual ablation should trade residual radius and
+penalty to recover more geometric reachability without losing shuffled-goal
+separation or task success.

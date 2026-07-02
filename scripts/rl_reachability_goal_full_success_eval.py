@@ -162,7 +162,30 @@ def _low_action(
         torch.from_numpy(condition).to(device).float(),
         deterministic=True,
     )
-    return action.cpu().numpy().astype(np.float32)
+    raw_action = action.cpu().numpy().astype(np.float32)
+    recipe = low_payload.get("recipe", {})
+    if low_payload.get("policy_mode") != "bc_residual" and recipe.get("policy_mode") != "bc_residual":
+        return raw_action
+
+    base_model = low_payload["_bc_residual_base_model"]
+    base_action_norm = low_payload["_bc_residual_action_norm"]
+    base_cond_norm = low_payload["_bc_residual_cond_norm"]
+    base_previous_norm = base_action_norm.transform(previous_action_raw)
+    base_condition = np.concatenate(
+        [
+            state,
+            goal,
+            base_previous_norm,
+            (remaining / horizon)[:, None],
+        ],
+        axis=-1,
+    ).astype(np.float32)
+    base_normalized = base_model(
+        torch.from_numpy(base_cond_norm.transform(base_condition)).to(device).float()
+    )
+    base_action = base_action_norm.inverse(base_normalized.cpu().numpy()).astype(np.float32)
+    alpha = float(recipe.get("residual_alpha", 0.1))
+    return (base_action + alpha * np.tanh(raw_action)).astype(np.float32)
 
 
 @torch.inference_mode()

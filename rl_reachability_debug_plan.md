@@ -727,6 +727,18 @@ Use the aggregated reset banks next with residual-on-BC or an explicit KL-to-BC
 objective.
 ```
 
+Run 30 update:
+
+```text
+Residual-on-BC PPO on the round-2 aggregation bank reaches BC-level oracle held
+task success and keeps shuffled-goal success at zero. This validates
+residual-on-BC as the next main policy structure.
+
+The remaining gap is geometric reachability on deployed branch audits, where
+direct PPO can still be better. Next residual ablations should vary residual
+alpha and residual penalty to recover reachability without losing task success.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero

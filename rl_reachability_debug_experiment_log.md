@@ -2932,3 +2932,87 @@ the policy parameterization/constraint, especially residual-on-Phase-C-BC PPO
 or a more explicit KL-to-BC objective. The target is to preserve the Run
 28/29 deployed-state reachability gains while closing the remaining task-success
 gap to Phase-C full BC.
+
+## 2026-07-02 - Run 30: Residual-on-BC PPO on Round-2 Aggregation Bank
+
+Motivation:
+
+Run 29 showed that repeating direct-action PPO aggregation improves
+deployed-state reachability but does not improve task success. Run 30 changes
+the policy parameterization to preserve the Phase-C full BC action/contact
+manifold:
+
+```text
+action = Phase-C-BC(condition) + alpha * tanh(residual_policy(condition))
+alpha = 0.15
+residual_penalty_weight = 0.01
+```
+
+The residual policy starts near zero residual, so the initial controller is
+approximately Phase-C full BC. No online expert action labels are used.
+
+Dataset:
+
+```text
+data/rl_reachability_debug/full_reset_agg_round2_demo8_bc4_run28_4.h5
+```
+
+Round-2 aggregation-bank local result:
+
+| Metric | Run 30 initial | Run 30 trained | Run 30 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 1.9494 | 1.9028 | 12.1846 |
+| p50 terminal distance | 0.2527 | 0.2795 | 8.6451 |
+| p90 terminal distance | 3.1583 | 3.1486 | 23.9891 |
+| fraction improved | 0.8625 | 0.8708 | 0.5034 |
+| action saturation | 0.0995 | 0.0898 | 0.0668 |
+| action L2 | 0.7245 | 0.7189 | 0.7449 |
+| residual L2 | 0.0013 | 0.0294 | 0.0307 |
+
+Training-window diagnostics at the end of Run 30:
+
+| Diagnostic | Value |
+| --- | ---: |
+| mean terminal full-goal distance | 1.2088 |
+| residual L2 mean | 0.0356 |
+| residual penalty mean | 0.0005 |
+| mean return per step | 0.6447 |
+| clip fraction | 0.0358 |
+| policy KL | 0.0035 |
+| NaN count | 0 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.68 | 0.7833 | 0.7852 | 1.6737 | 0.0422 |
+| oracle | Run 30 residual-on-BC PPO | 0.73 | 0.8152 | 0.8166 | 2.7548 | 0.0513 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.4001 | 0.4002 |
+| shuffled oracle | Run 30 residual-on-BC PPO | 0.00 | 0.1299 | 0.1672 | 27.7202 | 0.3966 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.7709 | 0.9136 | 0.1579 | 1.7506 | 0.8733 |
+| Phase-C full BC | Run 29 round-2 PPO | no | 8.7709 | 0.6506 | 0.2012 | 1.3600 | 0.9415 |
+| Phase-C full BC | Run 30 residual-on-BC PPO | no | 8.7709 | 1.0805 | 0.1780 | 2.0009 | 0.8772 |
+| Run 30 residual-on-BC PPO | Phase-C full BC | no | 9.3221 | 1.2460 | 0.2036 | 2.3291 | 0.8281 |
+| Run 30 residual-on-BC PPO | Run 29 round-2 PPO | no | 9.3221 | 0.9670 | 0.2088 | 1.6343 | 0.9180 |
+| Run 30 residual-on-BC PPO | Run 30 residual-on-BC PPO | no | 9.3221 | 1.6468 | 0.2095 | 2.3214 | 0.8516 |
+
+Interpretation:
+
+Run 30 is the best full-state task-success result so far: `0.73` oracle held
+success, slightly above the Phase-C full BC baseline on the same eval bank
+(`0.68`), with shuffled-goal success at zero. This supports the hypothesis that
+the low-level should preserve BC contact behavior while learning small
+goal-conditioned corrections.
+
+However, Run 30 does not dominate Run 29 on terminal full-goal distance in the
+deployed-state branch audit. That means the earlier direct PPO policies learned
+stronger geometric reachability, while residual-on-BC preserved task-compatible
+contact behavior. The next useful experiment should try to recover more of
+Run 29's geometric reachability without losing Run 30's task success, for
+example with a larger residual radius (`alpha=0.25`) or a smaller residual
+penalty, while keeping the residual-on-BC parameterization.

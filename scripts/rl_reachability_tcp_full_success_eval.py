@@ -13,7 +13,7 @@ from tqdm import trange
 
 sys.path.append(str(Path(__file__).resolve().parent))
 
-from rl_reachability_privileged_tcp_ppo import _obs_state_np
+from rl_reachability_privileged_tcp_ppo import _load_bc_policy, _obs_state_np
 
 from hcl_poc.config import load_config
 from hcl_poc.models import MLP
@@ -39,6 +39,21 @@ def _load_rl_low(path: Path, device: torch.device) -> tuple[ScratchLowActorCriti
     ).to(device)
     agent.load_state_dict(payload["agent"])
     agent.eval()
+    recipe = payload.get("recipe", {})
+    if payload.get("policy_mode") == "bc_residual" or recipe.get("policy_mode") == "bc_residual":
+        goal_type = str(payload.get("goal_type", "tcp"))
+        bc_path = Path(
+            recipe.get(
+                "bc_prior_checkpoint",
+                "artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt",
+            )
+        )
+        (
+            payload["_bc_residual_base_model"],
+            _bc_payload,
+            payload["_bc_residual_action_norm"],
+            payload["_bc_residual_cond_norm"],
+        ) = _load_bc_policy(bc_path, goal_type, device)
     return agent, payload
 
 
