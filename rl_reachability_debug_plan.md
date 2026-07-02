@@ -742,6 +742,19 @@ address the remaining gap by improving the deployed reset distribution and the
 action/contact prior.
 ```
 
+Run 36 caution:
+
+```text
+Continuing Run 30 residual-on-BC PPO on a deployed reset bank with unfiltered
+Phase-C BC and Run 30 hierarchy rollouts does not improve the hierarchy.
+Final Run 36 reaches 0.68 oracle success and 0.53 learned-high success; the
+screened update-100 checkpoint reaches 0.72 oracle success but only 0.50
+learned-high success on the 100-episode check. Do not continue the same
+append-all-deployed-states loop. The next aggregation variant should change
+data selection or weighting, for example filtering/weighting useful successful
+deployed rollouts, while keeping a strong residual/BC action prior.
+```
+
 Run 30 update:
 
 ```text

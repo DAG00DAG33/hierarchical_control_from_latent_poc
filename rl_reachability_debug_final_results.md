@@ -375,6 +375,22 @@ The original learned-goal scale is best. Scaling targets inward or outward
 hurts both policies, so the learned-high gap is not a trivial distance-scale
 problem.
 
+Replacing the learned robot-state target with the current robot state also
+fails: learned-high success drops to `0.07` for Phase-C BC and `0.05` for Run
+30 residual-on-BC. The robot-state part of the full goal is imperfect, but it
+is important conditioning and should not be removed.
+
+The first deployed reset-bank continuation from Run 30 did not improve the
+hierarchy. Run 36 continued residual-on-BC PPO for 250 updates on a new bank
+with 8 demo batches, 4 Phase-C BC deployed batches, and 4 Run 30 deployed
+batches. Final Run 36 reached `0.68` oracle success and `0.53` learned-high
+success; the best screened intermediate checkpoint, update 100, reached `0.72`
+oracle success but only `0.50` learned-high success on the 100-episode check.
+This argues against simply appending all deployed states and continuing PPO
+with the same sampler/objective. A better aggregation variant should filter or
+weight useful/successful deployed rollouts and keep a strong contact/action
+prior.
+
 The strongest task-success result remains constrained object-pose PPO with a
 teacher-action penalty. The strongest hierarchy baseline is the corrected
 Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across

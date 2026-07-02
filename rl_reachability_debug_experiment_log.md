@@ -3278,3 +3278,57 @@ sequence. The learned-high gap is therefore not solved by object/TCP-only
 learned full goals with current robot state. The next high-level diagnostic
 should preserve robot conditioning but improve or regularize it, rather than
 remove it.
+
+## 2026-07-02 - Run 36: Iterative Deployed Reset-Bank Continuation From Run 30
+
+Purpose:
+
+Test the proposed iterative aggregation direction: continue the best
+residual-on-BC low-level from Run 30 on a new reset bank collected from actual
+learned-high hierarchy deployments. The new bank contains 8 demo batches, 4
+Phase-C full-BC deployed batches, and 4 Run 30 residual deployed batches, with
+learned-high full-state subgoals held over the option window.
+
+Training setup:
+
+```text
+dataset: data/rl_reachability_debug/full_reset_agg_round3_demo8_bc4_run30_4.h5
+init checkpoint: Run 30 residual-on-BC PPO
+policy mode: bc_residual
+residual alpha: 0.15
+residual penalty: 0.01
+updates: 250
+num envs: 4096
+reward: true full-goal progress + terminal
+```
+
+Result:
+
+| Evaluation | Phase-C full BC success | Run 30 residual success | Run 36 final success | Run 36 update-100 success |
+| --- | ---: | ---: | ---: | ---: |
+| oracle full-state subgoal | 0.68-0.75 | 0.73 | 0.68 | 0.72 |
+| learned-high full-state subgoal | 0.59-0.62 | 0.55 | 0.53 | 0.50 |
+| shuffled learned | 0.00 | 0.00 | 0.00 | 0.00 |
+
+Checkpoint screen:
+
+```text
+50-episode learned-high screen:
+update 25:  0.52
+update 50:  0.44
+update 100: 0.60
+update 150: 0.52
+update 200: 0.58
+
+The apparent update-100 improvement did not survive the 100-episode check.
+```
+
+Interpretation:
+
+The naive deployed reset-bank continuation does not improve the hierarchy.
+It preserves goal sensitivity, but it underperforms Phase-C BC and does not
+beat Run 30. Do not blindly add another aggregation round with the same sampler
+and objective. The next version would need to change the data selection or
+weighting, for example filtering/weighting successful BC deployments or adding
+a stronger contact/action prior, rather than simply appending all deployed
+states.
