@@ -658,11 +658,13 @@ low-level reaches high-level-generated full-state subgoals from those deployed
 states better than Phase-C BC, and whether it preserves task-compatible contact
 actions.
 
-### Iterative reset-bank aggregation
+### Iterative deployed reset-bank aggregation
 
-If a static reset mixture with BC warm start or BC-prior regularization still
-trails the Phase-C BC baseline, move to an iterative dataset aggregation loop.
-This is the preferred next branch after Run 26.
+If the learned-high results are still poor after the current residual/BC-prior
+runs, move to an iterative deployed reset-bank loop. The point is to train the
+low level on the state distribution produced by the actual hierarchy, not only
+on expert/demo local windows. This is now the preferred fallback branch after
+the Run 30-35 diagnostics.
 
 Algorithm:
 
@@ -670,14 +672,16 @@ Algorithm:
 initial bank:
   expert/demo local windows
   Phase-C BC hierarchy deployed trajectories with modest task success
+  latest useful PPO/residual hierarchy deployed trajectories
 
 round i:
-  train or continue BC-structured PPO on current reset bank
+  continue pretrained BC-structured PPO on current reset bank
   deploy the learned low level inside the hierarchy with the learned high-level policy
   record the resulting hierarchy rollout states
   record the held full-state subgoals produced by the hierarchy
   add these learned-policy deployed states to the reset bank
   continue training from the current PPO checkpoint
+  repeat deploy -> record -> mix -> continue while success or deployed-state reachability improves
 ```
 
 Important constraint:
@@ -692,11 +696,11 @@ Recommended first aggregation run:
 
 | Component | Setting |
 | --- | --- |
-| base checkpoint | latest BC-structured PPO, e.g. Run 26 |
-| bank round 0 | demo windows + Phase-C BC deployed states + Run 26 deployed states |
-| target source | learned high-level full-state subgoal |
-| continuation | load Run 26 checkpoint and normalizers |
-| regularization | keep BC-prior loss; test residual-on-BC later |
+| base checkpoint | latest best BC-structured PPO, currently Run 30 residual-on-BC unless superseded |
+| bank round 0 | demo windows + successful Phase-C BC deployed states + latest PPO/residual deployed states |
+| target source | learned high-level full-state subgoal held for the option window |
+| continuation | load the chosen PPO checkpoint and normalizers; do not restart from random |
+| regularization | keep residual-on-BC or strong BC-prior so contact behavior is preserved |
 | evaluation | held oracle subgoals, learned-high subgoals, deployed-state branch reachability, shuffled goals |
 
 Stop criteria for an aggregation round:
@@ -725,6 +729,17 @@ reachability but does not improve held-subgoal task success over Run 28.
 Do not keep repeating the same direct-action PPO aggregation loop.
 Use the aggregated reset banks next with residual-on-BC or an explicit KL-to-BC
 objective.
+```
+
+Run 35 update:
+
+```text
+Replacing the learned robot target with the current robot state collapses
+learned-high success. The full-goal robot component is important conditioning,
+even though learned-vs-oracle error is largest there. Do not switch to an
+object/TCP-only learned full-goal target. Preserve full-state conditioning and
+address the remaining gap by improving the deployed reset distribution and the
+action/contact prior.
 ```
 
 Run 30 update:
