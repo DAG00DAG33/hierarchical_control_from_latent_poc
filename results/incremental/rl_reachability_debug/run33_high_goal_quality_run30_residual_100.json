@@ -1,0 +1,71 @@
+{
+  "episodes": 100,
+  "high_checkpoint": "artifacts/incremental/rl_reachability_debug/full_goal_high_predictor/seed0/predictor.pt",
+  "high_decisions": 728,
+  "high_decisions_per_episode": 7.28,
+  "horizon": 10,
+  "learned_current_distance": {
+    "count": 728,
+    "max": 52.40617752075195,
+    "mean": 7.719694137573242,
+    "p50": 4.90631103515625,
+    "p90": 18.967615127563477,
+    "p99": 40.37617492675781
+  },
+  "learned_vs_oracle": {
+    "full_metric_l2": {
+      "count": 728,
+      "max": 7.403975009918213,
+      "mean": 0.9171196222305298,
+      "p50": 0.6806530952453613,
+      "p90": 1.839573621749878,
+      "p99": 3.6556270122528076
+    },
+    "object_pose_l2": {
+      "count": 728,
+      "max": 1.337074875831604,
+      "mean": 0.0919046700000763,
+      "p50": 0.05117420107126236,
+      "p90": 0.14626063406467438,
+      "p99": 1.0364532470703125
+    },
+    "robot_l2": {
+      "count": 728,
+      "max": 7.40385103225708,
+      "mean": 0.9057408571243286,
+      "p50": 0.6786290407180786,
+      "p90": 1.8330116271972656,
+      "p99": 3.6553282737731934
+    },
+    "tcp_l2": {
+      "count": 728,
+      "max": 0.26734498143196106,
+      "mean": 0.026660647243261337,
+      "p50": 0.016237692907452583,
+      "p90": 0.06130116060376167,
+      "p99": 0.17342843115329742
+    }
+  },
+  "low_kind": "run30_residual_bc_ppo",
+  "low_path": "results/incremental/rl_reachability_debug/run30_full_residual_bc_agg_round2_alpha015_u250/privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt",
+  "num_envs": 10,
+  "oracle_current_distance": {
+    "count": 728,
+    "max": 77.84548950195312,
+    "mean": 8.710192680358887,
+    "p50": 5.690428733825684,
+    "p90": 19.864063262939453,
+    "p99": 46.87075424194336
+  },
+  "run": "rl_reachability_full_high_goal_quality_audit",
+  "seed_start": 2380000,
+  "selected_goal_initial_distance": {
+    "count": 728,
+    "max": 52.40617752075195,
+    "mean": 7.719694137573242,
+    "p50": 4.90631103515625,
+    "p90": 18.967615127563477,
+    "p99": 40.37617492675781
+  },
+  "update_period": 10
+}

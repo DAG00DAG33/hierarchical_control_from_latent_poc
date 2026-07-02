@@ -1,0 +1,71 @@
+{
+  "episodes": 100,
+  "high_checkpoint": "artifacts/incremental/rl_reachability_debug/full_goal_high_predictor/seed0/predictor.pt",
+  "high_decisions": 692,
+  "high_decisions_per_episode": 6.92,
+  "horizon": 10,
+  "learned_current_distance": {
+    "count": 692,
+    "max": 53.099143981933594,
+    "mean": 8.22712516784668,
+    "p50": 5.458807945251465,
+    "p90": 19.08760643005371,
+    "p99": 44.095096588134766
+  },
+  "learned_vs_oracle": {
+    "full_metric_l2": {
+      "count": 692,
+      "max": 7.403975009918213,
+      "mean": 0.9267809987068176,
+      "p50": 0.6534932851791382,
+      "p90": 1.8513306379318237,
+      "p99": 4.187055587768555
+    },
+    "object_pose_l2": {
+      "count": 692,
+      "max": 1.7851403951644897,
+      "mean": 0.10803432017564774,
+      "p50": 0.04706745594739914,
+      "p90": 0.15201589465141296,
+      "p99": 1.223130702972412
+    },
+    "robot_l2": {
+      "count": 692,
+      "max": 7.40385103225708,
+      "mean": 0.9105919599533081,
+      "p50": 0.6482241153717041,
+      "p90": 1.8272215127944946,
+      "p99": 4.159142971038818
+    },
+    "tcp_l2": {
+      "count": 692,
+      "max": 0.5140923261642456,
+      "mean": 0.029527295380830765,
+      "p50": 0.014884802512824535,
+      "p90": 0.061713602393865585,
+      "p99": 0.26755326986312866
+    }
+  },
+  "low_kind": "phase_c_full_bc",
+  "low_path": "artifacts/incremental/pre_rl/phase_c/k10/seed0/time_conditioned_full.pt",
+  "num_envs": 10,
+  "oracle_current_distance": {
+    "count": 692,
+    "max": 54.582481384277344,
+    "mean": 8.788914680480957,
+    "p50": 5.991201400756836,
+    "p90": 19.808961868286133,
+    "p99": 44.26448059082031
+  },
+  "run": "rl_reachability_full_high_goal_quality_audit",
+  "seed_start": 2380000,
+  "selected_goal_initial_distance": {
+    "count": 692,
+    "max": 53.099143981933594,
+    "mean": 8.22712516784668,
+    "p50": 5.458807945251465,
+    "p90": 19.08760643005371,
+    "p99": 44.095096588134766
+  },
+  "update_period": 10
+}

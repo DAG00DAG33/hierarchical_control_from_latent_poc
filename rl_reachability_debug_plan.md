@@ -770,6 +770,17 @@ high-level target quality/deployment compatibility. Do not claim full hierarchy
 improvement from oracle-subgoal success alone.
 ```
 
+Run 33 update:
+
+```text
+Learned high-level targets are close to oracle targets in object/TCP components
+but differ mostly in robot-state dimensions, and they are closer/easier than
+oracle t+10 targets on average. The learned-high gap is probably not gross
+object/TCP prediction error. Next work should test target conservatism,
+robot-configuration conditioning, or contact compatibility under learned
+subgoals.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero

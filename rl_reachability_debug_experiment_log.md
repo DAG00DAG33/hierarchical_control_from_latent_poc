@@ -3157,3 +3157,53 @@ hold full-goal distance suggests that the learned high-level targets and the
 task/contact behavior are not fully aligned. The remaining bottleneck is no
 longer just local oracle-subgoal execution; it is the learned-high deployment
 interface.
+
+## 2026-07-02 - Run 33: Learned-High Target-Quality Audit
+
+Purpose:
+
+The learned-high success result raised a question: are learned high-level
+targets grossly wrong, or are they plausible targets that still interact poorly
+with the low-level/contact dynamics? Run 33 compares the learned high-level
+full-state target against an oracle `t+10` future target at the same high-level
+decision states.
+
+Method:
+
+For each high-level decision in a learned-high rollout:
+
+```text
+learned target = high-level predictor output
+oracle target = teacher branch from the same simulator state for k=10
+compare learned target to oracle target in full-goal metric space
+```
+
+This audit reports target quality only. Task success is taken from the
+separate learned-high success evaluator.
+
+Target-quality summary:
+
+| Rollout policy | Decisions / ep. | Learned current dist. | Oracle current dist. | Learned-vs-oracle full L2 | Object-pose L2 | TCP L2 | Robot L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | 6.92 | 8.2271 | 8.7889 | 0.9268 | 0.1080 | 0.0295 | 0.9106 |
+| Run 30 residual-on-BC PPO | 7.28 | 7.7197 | 8.7102 | 0.9171 | 0.0919 | 0.0267 | 0.9057 |
+
+P90 learned-vs-oracle errors:
+
+| Rollout policy | Full L2 | Object-pose L2 | TCP L2 | Robot L2 |
+| --- | ---: | ---: | ---: | ---: |
+| Phase-C full BC | 1.8513 | 0.1520 | 0.0617 | 1.8272 |
+| Run 30 residual-on-BC PPO | 1.8396 | 0.1463 | 0.0613 | 1.8330 |
+
+Interpretation:
+
+The learned high-level targets are not grossly wrong for the task-relevant
+object/TCP components. The learned targets are also closer to the current state
+than the oracle `t+10` targets on average, so the high-level predictor appears
+to be conservative/easier rather than wildly overreaching. Most learned-vs-oracle
+error is in robot-state dimensions.
+
+This supports a narrower diagnosis: the remaining learned-high gap is likely
+not simply high-level object/TCP target quality. It may be target conservatism,
+robot-configuration mismatch, or a contact/action compatibility issue when the
+low-level follows learned rather than oracle subgoals.

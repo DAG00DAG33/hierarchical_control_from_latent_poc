@@ -349,6 +349,19 @@ This separates the current bottlenecks: residual-on-BC solves oracle-subgoal
 execution at BC-level success, but learned-high deployment still favors the
 Phase-C BC baseline.
 
+Learned-high target-quality audit:
+
+| Rollout policy | Learned current dist. | Oracle current dist. | Learned-vs-oracle full L2 | Object-pose L2 | TCP L2 | Robot L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | 8.2271 | 8.7889 | 0.9268 | 0.1080 | 0.0295 | 0.9106 |
+| Run 30 residual-on-BC PPO | 7.7197 | 8.7102 | 0.9171 | 0.0919 | 0.0267 | 0.9057 |
+
+The learned high-level targets are not grossly wrong in object/TCP space and
+are actually closer to the current state than oracle `t+10` targets on average.
+Most learned-vs-oracle error is robot-state error. The learned-high gap is
+therefore more likely target conservatism, robot-configuration mismatch, or
+contact/action compatibility under learned subgoals.
+
 The strongest task-success result remains constrained object-pose PPO with a
 teacher-action penalty. The strongest hierarchy baseline is the corrected
 Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across
