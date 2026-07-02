@@ -2861,3 +2861,74 @@ the aggregation bank.
 The policy is still below Phase-C full BC on task success, so the iterative
 reset-bank direction should continue, but with the stronger BC prior (or a
 residual-on-BC formulation) rather than the weaker Run 27 objective.
+
+## 2026-07-02 - Run 29: Iterative Aggregation Round 2 With Stronger BC Prior
+
+Motivation:
+
+Run 28 was the best full-state PPO result so far, so Run 29 applies one more
+iteration of the user's proposed aggregation loop: collect states from deploying
+Run 28 in the hierarchy, add those states to a new reset bank, and continue
+training from Run 28 with `bc_prior_weight=5.0`.
+
+Dataset:
+
+```text
+data/rl_reachability_debug/full_reset_agg_round2_demo8_bc4_run28_4.h5
+```
+
+Mixture:
+
+| Source | Batches |
+| --- | ---: |
+| original demo/teacher local windows | 8 |
+| Phase-C full BC deployed hierarchy states | 4 |
+| Run 28 BC-prior-5 PPO deployed hierarchy states | 4 |
+
+Round-2 aggregation-bank local result:
+
+| Metric | Run 29 initial | Run 29 trained | Run 29 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 1.6456 | 1.6893 | 6.9968 |
+| p50 terminal distance | 0.3542 | 0.3432 | 5.0104 |
+| p90 terminal distance | 2.6809 | 2.7063 | 13.7057 |
+| fraction improved | 0.9336 | 0.9424 | 0.6466 |
+| action saturation | 0.0799 | 0.0920 | 0.0540 |
+| action L2 | 0.6588 | 0.6520 | 0.6311 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.72 | 0.8103 | 0.8118 | 1.6403 | 0.0404 |
+| oracle | Run 29 iterative aggregation round-2 PPO | 0.25 | 0.4739 | 0.4810 | 1.7237 | 0.1032 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.4139 | 0.4002 |
+| shuffled oracle | Run 29 iterative aggregation round-2 PPO | 0.00 | 0.1361 | 0.1564 | 11.2801 | 0.3579 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.8953 | 0.9622 | 0.1676 | 1.8047 | 0.8824 |
+| Phase-C full BC | Run 28 BC-prior-5 PPO | no | 8.8953 | 0.8528 | 0.2410 | 1.6351 | 0.9070 |
+| Phase-C full BC | Run 29 round-2 PPO | no | 8.8953 | 0.7233 | 0.2241 | 1.4255 | 0.9526 |
+| Run 29 round-2 PPO | Phase-C full BC | no | 8.0961 | 2.7721 | 0.5745 | 5.2880 | 0.7390 |
+| Run 29 round-2 PPO | Run 28 BC-prior-5 PPO | no | 8.0961 | 1.5585 | 0.5494 | 2.7619 | 0.8419 |
+| Run 29 round-2 PPO | Run 29 round-2 PPO | no | 8.0961 | 1.4397 | 0.4837 | 2.3993 | 0.8914 |
+
+Interpretation:
+
+Round 2 improves deployed-state branch reachability over Run 28, but it does
+not improve held-subgoal task success (`0.25 -> 0.25`) and worsens
+teacher-action MAE (`0.0870 -> 0.1032`). This suggests the iterative reset-bank
+mechanism is useful for distribution coverage, but repeating it with the same
+direct PPO objective is now saturating.
+
+Next action:
+
+Do not keep adding aggregation rounds with the same direct-action PPO objective.
+The next useful experiment should keep the aggregated reset banks but change
+the policy parameterization/constraint, especially residual-on-Phase-C-BC PPO
+or a more explicit KL-to-BC objective. The target is to preserve the Run
+28/29 deployed-state reachability gains while closing the remaining task-success
+gap to Phase-C full BC.

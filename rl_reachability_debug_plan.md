@@ -717,6 +717,16 @@ If success regresses, the next round must strengthen the action/contact
 constraint before adding more self-generated reset states.
 ```
 
+Run 29 caution:
+
+```text
+With bc_prior_weight=5.0, a second aggregation round improves deployed-state
+reachability but does not improve held-subgoal task success over Run 28.
+Do not keep repeating the same direct-action PPO aggregation loop.
+Use the aggregated reset banks next with residual-on-BC or an explicit KL-to-BC
+objective.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero
