@@ -99,6 +99,28 @@ def _full_goal_to_pseudo_future_state(
     return future.astype(np.float32)
 
 
+def _scale_full_future_from_current(
+    current_state: np.ndarray,
+    future_state: np.ndarray,
+    scale: float,
+) -> np.ndarray:
+    if abs(scale - 1.0) < 1e-8:
+        return np.asarray(future_state, dtype=np.float32)
+    current = np.asarray(current_state, dtype=np.float32)
+    future = np.asarray(future_state, dtype=np.float32)
+    scaled = future.copy()
+    for slc in (slice(0, 14), slice(14, 17), slice(24, 26)):
+        scaled[:, slc] = current[:, slc] + scale * (future[:, slc] - current[:, slc])
+    current_yaw = 2.0 * np.arctan2(current[:, 30], current[:, 27])
+    future_yaw = 2.0 * np.arctan2(future[:, 30], future[:, 27])
+    yaw_delta = np.arctan2(np.sin(future_yaw - current_yaw), np.cos(future_yaw - current_yaw))
+    scaled_yaw = current_yaw + scale * yaw_delta
+    scaled[:, 27:31] = 0.0
+    scaled[:, 27] = np.cos(0.5 * scaled_yaw)
+    scaled[:, 30] = np.sin(0.5 * scaled_yaw)
+    return scaled.astype(np.float32)
+
+
 @torch.inference_mode()
 def _oracle_future_state(
     config: Any,
@@ -346,6 +368,19 @@ def evaluate_policy(
                         target_future_state[replan] = selected_future_state[replan]
                     elif args.recompute_held_goal_features:
                         pseudo_future = _full_goal_to_pseudo_future_state(state, selected)
+                        pseudo_future = _scale_full_future_from_current(
+                            state,
+                            pseudo_future,
+                            float(args.learned_goal_scale),
+                        )
+                        selected = _pre_rl_phase_b_goal(
+                            state,
+                            pseudo_future,
+                            horizon,
+                            control_freq,
+                            goal_type,
+                        ).astype(np.float32)
+                        goal[replan] = selected[replan]
                         target_future_state[replan] = pseudo_future[replan]
                     selected_goal_initial_distances.extend(
                         _goal_distance(
@@ -491,6 +526,7 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=10)
     parser.add_argument("--update-period", type=int)
     parser.add_argument("--recompute-held-goal-features", action="store_true")
+    parser.add_argument("--learned-goal-scale", type=float, default=1.0)
     parser.add_argument("--high-checkpoint")
     parser.add_argument(
         "--bc-low",
@@ -522,6 +558,7 @@ def main() -> None:
         "run": "rl_reachability_debug_goal_full_success",
         "episodes_per_setting": int(args.episodes),
         "goal_type": args.goal_type,
+        "learned_goal_scale": float(args.learned_goal_scale),
         "high_checkpoint": str(args.high_checkpoint) if args.high_checkpoint else None,
         "rows": rows,
     }

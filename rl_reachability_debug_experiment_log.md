@@ -3207,3 +3207,47 @@ This supports a narrower diagnosis: the remaining learned-high gap is likely
 not simply high-level object/TCP target quality. It may be target conservatism,
 robot-configuration mismatch, or a contact/action compatibility issue when the
 low-level follows learned rather than oracle subgoals.
+
+## 2026-07-02 - Run 34: Learned-Goal Scale Sweep
+
+Purpose:
+
+Run 33 showed that learned high-level targets are closer to the current state
+than oracle `t+10` targets on average. Run 34 tests whether this is simply
+target conservatism by scaling the learned pseudo future state around the
+current state before recomputing full-goal features.
+
+Scale implementation:
+
+```text
+scale < 1.0: move learned target closer to current state
+scale = 1.0: original learned high-level target
+scale > 1.0: extrapolate learned target farther from current state
+```
+
+Learned-goal success:
+
+| Scale | Phase-C full BC success | Run 30 residual success | Phase-C selected initial dist. | Run 30 selected initial dist. |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.75 | 0.08 | 0.09 | 5.6940 | 5.5452 |
+| 1.00 | 0.62 | 0.55 | 8.6926 | 7.6579 |
+| 1.25 | 0.27 | 0.24 | 18.0280 | 18.1624 |
+| 1.50 | 0.05 | 0.07 | 40.0028 | 35.4307 |
+
+Shuffled learned-goal sanity check:
+
+| Scale | Phase-C shuffled success | Run 30 shuffled success |
+| ---: | ---: | ---: |
+| 0.75 | 0.00 | 0.00 |
+| 1.00 | 0.00 | 0.00 |
+| 1.25 | 0.02 | 0.01 |
+| 1.50 | 0.00 | 0.00 |
+
+Interpretation:
+
+Simple target scaling does not solve the learned-high gap. Scaling learned
+targets outward makes the task much harder, and scaling inward also collapses
+success. The original scale is best. This argues against a trivial
+"high-level targets are too conservative" explanation. The remaining learned
+deployment issue is more likely target semantics/contact compatibility or the
+robot-state component of the full goal.

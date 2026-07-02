@@ -362,6 +362,19 @@ Most learned-vs-oracle error is robot-state error. The learned-high gap is
 therefore more likely target conservatism, robot-configuration mismatch, or
 contact/action compatibility under learned subgoals.
 
+A learned-goal scale sweep rejects simple target conservatism as the fix:
+
+| Scale | Phase-C learned success | Run 30 learned success |
+| ---: | ---: | ---: |
+| 0.75 | 0.08 | 0.09 |
+| 1.00 | 0.62 | 0.55 |
+| 1.25 | 0.27 | 0.24 |
+| 1.50 | 0.05 | 0.07 |
+
+The original learned-goal scale is best. Scaling targets inward or outward
+hurts both policies, so the learned-high gap is not a trivial distance-scale
+problem.
+
 The strongest task-success result remains constrained object-pose PPO with a
 teacher-action penalty. The strongest hierarchy baseline is the corrected
 Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across

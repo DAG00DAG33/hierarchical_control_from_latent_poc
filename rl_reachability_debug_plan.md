@@ -781,6 +781,15 @@ robot-configuration conditioning, or contact compatibility under learned
 subgoals.
 ```
 
+Run 34 update:
+
+```text
+Simple learned-goal scaling is not the fix. Scaling learned targets inward
+(0.75) or outward (1.25, 1.5) hurts learned-high success for both Phase-C BC
+and Run 30 residual-on-BC. Keep scale=1.0; investigate goal semantics,
+robot-state conditioning, or contact compatibility instead.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero
