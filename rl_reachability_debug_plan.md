@@ -748,6 +748,15 @@ radius is better. Prefer Run 30-style small residuals, or test lower-penalty /
 staged schedules near alpha=0.15 before increasing alpha again.
 ```
 
+Run 32 update:
+
+```text
+Removing the residual penalty at alpha=0.15 does not improve reachability and
+lowers held-oracle task success relative to Run 30. Keep Run 30 as the current
+best full-state low-level policy unless a new residual schedule improves both
+task success and branch reachability.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero

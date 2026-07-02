@@ -259,6 +259,7 @@ BC-structured reset-mixture diagnostic:
 | Run 29 iterative aggregation round-2 PPO | demo + BC-deployed + Run28-deployed bank | 1.6893 | 0.25 | 1.7237 | 0.1032 |
 | Run 30 residual-on-BC PPO | round-2 bank, BC base + bounded residual | 1.9028 | 0.73 | 2.7548 | 0.0513 |
 | Run 31 residual alpha-0.25 PPO | Run 30 with larger residual radius | 2.2360 | 0.65 | 1.7816 | 0.0498 |
+| Run 32 residual no-penalty PPO | Run 30 with residual penalty removed | 1.9913 | 0.69 | 1.6898 | 0.0421 |
 
 Run 25 is the first full-state PPO variant with meaningful held-subgoal task
 recovery, and Run 26 improves it further with an explicit BC-prior loss. Run 27
@@ -270,7 +271,8 @@ deployed-state reachability in a second aggregation round, but task success is
 flat. Run 30 changes the policy parameterization to residual-on-BC and gives
 the best full-state task result so far (`0.73` oracle held success, shuffled
 success `0.00`). Run 31 increases the residual radius and recovers some branch
-reachability, but held success drops to `0.65`. The result supports the
+reachability, but held success drops to `0.65`; Run 32 removes the residual
+penalty and also underperforms Run 30. The result supports the
 reset-distribution-shift hypothesis, while also showing that reset coverage
 alone is insufficient: the PPO policy needs stronger BC/action-manifold
 structure.
@@ -304,6 +306,9 @@ Run 25 deployment-state branch reachability:
 | Run 31 residual alpha-0.25 PPO | Phase-C full BC | 1.2846 | 0.2283 | 2.5737 | 0.8438 |
 | Run 31 residual alpha-0.25 PPO | Run 30 residual-on-BC PPO | 1.3896 | 0.2424 | 2.4122 | 0.8571 |
 | Run 31 residual alpha-0.25 PPO | Run 31 residual alpha-0.25 PPO | 1.2273 | 0.2969 | 2.3063 | 0.8781 |
+| Run 32 residual no-penalty PPO | Phase-C full BC | 2.0886 | 0.2025 | 2.5489 | 0.8519 |
+| Run 32 residual no-penalty PPO | Run 30 residual-on-BC PPO | 2.3258 | 0.1971 | 2.3788 | 0.8577 |
+| Run 32 residual no-penalty PPO | Run 32 residual no-penalty PPO | 2.0907 | 0.1861 | 2.2640 | 0.8577 |
 
 Do not continue plain same-bank training as the main line. Static reset mixtures
 plus BC structure still trail BC, and the first iterative aggregation round only
@@ -343,5 +348,6 @@ improves deployed reachability but not success. The next step should use the
 aggregated reset banks with residual-on-BC. Run 30 already reaches BC-level
 task success, so the next residual ablation should trade residual radius and
 penalty carefully. Run 31 shows that simply increasing residual radius to
-`0.25` hurts task success, so smaller-radius or lower-penalty schedules are
-more promising than larger unconstrained corrections.
+`0.25` hurts task success, and Run 32 shows that removing the residual penalty
+does not recover the Run 30 win. Run 30 is the best current full-state
+low-level policy.

@@ -3070,3 +3070,55 @@ from `0.73` to `0.65`. The smaller Run 30 residual radius is the better
 task-success setting. If more reachability is needed, the next ablation should
 change the penalty or training schedule more gently instead of simply allowing
 larger residuals.
+
+## 2026-07-02 - Run 32: Residual-on-BC With No Residual Penalty
+
+Motivation:
+
+Run 31 showed that increasing residual radius to `0.25` hurts task success.
+Run 32 returns to Run 30's smaller residual radius but removes the residual
+penalty:
+
+```text
+alpha = 0.15
+residual_penalty_weight: 0.01 -> 0.0
+```
+
+Round-2 aggregation-bank local result:
+
+| Metric | Run 32 initial | Run 32 trained | Run 32 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 1.9494 | 1.9913 | 12.3200 |
+| p50 terminal distance | 0.2527 | 0.2727 | 8.6975 |
+| p90 terminal distance | 3.1583 | 3.1441 | 24.2540 |
+| fraction improved | 0.8625 | 0.8701 | 0.5009 |
+| action saturation | 0.0995 | 0.1026 | 0.0752 |
+| action L2 | 0.7245 | 0.7205 | 0.7459 |
+| residual L2 | 0.0013 | 0.0275 | 0.0292 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.70 | 0.7969 | 0.7984 | 1.4735 | 0.0397 |
+| oracle | Run 32 residual-on-BC no-penalty PPO | 0.69 | 0.7907 | 0.7916 | 1.6898 | 0.0421 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3827 | 0.4002 |
+| shuffled oracle | Run 32 residual-on-BC no-penalty PPO | 0.00 | 0.1304 | 0.1655 | 24.4013 | 0.3902 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.6750 | 0.8705 | 0.1613 | 1.7297 | 0.8353 |
+| Phase-C full BC | Run 30 residual-on-BC PPO | no | 8.6750 | 0.9644 | 0.1807 | 1.9803 | 0.8508 |
+| Phase-C full BC | Run 32 residual no-penalty PPO | no | 8.6750 | 0.8580 | 0.1781 | 1.8485 | 0.8450 |
+| Run 32 residual no-penalty PPO | Phase-C full BC | no | 9.9301 | 2.0886 | 0.2025 | 2.5489 | 0.8519 |
+| Run 32 residual no-penalty PPO | Run 30 residual-on-BC PPO | no | 9.9301 | 2.3258 | 0.1971 | 2.3788 | 0.8577 |
+| Run 32 residual no-penalty PPO | Run 32 residual no-penalty PPO | no | 9.9301 | 2.0907 | 0.1861 | 2.2640 | 0.8577 |
+
+Interpretation:
+
+Removing the residual penalty does not improve the important metrics. It lowers
+held-oracle task success relative to Run 30 (`0.73 -> 0.69`) and does not
+improve round-2 local reachability. Run 30 remains the best residual-on-BC
+setting from this set of ablations.
