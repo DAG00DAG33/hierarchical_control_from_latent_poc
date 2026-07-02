@@ -83,6 +83,22 @@ def _goals_to_targets(
     return goals
 
 
+def _full_goal_to_pseudo_future_state(
+    current_state: np.ndarray,
+    full_goal: np.ndarray,
+) -> np.ndarray:
+    future = np.asarray(current_state, dtype=np.float32).copy()
+    goal = np.asarray(full_goal, dtype=np.float32)
+    future[:, 24:26] = goal[:, 0:2]
+    yaw = np.arctan2(goal[:, 2], goal[:, 3]).astype(np.float32)
+    future[:, 14:17] = goal[:, 7:10]
+    future[:, :14] = goal[:, 13:27]
+    future[:, 27:31] = 0.0
+    future[:, 27] = np.cos(0.5 * yaw)
+    future[:, 30] = np.sin(0.5 * yaw)
+    return future.astype(np.float32)
+
+
 @torch.inference_mode()
 def _oracle_future_state(
     config: Any,
@@ -239,10 +255,14 @@ def evaluate_policy(
     hold_goal_distances: list[float] = []
     selected_goal_initial_distances: list[float] = []
     high_decisions = 0
-    if args.recompute_held_goal_features and goal_source in {"learned", "shuffled_learned"}:
+    if (
+        args.recompute_held_goal_features
+        and goal_source in {"learned", "shuffled_learned"}
+        and goal_type != "full"
+    ):
         raise ValueError(
-            "--recompute-held-goal-features currently supports oracle/shuffled_oracle "
-            "goal sources, where the evaluator has the full target future state."
+            "--recompute-held-goal-features with learned high-level goals is only "
+            "implemented for full goals"
         )
     progress = trange(args.episodes, desc=f"{low_kind} {goal_type} {goal_source}")
     try:
@@ -324,6 +344,9 @@ def evaluate_policy(
                     goal[replan] = selected[replan]
                     if goal_source in {"oracle", "shuffled_oracle"}:
                         target_future_state[replan] = selected_future_state[replan]
+                    elif args.recompute_held_goal_features:
+                        pseudo_future = _full_goal_to_pseudo_future_state(state, selected)
+                        target_future_state[replan] = pseudo_future[replan]
                     selected_goal_initial_distances.extend(
                         _goal_distance(
                             state[replan],

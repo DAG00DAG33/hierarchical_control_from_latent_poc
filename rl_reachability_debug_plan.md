@@ -757,6 +757,19 @@ best full-state low-level policy unless a new residual schedule improves both
 task success and branch reachability.
 ```
 
+Learned-high update:
+
+```text
+Run 30 residual-on-BC beats Phase-C BC under oracle full-state subgoals, but
+not under learned high-level subgoals. With recomputed learned full-goal
+features, Phase-C BC gets 0.68 success and Run 30 gets 0.59. Shuffled learned
+success remains zero for both.
+
+Next experiments should separate low-level oracle reachability from learned
+high-level target quality/deployment compatibility. Do not claim full hierarchy
+improvement from oracle-subgoal success alone.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero

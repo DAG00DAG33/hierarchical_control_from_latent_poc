@@ -3122,3 +3122,38 @@ Removing the residual penalty does not improve the important metrics. It lowers
 held-oracle task success relative to Run 30 (`0.73 -> 0.69`) and does not
 improve round-2 local reachability. Run 30 remains the best residual-on-BC
 setting from this set of ablations.
+
+## 2026-07-02 - Learned-High Evaluation With Recomputed Full Goals
+
+Implementation note:
+
+The held-success evaluator now supports `learned` and `shuffled_learned` goal
+sources with `--recompute-held-goal-features` for full-state goals. It converts
+the learned high-level 28D full-goal output into a pseudo future simulator
+state, then recomputes the low-level full-goal features each primitive step
+from that fixed target. This matches the reset-bank collection semantics more
+closely than the older fixed-goal-feature learned-high evaluation.
+
+Evaluation:
+
+```text
+high checkpoint:
+artifacts/incremental/rl_reachability_debug/full_goal_high_predictor/seed0/predictor.pt
+```
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Selected initial distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| learned | Phase-C time-conditioned full BC | 0.68 | 0.7735 | 0.7780 | 2.7514 | 9.0138 | 0.0714 |
+| learned | Run 30 residual-on-BC PPO | 0.59 | 0.7170 | 0.7206 | 1.6360 | 7.6895 | 0.0664 |
+| shuffled learned | Phase-C time-conditioned full BC | 0.00 | 0.1277 | 0.1749 | 17.0090 | 17.5662 | 0.3455 |
+| shuffled learned | Run 30 residual-on-BC PPO | 0.00 | 0.1264 | 0.1747 | 15.6677 | 16.0314 | 0.3506 |
+
+Interpretation:
+
+Run 30 is better than Phase-C BC under oracle subgoals, but worse under learned
+high-level subgoals (`0.59` vs `0.68`). It still shows goal sensitivity:
+shuffled learned success is zero. The lower learned-high success despite better
+hold full-goal distance suggests that the learned high-level targets and the
+task/contact behavior are not fully aligned. The remaining bottleneck is no
+longer just local oracle-subgoal execution; it is the learned-high deployment
+interface.

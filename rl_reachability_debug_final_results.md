@@ -334,6 +334,21 @@ constraint matter. TCP-only goals were a weak proxy for the desired option
 outcome. Object-pose goals improved task relevance, and full-state goals are the
 most semantically correct local reachability target so far.
 
+Corrected learned-high full-state evaluation now uses recomputed full-goal
+features by converting the learned 28D high-level output into a pseudo future
+state. On that metric, Run 30 is goal-sensitive but does not beat Phase-C BC:
+
+| Goal source | Low-level | Success | Hold full-goal dist. | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: |
+| learned | Phase-C full BC | 0.68 | 2.7514 | 0.0714 |
+| learned | Run 30 residual-on-BC PPO | 0.59 | 1.6360 | 0.0664 |
+| shuffled learned | Phase-C full BC | 0.00 | 17.0090 | 0.3455 |
+| shuffled learned | Run 30 residual-on-BC PPO | 0.00 | 15.6677 | 0.3506 |
+
+This separates the current bottlenecks: residual-on-BC solves oracle-subgoal
+execution at BC-level success, but learned-high deployment still favors the
+Phase-C BC baseline.
+
 The strongest task-success result remains constrained object-pose PPO with a
 teacher-action penalty. The strongest hierarchy baseline is the corrected
 Phase-C time-conditioned full-state BC (`0.69-0.74` oracle held success across
