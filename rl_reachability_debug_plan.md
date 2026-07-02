@@ -739,6 +739,15 @@ direct PPO can still be better. Next residual ablations should vary residual
 alpha and residual penalty to recover reachability without losing task success.
 ```
 
+Run 31 update:
+
+```text
+Increasing residual alpha from 0.15 to 0.25 recovers some deployed-state branch
+reachability but lowers held-oracle task success. Do not assume larger residual
+radius is better. Prefer Run 30-style small residuals, or test lower-penalty /
+staged schedules near alpha=0.15 before increasing alpha again.
+```
+
 ---
 
 ## Phase 5: Full Visual/VAE PPO From Zero

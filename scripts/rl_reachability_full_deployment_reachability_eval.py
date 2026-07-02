@@ -73,6 +73,10 @@ POLICY_PATH_DEFAULTS = {
         "results/incremental/rl_reachability_debug/run30_full_residual_bc_agg_round2_alpha015_u250/"
         "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
     ),
+    "run31_residual_bc_alpha025_ppo": (
+        "results/incremental/rl_reachability_debug/run31_full_residual_bc_agg_round2_alpha025_u250/"
+        "privileged_full_ppo_progress_terminal_n4096_seed0/latest.pt"
+    ),
 }
 
 
@@ -436,6 +440,7 @@ def main() -> None:
     parser.add_argument("--run28-low", default=POLICY_PATH_DEFAULTS["run28_iterative_agg_bc_prior5_ppo"])
     parser.add_argument("--run29-low", default=POLICY_PATH_DEFAULTS["run29_iterative_agg2_bc_prior5_ppo"])
     parser.add_argument("--run30-low", default=POLICY_PATH_DEFAULTS["run30_residual_bc_ppo"])
+    parser.add_argument("--run31-low", default=POLICY_PATH_DEFAULTS["run31_residual_bc_alpha025_ppo"])
     parser.add_argument(
         "--output",
         default="results/incremental/rl_reachability_debug/run21_full_deployment_reachability_512.json",
@@ -454,6 +459,7 @@ def main() -> None:
         "run28_iterative_agg_bc_prior5_ppo": Path(args.run28_low),
         "run29_iterative_agg2_bc_prior5_ppo": Path(args.run29_low),
         "run30_residual_bc_ppo": Path(args.run30_low),
+        "run31_residual_bc_alpha025_ppo": Path(args.run31_low),
     }
     rows = []
     for collector_policy in args.collector_policies:

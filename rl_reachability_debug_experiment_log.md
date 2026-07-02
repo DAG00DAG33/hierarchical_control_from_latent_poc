@@ -3016,3 +3016,57 @@ contact behavior. The next useful experiment should try to recover more of
 Run 29's geometric reachability without losing Run 30's task success, for
 example with a larger residual radius (`alpha=0.25`) or a smaller residual
 penalty, while keeping the residual-on-BC parameterization.
+
+## 2026-07-02 - Run 31: Residual-on-BC With Larger Residual Radius
+
+Motivation:
+
+Run 30 reached BC-level task success but did not dominate direct PPO on
+deployed-state geometric reachability. Run 31 keeps the same round-2
+aggregation bank and residual penalty, but increases the residual radius:
+
+```text
+alpha: 0.15 -> 0.25
+residual_penalty_weight: 0.01
+```
+
+Round-2 aggregation-bank local result:
+
+| Metric | Run 31 initial | Run 31 trained | Run 31 shuffled |
+| --- | ---: | ---: | ---: |
+| terminal full-goal distance | 1.9132 | 2.2360 | 11.9395 |
+| p50 terminal distance | 0.2519 | 0.3048 | 8.4822 |
+| p90 terminal distance | 3.1179 | 3.5195 | 23.6102 |
+| fraction improved | 0.8638 | 0.8676 | 0.5081 |
+| action saturation | 0.1026 | 0.0621 | 0.0548 |
+| action L2 | 0.7244 | 0.7119 | 0.7390 |
+| residual L2 | 0.0022 | 0.0435 | 0.0486 |
+
+Corrected held-target oracle rollout:
+
+| Goal source | Low-level policy | Success | Final reward | Max reward | Hold full-goal distance | Teacher action MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| oracle | Phase-C time-conditioned full BC | 0.73 | 0.8159 | 0.8175 | 1.6519 | 0.0430 |
+| oracle | Run 31 residual-on-BC alpha-0.25 PPO | 0.65 | 0.7635 | 0.7648 | 1.7816 | 0.0498 |
+| shuffled oracle | Phase-C time-conditioned full BC | 0.00 | 0.1266 | 0.1649 | 26.3897 | 0.4002 |
+| shuffled oracle | Run 31 residual-on-BC alpha-0.25 PPO | 0.00 | 0.1230 | 0.1621 | 24.2242 | 0.4022 |
+
+Open-loop deployed-state terminal full-goal distance:
+
+| Collector rollout | Candidate branch | Shuffled | Initial dist. | Terminal dist. | P50 | P90 | Improved |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase-C full BC | Phase-C full BC | no | 8.7782 | 0.9490 | 0.1741 | 1.7580 | 0.8660 |
+| Phase-C full BC | Run 30 residual-on-BC PPO | no | 8.7782 | 1.1371 | 0.1825 | 2.0638 | 0.8602 |
+| Phase-C full BC | Run 31 residual alpha-0.25 PPO | no | 8.7782 | 0.8724 | 0.1867 | 1.8268 | 0.8621 |
+| Run 31 residual alpha-0.25 PPO | Phase-C full BC | no | 8.3151 | 1.2846 | 0.2283 | 2.5737 | 0.8438 |
+| Run 31 residual alpha-0.25 PPO | Run 30 residual-on-BC PPO | no | 8.3151 | 1.3896 | 0.2424 | 2.4122 | 0.8571 |
+| Run 31 residual alpha-0.25 PPO | Run 31 residual alpha-0.25 PPO | no | 8.3151 | 1.2273 | 0.2969 | 2.3063 | 0.8781 |
+
+Interpretation:
+
+Increasing `alpha` to `0.25` recovers some deployed-state branch reachability
+relative to Run 30, but it loses the main win: held-oracle task success drops
+from `0.73` to `0.65`. The smaller Run 30 residual radius is the better
+task-success setting. If more reachability is needed, the next ablation should
+change the penalty or training schedule more gently instead of simply allowing
+larger residuals.
