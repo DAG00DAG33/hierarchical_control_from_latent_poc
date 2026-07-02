@@ -368,6 +368,8 @@ def evaluate_policy(
                         target_future_state[replan] = selected_future_state[replan]
                     elif args.recompute_held_goal_features:
                         pseudo_future = _full_goal_to_pseudo_future_state(state, selected)
+                        if args.learned_robot_target_mode == "current":
+                            pseudo_future[:, :14] = state[:, :14]
                         pseudo_future = _scale_full_future_from_current(
                             state,
                             pseudo_future,
@@ -527,6 +529,11 @@ def main() -> None:
     parser.add_argument("--update-period", type=int)
     parser.add_argument("--recompute-held-goal-features", action="store_true")
     parser.add_argument("--learned-goal-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--learned-robot-target-mode",
+        choices=["predicted", "current"],
+        default="predicted",
+    )
     parser.add_argument("--high-checkpoint")
     parser.add_argument(
         "--bc-low",
@@ -559,6 +566,7 @@ def main() -> None:
         "episodes_per_setting": int(args.episodes),
         "goal_type": args.goal_type,
         "learned_goal_scale": float(args.learned_goal_scale),
+        "learned_robot_target_mode": str(args.learned_robot_target_mode),
         "high_checkpoint": str(args.high_checkpoint) if args.high_checkpoint else None,
         "rows": rows,
     }

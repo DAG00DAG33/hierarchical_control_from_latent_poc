@@ -3251,3 +3251,30 @@ success. The original scale is best. This argues against a trivial
 "high-level targets are too conservative" explanation. The remaining learned
 deployment issue is more likely target semantics/contact compatibility or the
 robot-state component of the full goal.
+
+## 2026-07-02 - Run 35: Learned Full Goal With Current Robot Target
+
+Purpose:
+
+Run 33 showed that learned-vs-oracle target error is dominated by robot-state
+dimensions. Run 35 tests whether the learned robot target is harmful by keeping
+the learned object/TCP target but replacing the robot part of the pseudo future
+state with the current robot state.
+
+Result:
+
+| Robot target mode | Low-level policy | Learned success | Final reward | Hold full-goal distance | Selected initial distance |
+| --- | --- | ---: | ---: | ---: | ---: |
+| predicted | Phase-C full BC | 0.62 | 0.7334 | 2.7721 | 8.6926 |
+| predicted | Run 30 residual-on-BC PPO | 0.55 | 0.6876 | 1.6906 | 7.6579 |
+| current | Phase-C full BC | 0.07 | 0.2567 | 14.3458 | 0.8046 |
+| current | Run 30 residual-on-BC PPO | 0.05 | 0.2436 | 13.5125 | 0.8465 |
+
+Interpretation:
+
+Dropping the learned robot target is much worse. The robot-state component may
+be imperfect, but it carries important conditioning for the low-level action
+sequence. The learned-high gap is therefore not solved by object/TCP-only
+learned full goals with current robot state. The next high-level diagnostic
+should preserve robot conditioning but improve or regularize it, rather than
+remove it.
